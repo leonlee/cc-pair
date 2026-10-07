@@ -13,8 +13,10 @@ model turns:
 - If you are Claude Code in an interactive session: run `pair wait --as {{AGENT}} --timeout 3600` as
   a background command (`run_in_background: true`) and end your turn. You'll be resumed when it exits.
   Then read its output.
-- If you are Codex: run `pair wait --as {{AGENT}} --timeout 3600`, and check on it with the longest
-  wait window your runtime allows.
+- If you are Codex: run one `pair wait` at a time and await its completion as your tools and
+  instructions allow: `pair wait --as {{AGENT}} --timeout <seconds>`, with the timeout just under any
+  wait cap in your instructions (for example, `--timeout 55` if waits must stay under 60 seconds).
+  Re-run it on exit 2.
 - Otherwise, including headless `claude -p` or when background commands are unavailable: run
   `pair wait --as {{AGENT}}` in the foreground with a shell timeout above 600 seconds. It gives up
   after 540 seconds by default.
