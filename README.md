@@ -74,12 +74,14 @@ that were already open so they load the new instructions and sandbox settings.
 
 ## Commands
 
-The agents run these themselves. You only need `init` and `status`.
+The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`, `history` and `clean`.
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
 pair wait --as <claude|codex> [--timeout seconds]   # exit 2 = nothing yet, run again
 pair status
+pair history [thread-id]   # list finished threads, or print one (any unique part of its id)
+pair clean --keep N        # delete all but the N newest finished threads
 pair init
 ```
 

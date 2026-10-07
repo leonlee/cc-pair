@@ -54,6 +54,10 @@ acting returns the same message, because X still owes a reply. If the thread alr
 messages, `wait` also lists their files. An agent that lost its context, for example after a
 restart, can then read the history instead of seeing only "F1 fixed".
 
+Finished threads stay in `archive/` until you delete them. `pair history` lists them, newest first,
+and `pair history <id>` prints one transcript. `pair clean --keep N` deletes all but the N newest.
+The flag is required, so a bare `clean` deletes nothing, and it never touches active threads.
+
 ## Usage
 
 ```
@@ -69,6 +73,8 @@ terminal, finish a task and say "ask for review".
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
 pair wait --as <agent> [--timeout s]
 pair status
+pair history [thread-id]
+pair clean --keep N
 pair init
 ```
 

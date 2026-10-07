@@ -20,7 +20,8 @@ model turns:
   after 540 seconds by default.
 
 `pair wait` prints only the newest message. If it lists earlier messages that aren't in your context
-(for example, after a restart), read those files before acting.
+(for example, after a restart), read those files before acting. To see a thread that has already
+finished, such as an approval you missed, run `pair history`, then `pair history <id>`.
 
 If `pair wait` exits with code 2 ("no message yet"), start it again. That isn't an error. If it ends
 any other way (cancelled by you or the user, or failed), don't restart it. Tell the user what happened.

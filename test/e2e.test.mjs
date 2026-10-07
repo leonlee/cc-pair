@@ -189,3 +189,77 @@ test("wait survives the thread being archived between reading it and printing it
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /earlier in this thread[^\n]*001-request\.md 002-review\.md ==/);
 });
+
+test("history lists and shows finished threads, and clean keeps only the newest", () => {
+  const { run, ok } = sandbox();
+  assert.match(ok(["history"]), /no finished threads yet/);
+  for (const n of [1, 2, 3]) {
+    ok(["send", "request", "--as", "claude", "-"], `## Summary\nchange ${n}`);
+    ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], `LGTM ${n}`);
+    ok(["wait", "--as", "claude", "--timeout", "1"]);
+  }
+  const lines = ok(["history"]).trim().split("\n");
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /claude-to-codex  approved  2 messages  change 3$/, "newest first, with the request summary");
+
+  const oldestId = lines[2].split("  ")[0];
+  const transcript = ok(["history", oldestId.slice(-6)]);
+  assert.match(transcript, /== thread .* approved ==[\s\S]*request from claude[\s\S]*change 1[\s\S]*verdict approve[\s\S]*LGTM 1/);
+  assert.match(run(["history", "nope"]).out, /no finished thread matches "nope"/);
+  assert.match(run(["history", "Z-"]).out, /3 finished threads match/);
+
+  ok(["send", "request", "--as", "codex", "-"], "still open");
+  assert.match(run(["clean"]).out, /clean needs --keep N/);
+  for (const bad of ["--keep=-1", "--keep=", "--keep= ", "--keep=1.5", "--keep=Infinity"]) {
+    assert.match(run(["clean", bad]).out, /clean needs --keep N/, bad);
+  }
+  assert.equal(ok(["history"]).trim().split("\n").length, 3, "rejected values delete nothing");
+  assert.match(ok(["clean", "--keep", "1"]), /removed 2 finished thread\(s\)/);
+  assert.match(ok(["history"]), /^\S+  claude-to-codex  approved  2 messages  change 3\n$/);
+  assert.match(ok(["status"]), /codex-to-claude: awaiting-review/, "clean never touches open threads");
+});
+
+test("history tolerates a thread removed by clean after the archive was listed", () => {
+  const { root, env, ok } = sandbox();
+  for (const n of [1, 2, 3]) {
+    ok(["send", "request", "--as", "claude", "-"], `## Summary\nchange ${n}`);
+    ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+    ok(["wait", "--as", "claude", "--timeout", "1"]);
+  }
+  const removedId = ok(["history"]).trim().split("\n")[2].split("  ")[0];
+
+  // Simulates a concurrent `pair clean`: the archive listing succeeds, then one listed thread vanishes.
+  const hook = join(root, "clean-after-listing.mjs");
+  writeFileSync(hook, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    import { join } from "node:path";
+    const original = fs.readdirSync;
+    fs.readdirSync = function (path, ...rest) {
+      const entries = original.call(this, path, ...rest);
+      if (String(path).endsWith("/archive")) {
+        for (const entry of entries) {
+          if (String(entry.name ?? entry).includes(process.env.REMOVE_ID)) {
+            fs.rmSync(join(String(path), String(entry.name ?? entry)), { recursive: true, force: true });
+          }
+        }
+      }
+      return entries;
+    };
+    syncBuiltinESMExports();
+  `);
+  const withHook = (args) => spawnSync("node", ["--import", hook, CLI, ...args], { cwd: root, env: { ...env, REMOVE_ID: removedId }, encoding: "utf8" });
+
+  const listing = withHook(["history"]);
+  assert.equal(listing.status, 0, listing.stderr);
+  assert.equal(listing.stdout.trim().split("\n").length, 2);
+  assert.ok(!listing.stdout.includes(removedId));
+
+  ok(["send", "request", "--as", "claude", "-"], "## Summary\nchange 4");
+  ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+  ok(["wait", "--as", "claude", "--timeout", "1"]);
+  const fourth = ok(["history"]).trim().split("\n")[0].split("  ")[0];
+  const shown = spawnSync("node", ["--import", hook, CLI, "history", fourth.slice(-6)], { cwd: root, env: { ...env, REMOVE_ID: fourth }, encoding: "utf8" });
+  assert.equal(shown.status, 1);
+  assert.match(shown.stderr, /^pair: finished thread .* was removed while reading it/);
+});

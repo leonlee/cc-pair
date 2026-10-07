@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -22,6 +22,8 @@ const DEFAULT_WAIT_SECONDS = 540; // stays under Claude Code's 10-minute Bash ca
 const POLL_MS = 1000;
 const EXIT_TIMEOUT = 2;
 const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
+// archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
+const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated)$/;
 
 interface Message {
   file: string;
@@ -163,16 +165,20 @@ function readMessage(path: string, thread: Thread): Message {
   return { file: path, from, type, round, verdict, status, body };
 }
 
+function readThread(dir: string, thread: Thread): Message[] {
+  return readdirSync(dir)
+    .filter((name) => MESSAGE_FILE.test(name))
+    .sort()
+    .map((name) => readMessage(join(dir, name), thread));
+}
+
 function listMessages(thread: Thread): Message[] {
   const dir = currentThreadDir(thread);
   if (!dir) {
     return [];
   }
   try {
-    return readdirSync(dir)
-      .filter((name) => MESSAGE_FILE.test(name))
-      .sort()
-      .map((name) => readMessage(join(dir, name), thread));
+    return readThread(dir, thread);
   } catch (error) {
     // The author's wait archived this thread mid-read, so it is closed and gone.
     if (isMissing(error)) {
@@ -318,11 +324,15 @@ function historyLine({ state, earlier }: Pending): string | undefined {
   return `== earlier in this thread (read them first if they're not in your context): ${dirname(state.last.file)}/ ${names} ==`;
 }
 
+function messageHeader(message: Message, laneName: string): string {
+  const verdict = message.verdict ? ` · verdict ${message.verdict}` : "";
+  return `== pair: ${message.type} from ${message.from} · ${laneName} · round ${message.round}${verdict} ==`;
+}
+
 function formatMessage(me: Agent, pending: Pending): string {
   const { thread, state } = pending;
   const { last } = state;
-  const verdict = last.verdict ? ` · verdict ${last.verdict}` : "";
-  const header = `== pair: ${last.type} from ${last.from} · ${basename(thread.lane)} · round ${last.round}${verdict} ==`;
+  const header = messageHeader(last, basename(thread.lane));
   const history = historyLine(pending);
   return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, state)} ==`].join("\n");
 }
@@ -357,6 +367,92 @@ function describe(channel: string, author: Agent): string {
 
 function status(channel: string): string {
   return [`channel: ${channel}`, ...AGENTS.map((agent) => describe(channel, agent))].join("\n");
+}
+
+interface ArchivedThread {
+  id: string;
+  dir: string;
+  laneName: string;
+  outcome: ThreadStatus;
+  thread: Thread;
+}
+
+/** Finished threads, newest first. Entries that aren't archived threads are ignored. */
+function listArchived(channel: string): ArchivedThread[] {
+  const archiveDir = join(channel, "archive");
+  return readdirOrEmpty(archiveDir)
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry): ArchivedThread[] => {
+      const match = ARCHIVED_THREAD.exec(entry.name);
+      if (!match) {
+        return [];
+      }
+      const [, id, author, reviewer, outcome] = match;
+      const thread = threadFor(channel, author as Agent);
+      if (thread.reviewer !== reviewer) {
+        return [];
+      }
+      const laneName = `${author}-to-${reviewer}`;
+      return [{ id, dir: join(archiveDir, entry.name), laneName, outcome: outcome as ThreadStatus, thread }];
+    })
+    .sort((a, b) => b.id.localeCompare(a.id));
+}
+
+/** Undefined when `pair clean` removed the thread after the archive was listed. */
+function readArchived(entry: ArchivedThread): Message[] | undefined {
+  try {
+    return readThread(entry.dir, entry.thread);
+  } catch (error) {
+    if (isMissing(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function requestSummary(messages: Message[]): string {
+  const first = messages[0]?.body.split("\n").map((line) => line.trim()).find((line) => line && !line.startsWith("#")) ?? "";
+  return first.length > 72 ? `${first.slice(0, 71)}…` : first;
+}
+
+function history(channel: string, query: string | undefined): string {
+  const archived = listArchived(channel);
+  if (query === undefined) {
+    if (archived.length === 0) {
+      return "no finished threads yet";
+    }
+    return archived
+      .flatMap((entry) => {
+        const messages = readArchived(entry);
+        return messages ? [`${entry.id}  ${entry.laneName}  ${entry.outcome}  ${messages.length} messages  ${requestSummary(messages)}`] : [];
+      })
+      .join("\n");
+  }
+  const matches = archived.filter((entry) => entry.id.includes(query));
+  if (matches.length !== 1) {
+    const found = matches.length === 0 ? "no finished thread matches" : `${matches.length} finished threads match`;
+    throw new PairError(`${found} "${query}"${matches.map((entry) => `\n  ${entry.id}`).join("")}`);
+  }
+  const [entry] = matches;
+  const messages = readArchived(entry);
+  if (!messages) {
+    throw new PairError(`finished thread ${entry.id} was removed while reading it`);
+  }
+  const transcript = messages.map((message) => `${messageHeader(message, entry.laneName)}\n${message.body.trimEnd()}`);
+  return [`== thread ${entry.id} · ${entry.laneName} · ${entry.outcome} ==`, ...transcript].join("\n\n");
+}
+
+function clean(channel: string, keepValue: string | undefined): string {
+  // Digits only: Number("") is 0, so an empty value must never reach the conversion.
+  if (keepValue === undefined || !/^\d+$/.test(keepValue)) {
+    throw new PairError(`clean needs --keep N, the number of newest finished threads to keep (got ${keepValue === undefined ? "nothing" : `"${keepValue}"`})`);
+  }
+  const keep = Number(keepValue);
+  const doomed = listArchived(channel).slice(keep);
+  for (const entry of doomed) {
+    rmSync(entry.dir, { recursive: true, force: true });
+  }
+  return `removed ${doomed.length} finished thread(s), kept up to ${keep}`;
 }
 
 function renderPrompt(agent: Agent): string {
@@ -422,13 +518,15 @@ const USAGE = `usage:
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (exit ${EXIT_TIMEOUT} = nothing yet, run again)
   pair status
+  pair history [thread-id]                            (list finished threads, or show one)
+  pair clean --keep N                                 (delete all but the N newest finished threads)
   pair init`;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" } },
   });
   const [command, ...rest] = positionals;
   const channel = channelDir();
@@ -454,6 +552,12 @@ async function main(argv: string[]): Promise<number> {
     }
     case "status":
       console.log(status(channel));
+      return 0;
+    case "history":
+      console.log(history(channel, rest[0]));
+      return 0;
+    case "clean":
+      console.log(clean(channel, values.keep));
       return 0;
     case "init":
       console.log(init(channel));
