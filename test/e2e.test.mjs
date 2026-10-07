@@ -135,3 +135,18 @@ test("rejects a corrupt stored message with an error naming the file", () => {
   writeFileSync(path, readFileSync(path, "utf8").replace("round: oops", "round: 1").replace("from: claude", "from: codex"));
   assert.match(run(["status"]).out, /corrupt message .*from must be one of: claude/);
 });
+
+test("a lane in the old flat layout fails with a recovery hint, and stray files are ignored", () => {
+  const { run, ok } = sandbox();
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  mkdirSync(join(channel, "codex-to-claude"), { recursive: true });
+  writeFileSync(join(channel, "codex-to-claude", "notes.txt"), "not a thread");
+  assert.match(ok(["status"]), /codex-to-claude: idle/);
+
+  mkdirSync(join(channel, "claude-to-codex"), { recursive: true });
+  writeFileSync(join(channel, "claude-to-codex", "001-request.md"), "---\nfrom: claude\n---\nold");
+  const result = run(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.equal(result.code, 1);
+  assert.match(result.out, /^pair: .*old flat layout \(001-request\.md\)/);
+  assert.ok(existsSync(join(channel, "claude-to-codex", "001-request.md")), "legacy messages are left in place");
+});

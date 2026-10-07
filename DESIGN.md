@@ -55,7 +55,7 @@ acting returns the same message, because X still owes a reply.
 ## Usage
 
 ```
-npm install && npm run build && npm link     # provides `pair`
+npm install && npm link                       # npm install builds via prepare; npm link provides `pair`
 cd <repo> && pair init                        # installs the skill and AGENTS.md section, prints sandbox config
 ```
 
@@ -72,6 +72,7 @@ pair init
 
 ## Known limits
 
+- A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a hint to move its files into a subdirectory, and the messages are left untouched.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
 - Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
 - Codex's shell tool needs `timeout_ms` of at least 600000 for `pair wait`. The prompt says so, but whether Codex follows it hasn't been tested with a live session yet.

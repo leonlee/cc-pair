@@ -17,3 +17,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Smoke-test the packaged CLI installed globally
+        run: |
+          npm pack
+          npm install -g ./cc-pair-*.tgz
+          git init -q "$RUNNER_TEMP/smoke" && cd "$RUNNER_TEMP/smoke"
+          pair init
+          test -f AGENTS.md && test -f .claude/skills/pair/SKILL.md
+          echo "smoke" | pair send request --as claude -
+          pair wait --as codex --timeout 5 | grep -q "request from claude"

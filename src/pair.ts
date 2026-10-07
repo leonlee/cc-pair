@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -73,9 +73,9 @@ function threadFor(channel: string, author: Agent): Thread {
   return { lane: join(channel, `${author}-to-${reviewer}`), author, reviewer };
 }
 
-function readdirOrEmpty(path: string): string[] {
+function readdirOrEmpty(path: string): Dirent[] {
   try {
-    return readdirSync(path);
+    return readdirSync(path, { withFileTypes: true });
   } catch (error) {
     // No lane dir yet means no thread has been started in it.
     if (isMissing(error)) {
@@ -87,8 +87,16 @@ function readdirOrEmpty(path: string): string[] {
 
 /** Each thread gets a fresh directory, so a stale archive can never move a newer thread. */
 function currentThreadDir(thread: Thread): string | undefined {
-  const latest = readdirOrEmpty(thread.lane)
-    .filter((name) => !name.startsWith("."))
+  const entries = readdirOrEmpty(thread.lane);
+  const legacy = entries.find((entry) => entry.isFile() && MESSAGE_FILE.test(entry.name));
+  if (legacy) {
+    throw new PairError(
+      `${thread.lane} still uses the old flat layout (${legacy.name}). Move its NNN-*.md files into a new subdirectory of it, or delete them if that thread is finished.`,
+    );
+  }
+  const latest = entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .map((entry) => entry.name)
     .sort()
     .at(-1);
   return latest === undefined ? undefined : join(thread.lane, latest);
