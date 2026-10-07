@@ -1,0 +1,93 @@
+# cc-pair
+
+Claude Code and Codex review each other's work. Each runs as a live session in its own terminal,
+and they talk through a shared directory on disk.
+
+```
+terminal A: claude                         terminal B: codex ("be my reviewer")
+  finish task
+  pair send request ──▶ ~/.pair/<repo>/claude-to-codex/001-request.md
+  pair wait  ⏳                              pair wait ◀── picks it up
+                    002-review.md ◀── pair send review --verdict changes
+  verify findings, fix
+  pair send response ──▶ 003-response.md
+  pair wait  ⏳                              pair wait ◀── re-checks fixes
+                    004-review.md ◀── pair send review --verdict approve
+  done ✓
+```
+
+Roles are symmetric: Codex can ask Claude for a review the same way.
+
+## Install
+
+```sh
+npm install -g github:leonlee/cc-pair
+```
+
+Requires Node 22 or later.
+
+## Setup (once per repo)
+
+```sh
+cd your-repo
+pair init
+```
+
+`init` writes a Claude Code skill (`.claude/skills/pair/SKILL.md`) and a section in `AGENTS.md`
+for Codex. Both explain the protocol to the agent.
+
+Both agents' sandboxes must be able to write to `~/.pair`. Add this to each config:
+
+```toml
+# ~/.codex/config.toml
+[sandbox_workspace_write]
+writable_roots = ["/Users/you/.pair"]
+```
+
+```jsonc
+// ~/.claude/settings.json
+"sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
+```
+
+## Use
+
+1. In the reviewer's terminal, say **"be my reviewer"**. The agent loops on `pair wait`.
+2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
+3. Watch them go back and forth. The author verifies each finding before fixing it, and can reject
+   one with a reason.
+4. The thread ends when the reviewer approves. If findings are still open after 3 rounds, the thread
+   is **escalated** and both agents stop and ask you.
+
+## Commands
+
+The agents run these themselves. You only need `init` and `status`.
+
+```
+pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
+pair wait --as <claude|codex> [--timeout seconds]   # exit 2 = nothing yet, run again
+pair status
+pair init
+```
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `PAIR_HOME` | `~/.pair` | Root directory for channels |
+| `PAIR_AGENT` | (none) | Default for `--as` |
+| `PAIR_MAX_ROUNDS` | `3` | Number of review rounds before escalation |
+
+## Example review
+
+These are messages from a real run, shortened. The bug in round 1 was planted on purpose.
+
+```
+== pair: review from codex · claude-to-codex · round 1 · verdict changes ==
+### F1 [medium] src/paginate.js:8: Partial last pages are omitted from the page count
+`totalPages(5, 2)` returns 2 ... Use `Math.ceil(count / pageSize)`.
+### F2 [medium] src/paginate.js:2: Invalid pagination inputs produce unrelated items
+`paginate([1, 2, 3, 4, 5], 1, -2)` returns `[1, 2, 3]` ...
+
+== pair: review from codex · claude-to-codex · round 2 · verdict approve ==
+F1 and F2 are fixed. I re-read src/paginate.js and ran 41 assertions ... All passed.
+```
+
+See [DESIGN.md](DESIGN.md) for the protocol, storage layout, and known limits.

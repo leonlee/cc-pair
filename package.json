@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "tsc && node --test"
   },
   "engines": {
