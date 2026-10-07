@@ -6,7 +6,7 @@ and they talk through a shared directory on disk.
 ```
 terminal A: claude                         terminal B: codex ("be my reviewer")
   finish task
-  pair send request ──▶ ~/.pair/<repo>/claude-to-codex/001-request.md
+  pair send request ──▶ ~/.pair/<repo>/claude-to-codex/<thread>/001-request.md
   pair wait  ⏳                              pair wait ◀── picks it up
                     002-review.md ◀── pair send review --verdict changes
   verify findings, fix

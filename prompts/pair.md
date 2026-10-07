@@ -52,5 +52,6 @@ EOF
 ```
 
 Use `--verdict approve` when no high- or medium-severity finding is still open.
+If `send review` prints ESCALATED, stop the loop and ask the user how to proceed.
 Severity levels: `high` (bug, data loss, security), `medium` (likely bug, missing edge case),
 `low` (style, naming).

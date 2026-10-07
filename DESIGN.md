@@ -23,17 +23,19 @@ and they talk through a shared directory that works like a chat channel.
 
 ```
 ~/.pair/<repo>-<hash>/
-  claude-to-codex/            # claude is the author
-    001-request.md
-    002-review.md             # round 1, verdict changes
-    003-response.md           # round 2
-    004-review.md             # round 2, verdict approve, status approved
+  claude-to-codex/                    # lane where claude is the author
+    <iso-ts>-<rand>/                  # one directory per thread; a path is never reused
+      001-request.md
+      002-review.md                   # round 1, verdict changes
+      003-response.md                 # round 2
+      004-review.md                   # round 2, verdict approve, status approved
   codex-to-claude/
-  archive/<ts>-<thread>-<approved|escalated>/
+  archive/<iso-ts>-<rand>-<lane>-<approved|escalated>/
 ```
 
 Each message has this frontmatter, written by the CLI: `from`, `type`, `round`, `verdict` (reviews only), and `status` (`open`/`approved`/`escalated`).
 The CLI writes to a dotfile first and then renames it, so readers never see a partial message.
+When the CLI reads a message, it checks every field and fails with `corrupt message <path>: …` if anything is invalid. It doesn't guess.
 
 ## Protocol
 
@@ -71,5 +73,5 @@ pair init
 ## Known limits
 
 - Polling, not fs events. A 1s delay is fine for chat between agents.
-- Archiving a thread while the partner is polling it is safe: a thread directory that disappears reads as idle, and a second archive of it is skipped. There's no automated test for this race because it depends on timing.
+- Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
 - Codex's shell tool needs `timeout_ms` of at least 600000 for `pair wait`. The prompt says so, but whether Codex follows it hasn't been tested with a live session yet.

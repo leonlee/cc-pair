@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -14,7 +14,8 @@ const MESSAGE_TYPES = ["request", "review", "response"] as const;
 type MessageType = (typeof MESSAGE_TYPES)[number];
 const VERDICTS = ["approve", "changes"] as const;
 type Verdict = (typeof VERDICTS)[number];
-type ThreadStatus = "open" | "approved" | "escalated";
+const THREAD_STATUSES = ["open", "approved", "escalated"] as const;
+type ThreadStatus = (typeof THREAD_STATUSES)[number];
 
 const DEFAULT_MAX_ROUNDS = 3;
 const DEFAULT_WAIT_SECONDS = 540; // stays under Claude Code's 10-minute Bash cap
@@ -40,7 +41,7 @@ type ThreadState =
 type ActiveState = Exclude<ThreadState, { kind: "idle" }>;
 
 interface Thread {
-  dir: string;
+  lane: string; // <author>-to-<reviewer>/, holding one subdirectory per review thread
   author: Agent;
   reviewer: Agent;
 }
@@ -69,7 +70,32 @@ function partnerOf(agent: Agent): Agent {
 
 function threadFor(channel: string, author: Agent): Thread {
   const reviewer = partnerOf(author);
-  return { dir: join(channel, `${author}-to-${reviewer}`), author, reviewer };
+  return { lane: join(channel, `${author}-to-${reviewer}`), author, reviewer };
+}
+
+function readdirOrEmpty(path: string): string[] {
+  try {
+    return readdirSync(path);
+  } catch (error) {
+    // No lane dir yet means no thread has been started in it.
+    if (isMissing(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+/** Each thread gets a fresh directory, so a stale archive can never move a newer thread. */
+function currentThreadDir(thread: Thread): string | undefined {
+  const latest = readdirOrEmpty(thread.lane)
+    .filter((name) => !name.startsWith("."))
+    .sort()
+    .at(-1);
+  return latest === undefined ? undefined : join(thread.lane, latest);
+}
+
+function newThreadId(): string {
+  return `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
 }
 
 function gitPath(flag: string): string | undefined {
@@ -107,27 +133,40 @@ function parseFrontmatter(text: string): { fields: Record<string, string>; body:
   return { fields, body: text.slice(match[0].length) };
 }
 
-function readMessage(path: string): Message {
+/** Parses a stored message and rejects anything the CLI would not have written. */
+function readMessage(path: string, thread: Thread): Message {
   const { fields, body } = parseFrontmatter(readFileSync(path, "utf8"));
-  return {
-    file: path,
-    from: fields.from as Agent,
-    type: fields.type as MessageType,
-    round: Number(fields.round),
-    verdict: fields.verdict as Verdict | undefined,
-    status: (fields.status ?? "open") as ThreadStatus,
-    body,
-  };
+  const corrupt = `corrupt message ${path}:`;
+  const type = oneOf(fields.type, MESSAGE_TYPES, `${corrupt} type`);
+  if (!basename(path).endsWith(`-${type}.md`)) {
+    throw new PairError(`${corrupt} type "${type}" does not match the file name`);
+  }
+  const from = oneOf(fields.from, [type === "review" ? thread.reviewer : thread.author], `${corrupt} from`);
+  const round = Number(fields.round);
+  if (!Number.isInteger(round) || round < 1) {
+    throw new PairError(`${corrupt} round must be a positive integer (got "${fields.round}")`);
+  }
+  const status = oneOf(fields.status, THREAD_STATUSES, `${corrupt} status`);
+  const verdict = type === "review" ? oneOf(fields.verdict, VERDICTS, `${corrupt} verdict`) : undefined;
+  const consistent = verdict === "approve" ? status === "approved" : verdict === "changes" ? status !== "approved" : status === "open";
+  if (!consistent) {
+    throw new PairError(`${corrupt} status "${status}" does not fit verdict "${verdict ?? "none"}"`);
+  }
+  return { file: path, from, type, round, verdict, status, body };
 }
 
 function listMessages(thread: Thread): Message[] {
+  const dir = currentThreadDir(thread);
+  if (!dir) {
+    return [];
+  }
   try {
-    return readdirSync(thread.dir)
+    return readdirSync(dir)
       .filter((name) => MESSAGE_FILE.test(name))
       .sort()
-      .map((name) => readMessage(join(thread.dir, name)));
+      .map((name) => readMessage(join(dir, name), thread));
   } catch (error) {
-    // No dir means idle. The author's wait may also archive the dir mid-read, which means closed.
+    // The author's wait archived this thread mid-read, so it is closed and gone.
     if (isMissing(error)) {
       return [];
     }
@@ -146,22 +185,22 @@ function stateOf(messages: Message[]): ThreadState {
   return last.status === "open" ? { kind: "awaiting-response", last } : { kind: "closed", last };
 }
 
-function archive(channel: string, thread: Thread, status: ThreadStatus): void {
+function archive(channel: string, last: Message): void {
+  const dir = dirname(last.file);
   const archiveDir = join(channel, "archive");
   mkdirSync(archiveDir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   try {
-    renameSync(thread.dir, join(archiveDir, `${stamp}-${basename(thread.dir)}-${status}`));
+    renameSync(dir, join(archiveDir, `${basename(dir)}-${basename(dirname(dir))}-${last.status}`));
   } catch (error) {
-    // A concurrent wait for the same agent already archived it.
+    // Another wait for the same agent already archived this exact thread.
     if (!isMissing(error)) {
       throw error;
     }
   }
 }
 
-function writeMessage(thread: Thread, seq: number, message: Omit<Message, "file" | "body">, body: string): string {
-  mkdirSync(thread.dir, { recursive: true });
+function writeMessage(dir: string, seq: number, message: Omit<Message, "file" | "body">, body: string): string {
+  mkdirSync(dir, { recursive: true });
   const name = `${String(seq).padStart(3, "0")}-${message.type}.md`;
   const lines = [
     "---",
@@ -174,8 +213,8 @@ function writeMessage(thread: Thread, seq: number, message: Omit<Message, "file"
     body.trimEnd(),
     "",
   ];
-  const finalPath = join(thread.dir, name);
-  const tmpPath = join(thread.dir, `.${name}.tmp`);
+  const finalPath = join(dir, name);
+  const tmpPath = join(dir, `.${name}.tmp`);
   writeFileSync(tmpPath, lines.join("\n"));
   renameSync(tmpPath, finalPath); // atomic: readers never see a half-written message
   return finalPath;
@@ -193,15 +232,15 @@ function send(channel: string, me: Agent, type: MessageType, body: string, verdi
       throw new PairError(`a review thread to ${thread.reviewer} is already open (${state.kind}); finish it first`);
     }
     if (state.kind === "closed") {
-      archive(channel, thread, state.last.status);
+      archive(channel, state.last);
     }
-    return writeMessage(thread, 1, { from: me, type, round: 1, status: "open" }, body);
+    return writeMessage(join(thread.lane, newThreadId()), 1, { from: me, type, round: 1, status: "open" }, body);
   }
   if (state.kind !== "awaiting-response") {
     throw new PairError(`cannot send response: no open review from ${thread.reviewer} (thread is ${state.kind})`);
   }
   const round = state.last.round + 1;
-  return writeMessage(thread, messages.length + 1, { from: me, type, round, status: "open" }, body);
+  return writeMessage(dirname(state.last.file), messages.length + 1, { from: me, type, round, status: "open" }, body);
 }
 
 function sendReview(channel: string, me: Agent, body: string, verdict?: Verdict): string {
@@ -216,8 +255,13 @@ function sendReview(channel: string, me: Agent, body: string, verdict?: Verdict)
   }
   const round = state.last.round;
   const status: ThreadStatus = verdict === "approve" ? "approved" : round >= maxRounds() ? "escalated" : "open";
-  const path = writeMessage(thread, messages.length + 1, { from: me, type: "review", round, verdict, status }, body);
-  return status === "escalated" ? `${path}\nthread escalated: round cap (${maxRounds()}) reached. The user decides next.` : path;
+  const review = { from: me, type: "review" as const, round, verdict, status };
+  const path = writeMessage(dirname(state.last.file), messages.length + 1, review, body);
+  return status === "escalated" ? `${path}\n${escalationNotice()}` : path;
+}
+
+function escalationNotice(): string {
+  return `ESCALATED: round cap (${maxRounds()}) reached with open findings. STOP and ask the user how to proceed.`;
 }
 
 /** Returns a thread where it is `me`'s turn to act, if any. Author duties come first. */
@@ -244,14 +288,14 @@ function nextStep(me: Agent, state: ActiveState): string {
     case "closed":
       return state.last.status === "approved"
         ? "thread approved and closed. Nothing to send."
-        : `ESCALATED: round cap (${maxRounds()}) reached with open findings. STOP and ask the user how to proceed.`;
+        : escalationNotice();
   }
 }
 
 function formatMessage(me: Agent, thread: Thread, state: ActiveState): string {
   const { last } = state;
   const verdict = last.verdict ? ` · verdict ${last.verdict}` : "";
-  const header = `== pair: ${last.type} from ${last.from} · ${basename(thread.dir)} · round ${last.round}${verdict} ==`;
+  const header = `== pair: ${last.type} from ${last.from} · ${basename(thread.lane)} · round ${last.round}${verdict} ==`;
   return `${header}\n${last.body.trimEnd()}\n== next: ${nextStep(me, state)} ==`;
 }
 
@@ -262,7 +306,7 @@ async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise
     if (pending) {
       const output = formatMessage(me, pending.thread, pending.state);
       if (pending.state.kind === "closed") {
-        archive(channel, pending.thread, pending.state.last.status);
+        archive(channel, pending.state.last);
       }
       return output;
     }
@@ -277,10 +321,10 @@ function describe(channel: string, author: Agent): string {
   const thread = threadFor(channel, author);
   const state = stateOf(listMessages(thread));
   if (state.kind === "idle") {
-    return `${basename(thread.dir)}: idle`;
+    return `${basename(thread.lane)}: idle`;
   }
   const turn = state.kind === "awaiting-review" ? thread.reviewer : thread.author;
-  return `${basename(thread.dir)}: ${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
+  return `${basename(thread.lane)}: ${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
 }
 
 function status(channel: string): string {

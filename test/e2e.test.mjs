@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
@@ -48,7 +48,7 @@ test("escalates when the round cap is hit with findings still open", () => {
   ok(["send", "request", "--as", "codex", "-"], "req");
   for (let round = 1; round <= 3; round++) {
     const sent = ok(["send", "review", "--as", "claude", "--verdict", "changes", "-"], `### F1 still broken r${round}`);
-    assert.equal(sent.includes("thread escalated"), round === 3, "reviewer is told when its review escalates");
+    assert.equal(/ESCALATED[\s\S]*STOP/.test(sent), round === 3, "reviewer is told to stop when its review escalates");
     if (round < 3) {
       ok(["send", "response", "--as", "codex", "-"], "### F1 rejected");
     }
@@ -108,4 +108,30 @@ test("wait checks at least once and rejects a bad timeout", () => {
   assert.match(run(["wait", "--as", "codex", "--timeout", "abc"]).out, /--timeout must be a positive number/);
   assert.match(run(["send", "request", "--as", "claude", "missing.md"]).out, /message file not found/);
   assert.match(run(["wait", "--as"]).out, /^pair: /);
+});
+
+test("each thread gets a fresh directory, so a stale archive cannot move a newer thread", () => {
+  const { ok } = sandbox();
+  const sentPath = (out) => out.split("\n")[0].replace("sent: ", "").trim();
+  const first = sentPath(ok(["send", "request", "--as", "claude", "-"], "first"));
+  ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+  ok(["wait", "--as", "claude", "--timeout", "1"]);
+  const second = sentPath(ok(["send", "request", "--as", "claude", "-"], "second"));
+
+  assert.notEqual(dirname(first), dirname(second));
+  assert.ok(!existsSync(dirname(first)), "first thread was archived");
+  assert.match(ok(["wait", "--as", "codex", "--timeout", "1"]), /second/);
+});
+
+test("rejects a corrupt stored message with an error naming the file", () => {
+  const { run, ok } = sandbox();
+  const path = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  writeFileSync(path, readFileSync(path, "utf8").replace("round: 1", "round: oops"));
+
+  const result = run(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "x");
+  assert.equal(result.code, 1);
+  assert.match(result.out, /corrupt message .*001-request\.md: round must be a positive integer/);
+
+  writeFileSync(path, readFileSync(path, "utf8").replace("round: oops", "round: 1").replace("from: claude", "from: codex"));
+  assert.match(run(["status"]).out, /corrupt message .*from must be one of: claude/);
 });
