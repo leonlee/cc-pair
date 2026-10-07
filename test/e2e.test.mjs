@@ -28,7 +28,9 @@ test("full review loop: request, changes, response, approve", () => {
   ok(["send", "request", "--as", "claude", "-"], "## Summary\nadded parse()");
 
   assert.equal(run(["wait", "--as", "claude", "--timeout", "1"]).code, 2, "author has nothing to read yet");
-  assert.match(ok(["wait", "--as", "codex", "--timeout", "1"]), /request from claude[\s\S]*added parse\(\)/);
+  const firstPickup = ok(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.match(firstPickup, /request from claude[\s\S]*added parse\(\)/);
+  assert.doesNotMatch(firstPickup, /earlier in this thread/, "a fresh request has no history");
   assert.equal(run(["send", "request", "--as", "claude", "-"], "again").code, 1, "one open thread per direction");
 
   ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1 [high] a.ts:1 null deref");
@@ -36,7 +38,9 @@ test("full review loop: request, changes, response, approve", () => {
   assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /verdict changes[\s\S]*F1[\s\S]*next: verify/);
 
   ok(["send", "response", "--as", "claude", "-"], "### F1 fixed");
-  assert.match(ok(["wait", "--as", "codex", "--timeout", "1"]), /response from claude · claude-to-codex · round 2/);
+  const responsePickup = ok(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.match(responsePickup, /response from claude · claude-to-codex · round 2/);
+  assert.match(responsePickup, /earlier in this thread[^\n]*\/ 001-request\.md 002-review\.md ==/, "lists the history a restarted reviewer needs");
   ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
 
   assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /approved and closed/);
@@ -150,4 +154,38 @@ test("a lane in the old flat layout fails with a recovery hint, and stray files 
   assert.equal(result.code, 1);
   assert.match(result.out, /^pair: .*old flat layout \(001-request\.md\)/);
   assert.ok(existsSync(join(channel, "claude-to-codex", "001-request.md")), "legacy messages are left in place");
+});
+
+test("wait survives the thread being archived between reading it and printing it", () => {
+  const { root, env, ok } = sandbox();
+  ok(["send", "request", "--as", "claude", "-"], "req");
+  ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1 [high] a.ts:1 bug");
+  ok(["send", "response", "--as", "claude", "-"], "### F1 fixed");
+
+  // Simulates another process archiving the thread right after wait first reads it:
+  // any second scan of the same thread directory then finds it gone.
+  const hook = join(root, "archive-on-rescan.mjs");
+  writeFileSync(hook, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    import { basename, dirname, join } from "node:path";
+    const original = fs.readdirSync;
+    const seen = new Set();
+    fs.readdirSync = function (path, ...rest) {
+      const dir = String(path);
+      if (/-to-(claude|codex)\\/[^/]+$/.test(dir)) {
+        if (seen.has(dir)) {
+          const archive = join(dirname(dirname(dir)), "archive");
+          fs.mkdirSync(archive, { recursive: true });
+          fs.renameSync(dir, join(archive, basename(dir)));
+        }
+        seen.add(dir);
+      }
+      return original.call(this, path, ...rest);
+    };
+    syncBuiltinESMExports();
+  `);
+  const result = spawnSync("node", ["--import", hook, CLI, "wait", "--as", "codex", "--timeout", "1"], { cwd: root, env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /earlier in this thread[^\n]*001-request\.md 002-review\.md ==/);
 });

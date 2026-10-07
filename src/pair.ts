@@ -273,16 +273,24 @@ function escalationNotice(): string {
 }
 
 /** Returns a thread where it is `me`'s turn to act, if any. Author duties come first. */
-function pendingFor(channel: string, me: Agent): { thread: Thread; state: ActiveState } | undefined {
+interface Pending {
+  thread: Thread;
+  state: ActiveState;
+  earlier: Message[]; // from the same snapshot as state, so output never rereads the disk
+}
+
+function pendingFor(channel: string, me: Agent): Pending | undefined {
   const asAuthor = threadFor(channel, me);
-  const authorState = stateOf(listMessages(asAuthor));
+  const authorMessages = listMessages(asAuthor);
+  const authorState = stateOf(authorMessages);
   if (authorState.kind === "awaiting-response" || authorState.kind === "closed") {
-    return { thread: asAuthor, state: authorState };
+    return { thread: asAuthor, state: authorState, earlier: authorMessages.slice(0, -1) };
   }
   const asReviewer = threadFor(channel, partnerOf(me));
-  const reviewerState = stateOf(listMessages(asReviewer));
+  const reviewerMessages = listMessages(asReviewer);
+  const reviewerState = stateOf(reviewerMessages);
   if (reviewerState.kind === "awaiting-review") {
-    return { thread: asReviewer, state: reviewerState };
+    return { thread: asReviewer, state: reviewerState, earlier: reviewerMessages.slice(0, -1) };
   }
   return undefined;
 }
@@ -300,11 +308,23 @@ function nextStep(me: Agent, state: ActiveState): string {
   }
 }
 
-function formatMessage(me: Agent, thread: Thread, state: ActiveState): string {
+/** Points an agent that lost its context (e.g. after a restart) at the rest of the thread. */
+function historyLine({ state, earlier }: Pending): string | undefined {
+  // A closed thread is archived as soon as it's read and needs no further action.
+  if (state.kind === "closed" || earlier.length === 0) {
+    return undefined;
+  }
+  const names = earlier.map((message) => basename(message.file)).join(" ");
+  return `== earlier in this thread (read them first if they're not in your context): ${dirname(state.last.file)}/ ${names} ==`;
+}
+
+function formatMessage(me: Agent, pending: Pending): string {
+  const { thread, state } = pending;
   const { last } = state;
   const verdict = last.verdict ? ` · verdict ${last.verdict}` : "";
   const header = `== pair: ${last.type} from ${last.from} · ${basename(thread.lane)} · round ${last.round}${verdict} ==`;
-  return `${header}\n${last.body.trimEnd()}\n== next: ${nextStep(me, state)} ==`;
+  const history = historyLine(pending);
+  return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, state)} ==`].join("\n");
 }
 
 async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise<string | undefined> {
@@ -312,7 +332,7 @@ async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise
   while (true) {
     const pending = pendingFor(channel, me);
     if (pending) {
-      const output = formatMessage(me, pending.thread, pending.state);
+      const output = formatMessage(me, pending);
       if (pending.state.kind === "closed") {
         archive(channel, pending.state.last);
       }

@@ -50,7 +50,9 @@ The thread state comes from the last message, so there is no separate state file
 
 `pair wait --as X` returns the first message where it is X's turn, in either thread. It
 prints the message and a `next:` line telling the agent what to do. Calling `wait` again before
-acting returns the same message, because X still owes a reply.
+acting returns the same message, because X still owes a reply. If the thread already has earlier
+messages, `wait` also lists their files. An agent that lost its context, for example after a
+restart, can then read the history instead of seeing only "F1 fixed".
 
 ## Usage
 
