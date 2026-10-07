@@ -16,7 +16,7 @@ model turns:
 - If you are Codex: run one `pair wait` at a time and await its completion as your tools and
   instructions allow: `pair wait --as {{AGENT}} --timeout <seconds>`, with the timeout just under any
   wait cap in your instructions (for example, `--timeout 55` if waits must stay under 60 seconds).
-  Re-run it on exit 2.
+  Re-run it when it times out (see below).
 - Otherwise, including headless `claude -p` or when background commands are unavailable: run
   `pair wait --as {{AGENT}}` in the foreground with a shell timeout above 600 seconds. It gives up
   after 540 seconds by default.
@@ -29,8 +29,10 @@ report new messages or failures normally.
 (for example, after a restart), read those files before acting. To see a thread that has already
 finished, such as an approval you missed, run `pair history`, then `pair history <id>`.
 
-If `pair wait` exits with code 2 ("no message yet"), start it again. That isn't an error. If it ends
-any other way (cancelled by you or the user, or failed), don't restart it. Tell the user what happened.
+Read the first line of `pair wait`'s output. If it starts with `pair: no message for`, the wait timed
+out: start it again. That isn't an error. If it starts with `== pair:`, a message was delivered. Act on
+it, even if its body quotes timeout text. If `pair wait` ends any other way (a non-zero exit, or
+cancelled by you or the user), don't restart it. Tell the user what happened.
 
 ## Ask {{PARTNER}} for a review (you are the author)
 

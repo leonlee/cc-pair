@@ -21,7 +21,6 @@ const DEFAULT_MAX_ROUNDS = 3;
 const DEFAULT_KEEP = 100; // finished threads kept by auto-pruning
 const DEFAULT_WAIT_SECONDS = 540; // stays under Claude Code's 10-minute Bash cap
 const POLL_MS = 1000;
-const EXIT_TIMEOUT = 2;
 const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
 // archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
 const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated)$/;
@@ -375,19 +374,23 @@ function formatMessage(me: Agent, pending: Pending): string {
   return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, state)} ==`].join("\n");
 }
 
-async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise<string | undefined> {
+/**
+ * Prints the message, then archives a closed thread. Archiving last keeps the `== pair:` header on
+ * the first line even when cleanup warns on stderr, since agents read stdout and stderr merged.
+ */
+async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise<boolean> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (true) {
     const pending = pendingFor(channel, me);
     if (pending) {
-      const output = formatMessage(me, pending);
+      console.log(formatMessage(me, pending));
       if (pending.state.kind === "closed") {
         archive(channel, pending.state.last);
       }
-      return output;
+      return true;
     }
     if (Date.now() >= deadline) {
-      return undefined;
+      return false;
     }
     await sleep(POLL_MS);
   }
@@ -555,7 +558,7 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 
 const USAGE = `usage:
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-  pair wait --as <claude|codex> [--timeout seconds]   (exit ${EXIT_TIMEOUT} = nothing yet, run again)
+  pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout: run again)
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
@@ -583,12 +586,10 @@ async function main(argv: string[]): Promise<number> {
       autoKeep(); // reject a bad PAIR_KEEP before touching any thread
       const me = agent();
       const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
-      const output = await wait(channel, me, timeout);
-      if (!output) {
+      if (!(await wait(channel, me, timeout))) {
+        // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure.
         console.log(`pair: no message for ${me} yet. Run \`pair wait --as ${me}\` again.`);
-        return EXIT_TIMEOUT;
       }
-      console.log(output);
       return 0;
     }
     case "status":

@@ -27,7 +27,9 @@ test("full review loop: request, changes, response, approve", () => {
   const { run, ok } = sandbox();
   ok(["send", "request", "--as", "claude", "-"], "## Summary\nadded parse()");
 
-  assert.equal(run(["wait", "--as", "claude", "--timeout", "1"]).code, 2, "author has nothing to read yet");
+  const nothingYet = run(["wait", "--as", "claude", "--timeout", "1"]);
+  assert.equal(nothingYet.code, 0, "a timeout is routine, not a failure");
+  assert.match(nothingYet.out, /^pair: no message for claude yet\./, "author has nothing to read yet");
   const firstPickup = ok(["wait", "--as", "codex", "--timeout", "1"]);
   assert.match(firstPickup, /request from claude[\s\S]*added parse\(\)/);
   assert.doesNotMatch(firstPickup, /earlier in this thread/, "a fresh request has no history");
@@ -332,9 +334,16 @@ test("a failed automatic cleanup warns but still delivers and still sends", { sk
   try {
     must("1", ["send", "request", "--as", "claude", "-"], "## Summary\nnew");
     must("1", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
-    const delivered = must("1", ["wait", "--as", "claude", "--timeout", "1"]);
-    assert.match(delivered.stdout, /approved and closed/, "the approval is still printed");
-    assert.match(delivered.stderr, /pair: warning: automatic cleanup failed/);
+    // Agents see stdout and stderr merged, so check the order in one combined stream.
+    const merged = spawnSync("sh", ["-c", `node "${CLI}" wait --as claude --timeout 1 2>&1`], {
+      cwd: root,
+      env: { ...env, PAIR_KEEP: "1" },
+      encoding: "utf8",
+    });
+    assert.equal(merged.status, 0, merged.stdout);
+    const lines = merged.stdout.split("\n");
+    assert.match(lines[0], /^== pair: review from codex/, "the protocol header comes first, before any warning");
+    assert.match(merged.stdout, /approved and closed[\s\S]*pair: warning: automatic cleanup failed/, "the warning follows the message");
 
     must("all", ["send", "request", "--as", "claude", "-"], "## Summary\nthird");
     must("all", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
@@ -344,4 +353,15 @@ test("a failed automatic cleanup warns but still delivers and still sends", { sk
   } finally {
     chmodSync(join(channel, "archive", stuck), 0o700);
   }
+});
+
+test("a timeout and a delivery are told apart by the first output line, not by the body", () => {
+  const { run, ok } = sandbox();
+  const timedOut = run(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.equal(timedOut.code, 0);
+  assert.match(timedOut.out.split("\n")[0], /^pair: no message for codex yet\./);
+
+  ok(["send", "request", "--as", "claude", "-"], "pair: no message for codex yet. Run `pair wait --as codex` again.\nreview the timeout text");
+  const delivered = ok(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.match(delivered.split("\n")[0], /^== pair: request from claude/, "a delivery always starts with the header");
 });

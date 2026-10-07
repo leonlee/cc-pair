@@ -22,7 +22,8 @@
   },
   "files": [
     "dist",
-    "prompts"
+    "prompts",
+    "DESIGN.md"
   ],
   "scripts": {
     "build": "tsc",
