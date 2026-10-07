@@ -61,8 +61,9 @@ writable_roots = ["/Users/you/.pair"]
 ```
 
 After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
-worktree has its own channel, so an agent started in another checkout won't see the messages. Restart any sessions
-that were already open so they load the new instructions and sandbox settings.
+worktree has its own channel, so an agent started in another checkout won't see the messages
+(see [Worktrees](#worktrees)). Restart any sessions that were already open so they load the new
+instructions and sandbox settings.
 
 ## Use
 
@@ -72,6 +73,25 @@ that were already open so they load the new instructions and sandbox settings.
    one with a reason.
 4. The thread ends when the reviewer approves. If findings are still open after 3 rounds, the thread
    is **escalated** and both agents stop and ask you.
+
+## Worktrees
+
+The channel comes from the worktree root, so each git worktree gets its own. You can run one pair
+per worktree in parallel without them seeing each other's messages.
+
+```sh
+git worktree add ../your-repo-feature -b feature/x
+cd ../your-repo-feature
+pair init     # needed unless AGENTS.md and .claude/skills/pair/ are committed on this branch
+pair status   # worktree: /Users/you/your-repo-feature
+```
+
+Then start Claude Code and Codex in `../your-repo-feature`, not in the main checkout. If one agent
+never receives the other's messages, ask each agent to run `pair status` and compare the `channel:`
+lines. Pair needs no extra sandbox config, because every channel lives under `~/.pair` (or `$PAIR_HOME`).
+
+`git worktree remove` leaves the worktree's channel in `~/.pair`. To delete it too, run
+`pair status` in the worktree first to get its `channel:` path, then remove that directory.
 
 ## Commands
 
