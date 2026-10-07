@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -24,6 +24,8 @@ const POLL_MS = 1000;
 const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
 // archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
 const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated)$/;
+const PAIR_SECTION = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->\n?/;
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 interface Message {
   file: string;
@@ -52,6 +54,39 @@ class PairError extends Error {}
 
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function sandboxConfig(channel: string): string {
+  const pairHome = JSON.stringify(dirname(channel));
+  return [
+    "Both agents need read and write access to the channel. Sandbox configuration:",
+    "",
+    "  ~/.codex/config.toml",
+    "    [sandbox_workspace_write]",
+    `    writable_roots = [${pairHome}]`,
+    "",
+    "  ~/.claude/settings.json",
+    `    "sandbox": { "filesystem": { "allowWrite": [${pairHome}] } }`,
+  ].join("\n");
+}
+
+/** Only call this for channel operations; input files and installed assets have other remedies. */
+function channelError(channel: string, error: unknown): unknown {
+  if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
+    const path = "path" in error ? String(error.path) : channel;
+    return new PairError(
+      `cannot access channel path ${path} (${error.code}). Check filesystem permissions and sandbox restrictions.\n${sandboxConfig(channel)}`,
+    );
+  }
+  return error;
+}
+
+function channelAccess<T>(channel: string, operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    throw channelError(channel, error);
+  }
 }
 
 function positiveNumber(value: string, what: string): number {
@@ -120,12 +155,15 @@ function gitPath(flag: string): string | undefined {
   }
 }
 
-function channelDir(): string {
+function worktreeRoot(): string {
+  return realpathSync(gitPath("--show-toplevel") ?? process.cwd());
+}
+
+function channelDir(root: string): string {
   // One channel per worktree: a reviewer reads the author's files, so both must share a checkout.
   // realpath so /tmp/x and /private/tmp/x (or any symlinked checkout) share one channel.
-  const key = realpathSync(gitPath("--show-toplevel") ?? process.cwd());
-  const hash = createHash("sha1").update(key).digest("hex").slice(0, 8);
-  return join(process.env.PAIR_HOME ?? join(homedir(), ".pair"), `${basename(key)}-${hash}`);
+  const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
+  return join(resolve(process.env.PAIR_HOME ?? join(homedir(), ".pair")), `${basename(root)}-${hash}`);
 }
 
 function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
@@ -245,8 +283,9 @@ function archive(channel: string, last: Message): void {
     prune(channel, keep);
   } catch (error) {
     // Cleanup is housekeeping. It must never block delivering a result or starting a thread.
-    const reason = error instanceof Error ? error.message : String(error);
-    console.error(`pair: warning: automatic cleanup failed (${reason}). Fix it, then run \`pair clean --keep ${keep}\`.`);
+    const failure = channelError(channel, error);
+    const reason = failure instanceof Error ? failure.message : String(failure);
+    console.error(`pair: warning: automatic cleanup failed: ${reason}\nFix it, then run \`pair clean --keep ${keep}\`.`);
   }
 }
 
@@ -381,11 +420,11 @@ function formatMessage(me: Agent, pending: Pending): string {
 async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise<boolean> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (true) {
-    const pending = pendingFor(channel, me);
+    const pending = channelAccess(channel, () => pendingFor(channel, me));
     if (pending) {
       console.log(formatMessage(me, pending));
       if (pending.state.kind === "closed") {
-        archive(channel, pending.state.last);
+        channelAccess(channel, () => archive(channel, pending.state.last));
       }
       return true;
     }
@@ -406,8 +445,41 @@ function describe(channel: string, author: Agent): string {
   return `${basename(thread.lane)}: ${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
 }
 
-function status(channel: string): string {
-  return [`channel: ${channel}`, ...AGENTS.map((agent) => describe(channel, agent))].join("\n");
+function instructionState(path: string, expected: string, sectionOnly = false): string {
+  try {
+    const text = readFileSync(path, "utf8");
+    const actual = sectionOnly ? PAIR_SECTION.exec(text)?.[0] : text;
+    if (actual === undefined) {
+      return "missing"; // AGENTS.md exists but has no complete pair section
+    }
+    return actual === expected ? "current" : "stale";
+  } catch (error) {
+    if (isMissing(error)) {
+      return "missing";
+    }
+    const reason = error instanceof Error && "code" in error ? String(error.code) : String(error);
+    return `unreadable (${reason})`;
+  }
+}
+
+function status(channel: string, root: string): string {
+  const lanes = channelAccess(channel, () => AGENTS.map((agent) => describe(channel, agent)));
+  const { name, version } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
+  const agents = instructionState(join(root, "AGENTS.md"), codexSection(), true);
+  const skill = instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill());
+  return [
+    `channel: ${channel}`,
+    `worktree: ${root}`,
+    `version: ${name} ${version}`,
+    ...lanes,
+    "instructions on disk (does not verify what running agents loaded):",
+    `  AGENTS.md (pair section): ${agents}`,
+    `  .claude/skills/pair/SKILL.md: ${skill}`,
+    ...(agents === "missing" || agents === "stale" || skill === "missing" || skill === "stale"
+      ? ["Run `pair init` to refresh missing or stale instructions, then reload agent sessions."] : []),
+    ...(agents.startsWith("unreadable") || skill.startsWith("unreadable")
+      ? ["Check permissions on the unreadable instruction paths before refreshing them."] : []),
+  ].join("\n");
 }
 
 interface ArchivedThread {
@@ -498,40 +570,38 @@ function clean(channel: string, keepValue: string | undefined): string {
 }
 
 function renderPrompt(agent: Agent): string {
-  const template = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "prompts", "pair.md"), "utf8");
+  const template = readFileSync(join(PACKAGE_ROOT, "prompts", "pair.md"), "utf8");
   return template.replaceAll("{{AGENT}}", agent).replaceAll("{{PARTNER}}", partnerOf(agent));
 }
 
-function init(channel: string): string {
-  mkdirSync(channel, { recursive: true });
-  const root = gitPath("--show-toplevel") ?? process.cwd();
+function claudeSkill(): string {
+  const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
+  return header + renderPrompt("claude");
+}
+
+function codexSection(): string {
+  return `<!-- pair:start -->\n${renderPrompt("codex").trimEnd()}\n<!-- pair:end -->\n`;
+}
+
+function init(channel: string, root: string): string {
+  channelAccess(channel, () => mkdirSync(channel, { recursive: true }));
 
   const skillDir = join(root, ".claude", "skills", "pair");
   mkdirSync(skillDir, { recursive: true });
-  const skillHeader = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
-  writeFileSync(join(skillDir, "SKILL.md"), skillHeader + renderPrompt("claude"));
+  writeFileSync(join(skillDir, "SKILL.md"), claudeSkill());
 
   const agentsPath = join(root, "AGENTS.md");
-  const section = `<!-- pair:start -->\n${renderPrompt("codex").trimEnd()}\n<!-- pair:end -->\n`;
+  const section = codexSection();
   const existing = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
-  const marked = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->\n?/;
-  const updated = marked.test(existing) ? existing.replace(marked, () => section) : `${existing}${existing ? "\n" : ""}${section}`;
+  const updated = PAIR_SECTION.test(existing) ? existing.replace(PAIR_SECTION, () => section) : `${existing}${existing ? "\n" : ""}${section}`;
   writeFileSync(agentsPath, updated);
 
-  const pairHome = dirname(channel);
   return [
     `channel: ${channel}`,
     `wrote: ${join(skillDir, "SKILL.md")}`,
     `wrote: ${agentsPath} (pair section)`,
     "",
-    "Both sandboxes must allow writes to the channel. Add:",
-    "",
-    "  ~/.codex/config.toml",
-    "    [sandbox_workspace_write]",
-    `    writable_roots = ["${pairHome}"]`,
-    "",
-    "  ~/.claude/settings.json",
-    `    "sandbox": { "filesystem": { "allowWrite": ["${pairHome}"] } }`,
+    sandboxConfig(channel),
   ].join("\n");
 }
 
@@ -571,7 +641,8 @@ async function main(argv: string[]): Promise<number> {
     options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" } },
   });
   const [command, ...rest] = positionals;
-  const channel = channelDir();
+  const root = worktreeRoot();
+  const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
 
   switch (command) {
@@ -579,7 +650,9 @@ async function main(argv: string[]): Promise<number> {
       autoKeep(); // reject a bad PAIR_KEEP before touching any thread
       const type = oneOf(rest[0], MESSAGE_TYPES, "message type");
       const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
-      console.log(`sent: ${send(channel, agent(), type, readBody(rest[1]), verdict)}`);
+      const me = agent();
+      const body = readBody(rest[1]);
+      console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict))}`);
       return 0;
     }
     case "wait": {
@@ -593,16 +666,16 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "status":
-      console.log(status(channel));
+      console.log(status(channel, root));
       return 0;
     case "history":
-      console.log(history(channel, rest[0]));
+      console.log(channelAccess(channel, () => history(channel, rest[0])));
       return 0;
     case "clean":
-      console.log(clean(channel, values.keep));
+      console.log(channelAccess(channel, () => clean(channel, values.keep)));
       return 0;
     case "init":
-      console.log(init(channel));
+      console.log(init(channel, root));
       return 0;
     default:
       console.error(USAGE);

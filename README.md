@@ -86,6 +86,31 @@ pair clean --keep N        # delete all but the N newest finished threads
 pair init
 ```
 
+`pair status` shows the channel, worktree root, installed package version, and each lane's turn.
+It also checks the generated instructions on disk:
+
+```
+channel: /Users/you/.pair/your-repo-12345678
+worktree: /Users/you/your-repo
+version: claude-codex-pair 0.1.0
+claude-to-codex: idle
+codex-to-claude: idle
+instructions on disk (does not verify what running agents loaded):
+  AGENTS.md (pair section): current
+  .claude/skills/pair/SKILL.md: current
+```
+
+Instruction states are `current`, `stale`, `missing`, or `unreadable`. The check compares only
+the marked pair section in `AGENTS.md`, so your other instructions don't affect it. Status
+doesn't change files. Run `pair init` to refresh missing or stale instructions, then reload
+agent sessions; fix access to unreadable files first. Current files on disk don't guarantee
+that a running agent has loaded them.
+
+If a channel read or write fails with `EACCES` or `EPERM`, the command names the path and prints
+sandbox configuration snippets using your actual channel directory. Check ordinary filesystem
+permissions as well as sandbox settings. Automatic archive cleanup failures remain warnings,
+so a cleanup problem doesn't prevent delivering a review or starting the next thread.
+
 | Env var | Default | Meaning |
 |---|---|---|
 | `PAIR_HOME` | `~/.pair` | Root directory for channels |

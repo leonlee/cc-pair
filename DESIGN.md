@@ -65,6 +65,18 @@ directory), `pair` prints a warning and still delivers the result or writes the 
 away. The flag is required, so a bare `clean` deletes nothing. Neither kind of cleanup touches
 active threads.
 
+`pair status` adds the canonical worktree root, installed package version, and instruction
+freshness to the channel and lane states. Freshness compares the marked pair section in
+`AGENTS.md` and the generated Claude skill against the same templates used by `init`. It is
+read-only and describes files on disk, not instructions already loaded into a running session.
+The check runs only on `status`, not during polling or message delivery.
+
+Channel operations report `EACCES` and `EPERM` with the affected path and the sandbox
+configuration printed by `init`. Either ordinary permissions or sandbox restrictions can
+cause these failures. Input message files, instruction files, and installed assets are handled
+separately. Automatic pruning still warns and continues; its diagnostics follow the delivered
+message so `wait` keeps its protocol header first even when stdout and stderr are merged.
+
 ## Usage
 
 ```

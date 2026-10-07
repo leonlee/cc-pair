@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -106,6 +106,155 @@ test("init from a subdirectory installs at the repo root", () => {
   assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /for `codex` only\. If you are not `codex`, ignore this section\./);
   assert.ok(existsSync(join(root, ".claude", "skills", "pair", "SKILL.md")));
   assert.ok(!existsSync(join(root, "sub", "AGENTS.md")));
+  const status = spawnSync("node", [CLI, "status"], { cwd: join(root, "sub"), env, encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  assert.ok(status.stdout.includes(`worktree: ${realpathSync(root)}\n`));
+  assert.match(status.stdout, /AGENTS\.md \(pair section\): current/);
+  assert.match(status.stdout, /\.claude\/skills\/pair\/SKILL\.md: current/);
+});
+
+test("status diagnoses instructions without writing, and ignores user content outside the pair section", () => {
+  const { root, env, ok } = sandbox();
+  const agentsPath = join(root, "AGENTS.md");
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  const version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")).version;
+  const before = ok(["status"]);
+  assert.match(before, /^channel: /, "keep the channel on the first line");
+  assert.ok(before.includes(`worktree: ${realpathSync(root)}\n`));
+  assert.ok(before.includes(`version: claude-codex-pair ${version}\n`));
+  assert.match(before, /AGENTS\.md \(pair section\): missing/);
+  assert.match(before, /\.claude\/skills\/pair\/SKILL\.md: missing/);
+  assert.match(before, /Run `pair init`/);
+  assert.ok(!existsSync(env.PAIR_HOME), "status must not create a channel");
+  assert.ok(!existsSync(agentsPath));
+  assert.ok(!existsSync(join(root, ".claude")));
+
+  writeFileSync(agentsPath, "# My instructions\n");
+  assert.match(ok(["status"]), /AGENTS\.md \(pair section\): missing/);
+  ok(["init"]);
+  const generated = readFileSync(agentsPath, "utf8");
+  assert.ok(generated.startsWith("# My instructions\n"));
+  const customized = `User prefix\n${generated}\nUser suffix\n`;
+  writeFileSync(agentsPath, customized);
+  const current = ok(["status"]);
+  assert.match(current, /AGENTS\.md \(pair section\): current/);
+  assert.match(current, /\.claude\/skills\/pair\/SKILL\.md: current/);
+  assert.match(current, /does not verify what running agents loaded/);
+  assert.doesNotMatch(current, /Run `pair init`/);
+  assert.equal(readFileSync(agentsPath, "utf8"), customized, "freshness is read-only");
+
+  const stale = customized.replace("# pair: review loop", "# pair: old review loop");
+  writeFileSync(agentsPath, stale);
+  assert.match(ok(["status"]), /AGENTS\.md \(pair section\): stale/);
+  assert.equal(readFileSync(agentsPath, "utf8"), stale, "status does not repair instructions");
+  ok(["init"]);
+  assert.equal(readFileSync(agentsPath, "utf8"), customized, "init refreshes only the marked section");
+  writeFileSync(skillPath, "old skill\n");
+  const oldSkill = ok(["status"]);
+  assert.match(oldSkill, /AGENTS\.md \(pair section\): current/);
+  assert.match(oldSkill, /\.claude\/skills\/pair\/SKILL\.md: stale/);
+  rmSync(skillPath);
+  assert.match(ok(["status"]), /\.claude\/skills\/pair\/SKILL\.md: missing/);
+});
+
+test("unreadable instructions remain a status diagnosis and do not affect message delivery", { skip: process.getuid?.() === 0 }, () => {
+  const { root, ok } = sandbox();
+  ok(["init"]);
+  const paths = [join(root, "AGENTS.md"), join(root, ".claude", "skills", "pair", "SKILL.md")];
+  paths.forEach((path) => chmodSync(path, 0o000));
+  try {
+    const status = ok(["status"]);
+    assert.match(status, /AGENTS\.md \(pair section\): unreadable \(EACCES\)/);
+    assert.match(status, /\.claude\/skills\/pair\/SKILL\.md: unreadable \(EACCES\)/);
+    assert.match(status, /Check permissions on the unreadable instruction paths/);
+    assert.doesNotMatch(status, /cannot access channel path/);
+    ok(["send", "request", "--as", "claude", "-"], "still deliver");
+    const message = ok(["wait", "--as", "codex", "--timeout", "1"]);
+    assert.match(message, /^== pair: request from claude/);
+    assert.match(message, /still deliver/);
+    assert.doesNotMatch(message, /instructions on disk|unreadable/);
+  } finally {
+    paths.forEach((path) => chmodSync(path, 0o600));
+  }
+});
+
+test("channel read and write permission errors name the path and give sandbox hints", { skip: process.getuid?.() === 0 }, () => {
+  const { root, env, run, ok } = sandbox();
+  // Relative and quoted PAIR_HOME must still produce usable absolute configuration paths.
+  env.PAIR_HOME = 'home"quoted';
+  const pairHome = join(realpathSync(root), env.PAIR_HOME);
+  mkdirSync(pairHome);
+  chmodSync(pairHome, 0o500);
+  try {
+    for (const args of [["init"], ["send", "request", "--as", "claude", "-"]]) {
+      const denied = run(args, "request");
+      assert.equal(denied.code, 1, denied.out);
+      assert.match(denied.out, /^pair: cannot access channel path .*\(EACCES\)/);
+      assert.ok(denied.out.includes(pairHome));
+      assert.match(denied.out, /filesystem permissions and sandbox restrictions/);
+      assert.ok(denied.out.includes(`writable_roots = [${JSON.stringify(pairHome)}]`));
+      assert.ok(denied.out.includes(`"allowWrite": [${JSON.stringify(pairHome)}]`));
+      assert.doesNotMatch(denied.out, /at (?:Object\.|file:)/, "no stack trace for a diagnosed channel error");
+    }
+  } finally {
+    chmodSync(pairHome, 0o700);
+  }
+  const messagePath = ok(["send", "request", "--as", "claude", "-"], "request").replace("sent: ", "").trim();
+  const threadDir = dirname(messagePath);
+  chmodSync(threadDir, 0o000);
+  try {
+    for (const args of [["status"], ["wait", "--as", "codex", "--timeout", "1"]]) {
+      const denied = run(args);
+      assert.equal(denied.code, 1, denied.out);
+      assert.ok(denied.out.startsWith(`pair: cannot access channel path ${threadDir} (EACCES)`));
+      assert.match(denied.out, /sandbox_workspace_write/);
+    }
+  } finally {
+    chmodSync(threadDir, 0o700);
+  }
+  // Even an input file inside the channel is an input error, not a channel-operation failure.
+  chmodSync(messagePath, 0o000);
+  try {
+    const inputError = run(["send", "request", "--as", "codex", messagePath]);
+    assert.equal(inputError.code, 1);
+    assert.match(inputError.out, /EACCES/);
+    assert.doesNotMatch(inputError.out, /cannot access channel path|sandbox_workspace_write/);
+  } finally {
+    chmodSync(messagePath, 0o600);
+  }
+});
+
+test("EPERM channel errors are diagnosed without treating installed prompt errors as channel errors", () => {
+  const { root, env, ok } = sandbox();
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  const hook = join(root, "deny-fs.mjs");
+  writeFileSync(hook, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const deny = (operation, code, matches) => {
+      const original = fs[operation];
+      fs[operation] = function (path, ...rest) {
+        if (matches(String(path))) {
+          throw Object.assign(new Error("access denied"), { code, path });
+        }
+        return original.call(this, path, ...rest);
+      };
+    };
+    if (process.env.DENY_PROMPT) {
+      deny("readFileSync", "EACCES", (path) => path.endsWith("/prompts/pair.md"));
+    } else {
+      deny("readdirSync", "EPERM", (path) => path.startsWith(${JSON.stringify(channel)}));
+    }
+    syncBuiltinESMExports();
+  `);
+  const denied = spawnSync("node", ["--import", hook, CLI, "wait", "--as", "codex", "--timeout", "1"], { cwd: root, env, encoding: "utf8" });
+  assert.equal(denied.status, 1);
+  assert.ok(denied.stderr.startsWith(`pair: cannot access channel path ${join(channel, "codex-to-claude")} (EPERM)`));
+  assert.match(denied.stderr, /sandbox_workspace_write/);
+  const assetError = spawnSync("node", ["--import", hook, CLI, "status"], { cwd: root, env: { ...env, DENY_PROMPT: "1" }, encoding: "utf8" });
+  assert.equal(assetError.status, 1);
+  assert.match(assetError.stderr, /EACCES/);
+  assert.doesNotMatch(assetError.stderr, /cannot access channel path|sandbox_workspace_write/);
 });
 
 test("wait checks at least once and rejects a bad timeout", () => {
@@ -344,11 +493,14 @@ test("a failed automatic cleanup warns but still delivers and still sends", { sk
     const lines = merged.stdout.split("\n");
     assert.match(lines[0], /^== pair: review from codex/, "the protocol header comes first, before any warning");
     assert.match(merged.stdout, /approved and closed[\s\S]*pair: warning: automatic cleanup failed/, "the warning follows the message");
+    assert.match(merged.stdout, /cannot access channel path .*\(EACCES\)/);
+    assert.match(merged.stdout, /sandbox_workspace_write/);
 
     must("all", ["send", "request", "--as", "claude", "-"], "## Summary\nthird");
     must("all", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
     const sent = must("1", ["send", "request", "--as", "claude", "-"], "## Summary\nfourth");
     assert.match(sent.stderr, /pair: warning: automatic cleanup failed/);
+    assert.match(sent.stderr, /cannot access channel path .*\(EACCES\)/);
     assert.match(must("1", ["status"]).stdout, /claude-to-codex: awaiting-review/, "the new request was still written");
   } finally {
     chmodSync(join(channel, "archive", stuck), 0o700);
