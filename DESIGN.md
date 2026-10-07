@@ -54,9 +54,16 @@ acting returns the same message, because X still owes a reply. If the thread alr
 messages, `wait` also lists their files. An agent that lost its context, for example after a
 restart, can then read the history instead of seeing only "F1 fixed".
 
-Finished threads stay in `archive/` until you delete them. `pair history` lists them, newest first,
-and `pair history <id>` prints one transcript. `pair clean --keep N` deletes all but the N newest.
-The flag is required, so a bare `clean` deletes nothing, and it never touches active threads.
+Finished threads go to `archive/`. Whenever a thread finishes, `pair` deletes all but the `PAIR_KEEP`
+most recently finished ones (100 by default; `all` keeps everything; `0` keeps none). "Most recently
+finished" means by when the thread's last message landed, not when it started, so a thread that just
+finished always survives when `PAIR_KEEP` is at least 1. An invalid `PAIR_KEEP` makes `send` and `wait`
+fail before they touch any thread. If automatic cleanup itself fails (for example, an undeletable
+directory), `pair` prints a warning and still delivers the result or writes the request.
+`pair history` lists finished threads, most recently finished first, and
+`pair history <id>` prints one transcript. `pair clean --keep N` deletes all but the N newest right
+away. The flag is required, so a bare `clean` deletes nothing. Neither kind of cleanup touches
+active threads.
 
 ## Usage
 

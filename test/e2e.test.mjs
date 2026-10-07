@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -211,7 +211,7 @@ test("history lists and shows finished threads, and clean keeps only the newest"
   ok(["send", "request", "--as", "codex", "-"], "still open");
   assert.match(run(["clean"]).out, /clean needs --keep N/);
   for (const bad of ["--keep=-1", "--keep=", "--keep= ", "--keep=1.5", "--keep=Infinity"]) {
-    assert.match(run(["clean", bad]).out, /clean needs --keep N/, bad);
+    assert.match(run(["clean", bad]).out, /--keep must be a whole number/, bad);
   }
   assert.equal(ok(["history"]).trim().split("\n").length, 3, "rejected values delete nothing");
   assert.match(ok(["clean", "--keep", "1"]), /removed 2 finished thread\(s\)/);
@@ -228,23 +228,23 @@ test("history tolerates a thread removed by clean after the archive was listed",
   }
   const removedId = ok(["history"]).trim().split("\n")[2].split("  ")[0];
 
-  // Simulates a concurrent `pair clean`: the archive listing succeeds, then one listed thread vanishes.
+  // Simulates a concurrent `pair clean`: the archive was listed and the thread found, then it
+  // vanishes just as its messages are about to be read.
   const hook = join(root, "clean-after-listing.mjs");
   writeFileSync(hook, `
     import fs from "node:fs";
     import { syncBuiltinESMExports } from "node:module";
-    import { join } from "node:path";
+    import { basename, dirname } from "node:path";
     const original = fs.readdirSync;
+    let removing = false; // rmSync itself calls readdirSync
     fs.readdirSync = function (path, ...rest) {
-      const entries = original.call(this, path, ...rest);
-      if (String(path).endsWith("/archive")) {
-        for (const entry of entries) {
-          if (String(entry.name ?? entry).includes(process.env.REMOVE_ID)) {
-            fs.rmSync(join(String(path), String(entry.name ?? entry)), { recursive: true, force: true });
-          }
-        }
+      const dir = String(path);
+      if (!removing && basename(dirname(dir)) === "archive" && basename(dir).includes(process.env.REMOVE_ID)) {
+        removing = true;
+        fs.rmSync(dir, { recursive: true, force: true });
+        removing = false;
       }
-      return entries;
+      return original.call(this, path, ...rest);
     };
     syncBuiltinESMExports();
   `);
@@ -262,4 +262,86 @@ test("history tolerates a thread removed by clean after the archive was listed",
   const shown = spawnSync("node", ["--import", hook, CLI, "history", fourth.slice(-6)], { cwd: root, env: { ...env, REMOVE_ID: fourth }, encoding: "utf8" });
   assert.equal(shown.status, 1);
   assert.match(shown.stderr, /^pair: finished thread .* was removed while reading it/);
+});
+
+test("finished threads are pruned automatically down to PAIR_KEEP", () => {
+  const { root, env } = sandbox();
+  const runWith = (keep, args, input) =>
+    spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, PAIR_KEEP: keep }, input, encoding: "utf8" });
+  const finishThread = (keep, n) => {
+    const steps = [
+      [["send", "request", "--as", "claude", "-"], `## Summary\nchange ${n}`],
+      [["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM"],
+      [["wait", "--as", "claude", "--timeout", "1"]],
+    ];
+    for (const [args, input] of steps) {
+      const result = runWith(keep, args, input);
+      assert.equal(result.status, 0, result.stderr);
+    }
+  };
+  for (const n of [1, 2, 3]) {
+    finishThread("all", n);
+  }
+  assert.equal(runWith("all", ["history"]).stdout.trim().split("\n").length, 3, "PAIR_KEEP=all keeps everything");
+
+  finishThread("2", 4);
+  const kept = runWith("2", ["history"]).stdout;
+  assert.equal(kept.trim().split("\n").length, 2, "archiving thread 4 pruned down to 2");
+  assert.match(kept, /change 4[\s\S]*change 3/);
+
+  const bad = runWith("", ["send", "request", "--as", "claude", "-"], "x");
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /PAIR_KEEP must be a whole number/);
+  assert.match(runWith("2", ["status"]).stdout, /claude-to-codex: idle/, "the rejected send wrote nothing");
+});
+
+test("retention keeps the most recently finished thread, not the most recently created", () => {
+  const { root, env } = sandbox();
+  const runWith = (args, input) => {
+    const result = spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, PAIR_KEEP: "1" }, input, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  runWith(["send", "request", "--as", "claude", "-"], "## Summary\ncreated first, finished last");
+  runWith(["send", "request", "--as", "codex", "-"], "## Summary\ncreated second, finished first");
+  runWith(["send", "review", "--as", "claude", "--verdict", "approve", "-"], "LGTM");
+  runWith(["wait", "--as", "codex", "--timeout", "1"]);
+  runWith(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+  assert.match(runWith(["wait", "--as", "claude", "--timeout", "1"]), /approved and closed/);
+
+  const kept = runWith(["history"]).trim().split("\n");
+  assert.equal(kept.length, 1);
+  assert.match(kept[0], /created first, finished last/, "the thread that just finished survives pruning");
+});
+
+test("a failed automatic cleanup warns but still delivers and still sends", { skip: process.getuid?.() === 0 }, () => {
+  const { root, env } = sandbox();
+  const runWith = (keep, args, input) =>
+    spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, PAIR_KEEP: keep }, input, encoding: "utf8" });
+  const must = (keep, args, input) => {
+    const result = runWith(keep, args, input);
+    assert.equal(result.status, 0, result.stderr);
+    return result;
+  };
+  must("all", ["send", "request", "--as", "claude", "-"], "## Summary\nold");
+  must("all", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+  must("all", ["wait", "--as", "claude", "--timeout", "1"]);
+  const channel = must("all", ["status"]).stdout.split("\n")[0].replace("channel: ", "");
+  const [stuck] = readdirSync(join(channel, "archive"));
+  chmodSync(join(channel, "archive", stuck), 0o500);
+  try {
+    must("1", ["send", "request", "--as", "claude", "-"], "## Summary\nnew");
+    must("1", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+    const delivered = must("1", ["wait", "--as", "claude", "--timeout", "1"]);
+    assert.match(delivered.stdout, /approved and closed/, "the approval is still printed");
+    assert.match(delivered.stderr, /pair: warning: automatic cleanup failed/);
+
+    must("all", ["send", "request", "--as", "claude", "-"], "## Summary\nthird");
+    must("all", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
+    const sent = must("1", ["send", "request", "--as", "claude", "-"], "## Summary\nfourth");
+    assert.match(sent.stderr, /pair: warning: automatic cleanup failed/);
+    assert.match(must("1", ["status"]).stdout, /claude-to-codex: awaiting-review/, "the new request was still written");
+  } finally {
+    chmodSync(join(channel, "archive", stuck), 0o700);
+  }
 });

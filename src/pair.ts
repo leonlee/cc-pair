@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -18,6 +18,7 @@ const THREAD_STATUSES = ["open", "approved", "escalated"] as const;
 type ThreadStatus = (typeof THREAD_STATUSES)[number];
 
 const DEFAULT_MAX_ROUNDS = 3;
+const DEFAULT_KEEP = 100; // finished threads kept by auto-pruning
 const DEFAULT_WAIT_SECONDS = 540; // stays under Claude Code's 10-minute Bash cap
 const POLL_MS = 1000;
 const EXIT_TIMEOUT = 2;
@@ -199,6 +200,32 @@ function stateOf(messages: Message[]): ThreadState {
   return last.status === "open" ? { kind: "awaiting-response", last } : { kind: "closed", last };
 }
 
+/** Digits only: Number("") is 0, so an empty value must never reach the conversion. */
+function parseKeep(value: string, what: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new PairError(`${what} must be a whole number of finished threads to keep (got "${value}")`);
+  }
+  return Number(value);
+}
+
+/** How many finished threads auto-pruning keeps. Undefined means keep them all. */
+function autoKeep(): number | undefined {
+  const value = process.env.PAIR_KEEP;
+  if (value === undefined) {
+    return DEFAULT_KEEP;
+  }
+  return value === "all" ? undefined : parseKeep(value, "PAIR_KEEP");
+}
+
+/** Deletes all but the `keep` newest finished threads. Returns how many were removed. */
+function prune(channel: string, keep: number): number {
+  const doomed = listArchived(channel).slice(keep);
+  for (const entry of doomed) {
+    rmSync(entry.dir, { recursive: true, force: true });
+  }
+  return doomed.length;
+}
+
 function archive(channel: string, last: Message): void {
   const dir = dirname(last.file);
   const archiveDir = join(channel, "archive");
@@ -210,6 +237,17 @@ function archive(channel: string, last: Message): void {
     if (!isMissing(error)) {
       throw error;
     }
+  }
+  const keep = autoKeep();
+  if (keep === undefined) {
+    return;
+  }
+  try {
+    prune(channel, keep);
+  } catch (error) {
+    // Cleanup is housekeeping. It must never block delivering a result or starting a thread.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`pair: warning: automatic cleanup failed (${reason}). Fix it, then run \`pair clean --keep ${keep}\`.`);
   }
 }
 
@@ -371,13 +409,14 @@ function status(channel: string): string {
 
 interface ArchivedThread {
   id: string;
+  finishedAt: number; // directory mtime: when its last message landed
   dir: string;
   laneName: string;
   outcome: ThreadStatus;
   thread: Thread;
 }
 
-/** Finished threads, newest first. Entries that aren't archived threads are ignored. */
+/** Finished threads, most recently finished first. Entries that aren't archived threads are ignored. */
 function listArchived(channel: string): ArchivedThread[] {
   const archiveDir = join(channel, "archive");
   return readdirOrEmpty(archiveDir)
@@ -392,10 +431,15 @@ function listArchived(channel: string): ArchivedThread[] {
       if (thread.reviewer !== reviewer) {
         return [];
       }
+      const dir = join(archiveDir, entry.name);
+      const stats = statSync(dir, { throwIfNoEntry: false });
+      if (!stats) {
+        return []; // removed by a concurrent clean
+      }
       const laneName = `${author}-to-${reviewer}`;
-      return [{ id, dir: join(archiveDir, entry.name), laneName, outcome: outcome as ThreadStatus, thread }];
+      return [{ id, finishedAt: stats.mtimeMs, dir, laneName, outcome: outcome as ThreadStatus, thread }];
     })
-    .sort((a, b) => b.id.localeCompare(a.id));
+    .sort((a, b) => b.finishedAt - a.finishedAt || b.id.localeCompare(a.id));
 }
 
 /** Undefined when `pair clean` removed the thread after the archive was listed. */
@@ -443,16 +487,11 @@ function history(channel: string, query: string | undefined): string {
 }
 
 function clean(channel: string, keepValue: string | undefined): string {
-  // Digits only: Number("") is 0, so an empty value must never reach the conversion.
-  if (keepValue === undefined || !/^\d+$/.test(keepValue)) {
-    throw new PairError(`clean needs --keep N, the number of newest finished threads to keep (got ${keepValue === undefined ? "nothing" : `"${keepValue}"`})`);
+  if (keepValue === undefined) {
+    throw new PairError("clean needs --keep N, the number of newest finished threads to keep");
   }
-  const keep = Number(keepValue);
-  const doomed = listArchived(channel).slice(keep);
-  for (const entry of doomed) {
-    rmSync(entry.dir, { recursive: true, force: true });
-  }
-  return `removed ${doomed.length} finished thread(s), kept up to ${keep}`;
+  const keep = parseKeep(keepValue, "--keep");
+  return `removed ${prune(channel, keep)} finished thread(s), kept up to ${keep}`;
 }
 
 function renderPrompt(agent: Agent): string {
@@ -534,12 +573,14 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case "send": {
+      autoKeep(); // reject a bad PAIR_KEEP before touching any thread
       const type = oneOf(rest[0], MESSAGE_TYPES, "message type");
       const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
       console.log(`sent: ${send(channel, agent(), type, readBody(rest[1]), verdict)}`);
       return 0;
     }
     case "wait": {
+      autoKeep(); // reject a bad PAIR_KEEP before touching any thread
       const me = agent();
       const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
       const output = await wait(channel, me, timeout);

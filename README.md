@@ -80,7 +80,7 @@ The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`,
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
 pair wait --as <claude|codex> [--timeout seconds]   # exit 2 = nothing yet, run again
 pair status
-pair history [thread-id]   # list finished threads, or print one (any unique part of its id)
+pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
 pair clean --keep N        # delete all but the N newest finished threads
 pair init
 ```
@@ -90,6 +90,7 @@ pair init
 | `PAIR_HOME` | `~/.pair` | Root directory for channels |
 | `PAIR_AGENT` | (none) | Default for `--as` |
 | `PAIR_MAX_ROUNDS` | `3` | Number of review rounds before escalation |
+| `PAIR_KEEP` | `100` | Finished threads to keep, by finish time. Older ones are deleted whenever a thread finishes. `all` keeps everything, `0` keeps none |
 
 ## Example review
 
