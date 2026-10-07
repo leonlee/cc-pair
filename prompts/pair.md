@@ -1,5 +1,7 @@
 # pair: review loop with {{PARTNER}}
 
+These instructions are for `{{AGENT}}` only. If you are not `{{AGENT}}`, ignore this section.
+
 You are `{{AGENT}}`. Your partner `{{PARTNER}}` runs in another terminal on the same repo.
 You talk only through the `pair` CLI. Always pass `--as {{AGENT}}`.
 

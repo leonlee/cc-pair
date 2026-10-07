@@ -41,13 +41,9 @@ pair init
 `init` writes a Claude Code skill (`.claude/skills/pair/SKILL.md`) and a section in `AGENTS.md`
 for Codex. Both explain the protocol to the agent.
 
-If Claude Code also reads `AGENTS.md` (directly or through a `CLAUDE.md` import), add this to
-`CLAUDE.md` after any imports so Claude keeps its own role:
-
-```md
-The pair section in AGENTS.md applies only to Codex.
-For pair, use the pair skill and always pass --as claude.
-```
+Claude Code 2.1.277 and later can also read `AGENTS.md`. The pair section there starts by telling
+any agent other than Codex to ignore it, so Claude keeps its own role. If you ran `pair init` with
+an earlier version of this package, run it again to refresh both files.
 
 Both agents' sandboxes must be able to write to `~/.pair`, or `$PAIR_HOME` if set. `pair init`
 prints the configuration snippets with your actual path; add them to the corresponding configs.

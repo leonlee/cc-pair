@@ -97,6 +97,7 @@ test("init from a subdirectory installs at the repo root", () => {
   const result = spawnSync("node", [CLI, "init"], { cwd: join(root, "sub"), env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(root, "AGENTS.md")));
+  assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /for `codex` only\. If you are not `codex`, ignore this section\./);
   assert.ok(existsSync(join(root, ".claude", "skills", "pair", "SKILL.md")));
   assert.ok(!existsSync(join(root, "sub", "AGENTS.md")));
 });
