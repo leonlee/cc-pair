@@ -16,7 +16,7 @@ and they talk through a shared directory that works like a chat channel.
 | Review | Numbered findings with severity, and a verdict of `approve` or `changes`. Multiple rounds. |
 | Disputes | Cap of 3 rounds (`PAIR_MAX_ROUNDS`). A review that still says `changes` at the cap marks the thread `escalated`, and both agents stop to ask the user. |
 | Concurrency | At most one open thread per direction. |
-| Storage | `~/.pair/<repo>-<hash>/` (or `$PAIR_HOME`). The hash comes from `git rev-parse --git-common-dir`, so worktrees share a channel. |
+| Storage | `~/.pair/<repo>-<hash>/` (or `$PAIR_HOME`). The hash comes from `git rev-parse --show-toplevel`, so each worktree gets its own channel. A reviewer reads the author's files, so both agents must run in the same worktree, and parallel pairs in different worktrees stay isolated. |
 | Format | Markdown files with flat YAML frontmatter that the CLI writes. Findings go in the body. |
 
 ## Layout

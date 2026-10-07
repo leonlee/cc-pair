@@ -365,3 +365,26 @@ test("a timeout and a delivery are told apart by the first output line, not by t
   const delivered = ok(["wait", "--as", "codex", "--timeout", "1"]);
   assert.match(delivered.split("\n")[0], /^== pair: request from claude/, "a delivery always starts with the header");
 });
+
+test("each git worktree gets its own channel, so parallel pairs stay isolated", () => {
+  const { root, env } = sandbox();
+  const main = join(root, "main");
+  const linked = join(root, "linked");
+  mkdirSync(join(main, "sub"), { recursive: true });
+  const git = (cwd, ...args) => {
+    const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git(main, "init", "-q");
+  git(main, "commit", "-q", "--allow-empty", "-m", "base");
+  git(main, "worktree", "add", "-q", linked);
+  const channelFrom = (cwd) => spawnSync("node", [CLI, "status"], { cwd, env, encoding: "utf8" }).stdout.split("\n")[0];
+
+  assert.notEqual(channelFrom(linked), channelFrom(main), "a linked worktree has its own channel");
+  assert.equal(channelFrom(join(main, "sub")), channelFrom(main), "subdirectories share their worktree's channel");
+
+  const send = spawnSync("node", [CLI, "send", "request", "--as", "claude", "-"], { cwd: main, env, input: "from main", encoding: "utf8" });
+  assert.equal(send.status, 0, send.stderr);
+  const other = spawnSync("node", [CLI, "wait", "--as", "codex", "--timeout", "1"], { cwd: linked, env, encoding: "utf8" });
+  assert.match(other.stdout, /^pair: no message for codex yet\./, "a reviewer in another worktree doesn't see it");
+});

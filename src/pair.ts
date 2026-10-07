@@ -121,11 +121,11 @@ function gitPath(flag: string): string | undefined {
 }
 
 function channelDir(): string {
-  // realpath so /tmp/x and /private/tmp/x (or any symlinked checkout) share one channel
-  const key = realpathSync(gitPath("--git-common-dir") ?? process.cwd());
-  const name = basename(key) === ".git" ? basename(dirname(key)) : basename(key);
+  // One channel per worktree: a reviewer reads the author's files, so both must share a checkout.
+  // realpath so /tmp/x and /private/tmp/x (or any symlinked checkout) share one channel.
+  const key = realpathSync(gitPath("--show-toplevel") ?? process.cwd());
   const hash = createHash("sha1").update(key).digest("hex").slice(0, 8);
-  return join(process.env.PAIR_HOME ?? join(homedir(), ".pair"), `${name}-${hash}`);
+  return join(process.env.PAIR_HOME ?? join(homedir(), ".pair"), `${basename(key)}-${hash}`);
 }
 
 function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {

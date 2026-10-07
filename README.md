@@ -60,7 +60,8 @@ writable_roots = ["/Users/you/.pair"]
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
 
-After setup, start Claude Code and Codex in separate terminals in this repo. Restart any sessions
+After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
+worktree has its own channel, so an agent started in another checkout won't see the messages. Restart any sessions
 that were already open so they load the new instructions and sandbox settings.
 
 ## Use
