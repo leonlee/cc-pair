@@ -14,10 +14,14 @@ model turns:
   a background command (`run_in_background: true`) and end your turn. You'll be resumed when it exits.
   Then read its output.
 - If you are Codex: run `pair wait --as {{AGENT}} --timeout 3600`, and check on it with the longest
-  wait window your runtime allows. Skip status updates while idle unless your instructions require them.
+  wait window your runtime allows.
 - Otherwise, including headless `claude -p` or when background commands are unavailable: run
   `pair wait --as {{AGENT}}` in the foreground with a shell timeout above 600 seconds. It gives up
   after 540 seconds by default.
+
+During idle waits, don't send unsolicited status updates. If your runtime requires a progress
+message, write exactly `waiting for {{PARTNER}}`, with nothing added. Answer direct user questions and
+report new messages or failures normally.
 
 `pair wait` prints only the newest message. If it lists earlier messages that aren't in your context
 (for example, after a restart), read those files before acting. To see a thread that has already
