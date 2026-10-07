@@ -1,5 +1,5 @@
 {
-  "name": "@leonlee/cc-pair",
+  "name": "claude-codex-pair",
   "version": "0.1.0",
   "description": "Claude Code and Codex review each other's work over a file-system chat channel",
   "keywords": [
@@ -24,9 +24,6 @@
     "dist",
     "prompts"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",

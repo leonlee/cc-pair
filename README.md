@@ -21,14 +21,14 @@ Roles are symmetric: Codex can ask Claude for a review the same way.
 ## Install
 
 ```sh
-npm install -g @leonlee/cc-pair
+npm install -g claude-codex-pair
 ```
 
 Requires Node 22 or later. This installs the `pair` command.
 
 To install from source, clone the repo, then run `npm install && npm link` inside it.
 
-If you installed from source before the package was renamed to `@leonlee/cc-pair`, run
+If you installed from source before the package was renamed to `claude-codex-pair`, run
 `npm uninstall -g cc-pair` first. Otherwise the install fails with `EEXIST` on `bin/pair`.
 
 ## Setup (once per repo)
