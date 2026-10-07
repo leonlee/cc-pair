@@ -1,0 +1,24 @@
+{
+  "name": "cc-pair",
+  "version": "0.1.0",
+  "description": "Claude Code and Codex review each other's work over a file-system chat channel",
+  "type": "module",
+  "bin": {
+    "pair": "dist/pair.js"
+  },
+  "files": [
+    "dist",
+    "prompts"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
