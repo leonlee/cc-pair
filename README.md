@@ -21,12 +21,12 @@ Roles are symmetric: Codex can ask Claude for a review the same way.
 ## Install
 
 ```sh
-git clone https://github.com/leonlee/cc-pair.git
-cd cc-pair && npm install && npm link
+npm install -g @leonlee/cc-pair
 ```
 
-Requires Node 22 or later. cc-pair isn't on npm yet. Don't use `npm install -g github:…`: npm doesn't
-install the dev dependencies the build needs on that path, so the install fails.
+Requires Node 22 or later. This installs the `pair` command.
+
+To install from source, clone the repo, then run `npm install && npm link` inside it.
 
 ## Setup (once per repo)
 

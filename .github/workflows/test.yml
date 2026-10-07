@@ -20,7 +20,7 @@ jobs:
       - name: Smoke-test the packaged CLI installed globally
         run: |
           npm pack
-          npm install -g ./cc-pair-*.tgz
+          npm install -g ./*.tgz
           git init -q "$RUNNER_TEMP/smoke" && cd "$RUNNER_TEMP/smoke"
           pair init
           test -f AGENTS.md && test -f .claude/skills/pair/SKILL.md

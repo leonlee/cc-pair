@@ -1,7 +1,21 @@
 {
-  "name": "cc-pair",
+  "name": "@leonlee/cc-pair",
   "version": "0.1.0",
   "description": "Claude Code and Codex review each other's work over a file-system chat channel",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "code-review",
+    "ai-agents",
+    "cli"
+  ],
+  "license": "Unlicense",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonlee/cc-pair.git"
+  },
+  "homepage": "https://github.com/leonlee/cc-pair#readme",
+  "bugs": "https://github.com/leonlee/cc-pair/issues",
   "type": "module",
   "bin": {
     "pair": "dist/pair.js"
@@ -10,9 +24,13 @@
     "dist",
     "prompts"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
+    "prepublishOnly": "npm test",
     "test": "tsc && node --test"
   },
   "engines": {
