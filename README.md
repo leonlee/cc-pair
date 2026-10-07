@@ -6,7 +6,7 @@ and they talk through a shared directory on disk.
 ```
 terminal A: claude                         terminal B: codex ("be my reviewer")
   finish task
-  pair send request ──▶ ~/.pair/<repo>/claude-to-codex/<thread>/001-request.md
+  pair send request ──▶ ~/.pair/<repo>-<hash>/claude-to-codex/<thread>/001-request.md
   pair wait  ⏳                              pair wait ◀── picks it up
                     002-review.md ◀── pair send review --verdict changes
   verify findings, fix
@@ -41,7 +41,17 @@ pair init
 `init` writes a Claude Code skill (`.claude/skills/pair/SKILL.md`) and a section in `AGENTS.md`
 for Codex. Both explain the protocol to the agent.
 
-Both agents' sandboxes must be able to write to `~/.pair`. Add this to each config:
+If Claude Code also reads `AGENTS.md` (directly or through a `CLAUDE.md` import), add this to
+`CLAUDE.md` after any imports so Claude keeps its own role:
+
+```md
+The pair section in AGENTS.md applies only to Codex.
+For pair, use the pair skill and always pass --as claude.
+```
+
+Both agents' sandboxes must be able to write to `~/.pair`, or `$PAIR_HOME` if set. `pair init`
+prints the configuration snippets with your actual path; add them to the corresponding configs.
+For the default directory, they look like this:
 
 ```toml
 # ~/.codex/config.toml
@@ -53,6 +63,9 @@ writable_roots = ["/Users/you/.pair"]
 // ~/.claude/settings.json
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
+
+After setup, start Claude Code and Codex in separate terminals in this repo. Restart any sessions
+that were already open so they load the new instructions and sandbox settings.
 
 ## Use
 
