@@ -5,9 +5,22 @@ These instructions are for `{{AGENT}}` only. If you are not `{{AGENT}}`, ignore 
 You are `{{AGENT}}`. Your partner `{{PARTNER}}` runs in another terminal on the same repo.
 You talk only through the `pair` CLI. Always pass `--as {{AGENT}}`.
 
-`pair wait` blocks for up to 9 minutes. Run it with a shell timeout of at least 600000 ms
-(Claude Code Bash `timeout: 600000`, Codex `timeout_ms: 600000`). If it exits with code 2
-("no message yet"), run it again. Don't treat that as an error.
+## How to wait
+
+`pair wait` returns as soon as a message for you arrives. Wait in whichever way costs the fewest
+model turns:
+
+- If you are Claude Code in an interactive session: run `pair wait --as {{AGENT}} --timeout 3600` as
+  a background command (`run_in_background: true`) and end your turn. You'll be resumed when it exits.
+  Then read its output.
+- If you are Codex: run `pair wait --as {{AGENT}} --timeout 3600`, and check on it with the longest
+  wait window your runtime allows. Skip status updates while idle unless your instructions require them.
+- Otherwise, including headless `claude -p` or when background commands are unavailable: run
+  `pair wait --as {{AGENT}}` in the foreground with a shell timeout above 600 seconds. It gives up
+  after 540 seconds by default.
+
+If `pair wait` exits with code 2 ("no message yet"), start it again. That isn't an error. If it ends
+any other way (cancelled by you or the user, or failed), don't restart it. Tell the user what happened.
 
 ## Ask {{PARTNER}} for a review (you are the author)
 
@@ -24,7 +37,7 @@ When you finish a task:
    - src/a.ts
    EOF
    ```
-2. `pair wait --as {{AGENT}}`
+2. Wait for the review (see How to wait).
 3. On a review with verdict `changes`, check every finding against the code yourself. Reviewers
    are sometimes wrong. For each one, fix it, reject it with a concrete reason, or defer it. Then reply:
    ```
@@ -39,7 +52,7 @@ When you finish a task:
 
 ## Review for {{PARTNER}} (when the user says "be my reviewer" or "listen")
 
-Loop: `pair wait --as {{AGENT}}`, review, send your review, then wait again.
+Loop: wait for a message (see How to wait), review, send your review, then wait again.
 
 - On a request, read the listed files in the repo and review the change.
 - On a response, re-check fixed findings and judge each rejection on its merits. Accept good

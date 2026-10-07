@@ -10,7 +10,7 @@ and they talk through a shared directory that works like a chat channel.
 | Topology | Two live sessions. No headless spawning. |
 | Roles | Symmetric. Either agent can author or review. |
 | Interface | One `pair` CLI (Node/TS). The agents learn it from a thin prompt: a Claude skill and an AGENTS.md section for Codex. |
-| Waiting | `pair wait` blocks, polls every second, and gives up after 540s with exit 2 so the agent runs it again. This keeps it under Claude Code's 10-minute Bash cap. |
+| Waiting | `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s (exit 2), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex checks on it with long wait windows, which cuts idle wake-ups (about 12 an hour at the default 5-minute maximum) but doesn't remove them. Headless runs wait in the foreground. |
 | Pickup | The reviewer runs `pair wait` in a loop ("be my reviewer"). |
 | Request | The author's summary plus a list of files. The reviewer reads the files from the shared repo. |
 | Review | Numbered findings with severity, and a verdict of `approve` or `changes`. Multiple rounds. |
@@ -75,4 +75,4 @@ pair init
 - A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a hint to move its files into a subdirectory, and the messages are left untouched.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
 - Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
-- Codex's shell tool needs `timeout_ms` of at least 600000 for `pair wait`. The prompt says so, but whether Codex follows it hasn't been tested with a live session yet.
+- Completion-driven waiting is verified only for interactive Claude Code sessions, with waits of up to a few minutes. A full hour is untested. Headless `claude -p` ends background commands after its final result, so the prompt falls back to a foreground wait. Codex's idle cost depends on the longest wait window its runtime allows. Its own instructions may cap that below a minute. Whether Codex resumes automatically after ending its turn is unverified.
