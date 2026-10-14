@@ -198,7 +198,7 @@ so a cleanup problem doesn't prevent delivering a review or starting the next th
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `PAIR_HOME` | `~/.pair` | Root directory for channels |
+| `PAIR_HOME` | `~/.pair` | Root directory for channels. A relative path resolves against the worktree root; empty means the default |
 | `PAIR_AGENT` | (none) | Default for `--as` |
 | `PAIR_MAX_ROUNDS` | `3` | Number of review rounds before escalation |
 | `PAIR_KEEP` | `100` | Finished threads to keep, by finish time. Older ones are deleted whenever a thread finishes. `all` keeps everything, `0` keeps none |

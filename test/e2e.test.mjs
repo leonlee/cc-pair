@@ -737,6 +737,27 @@ test("init pins codex only outside the worktree, the channels and temp directori
   }
 });
 
+test("a relative PAIR_HOME means the same channel from any subdirectory, and pair mcp gets it absolute", async () => {
+  const { root, env } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  spawnSync("git", ["init", "-q"], { cwd: root });
+  mkdirSync(join(root, "sub"));
+  const relative = { ...env, PAIR_HOME: "home" };
+  const printed = spawnSync("node", [CLI, "init"], { cwd: root, env: relative, encoding: "utf8" }).stdout;
+  const home = printed.match(/--env 'PAIR_HOME=([^']+)'/)?.[1];
+  assert.equal(home, join(realpathSync(root), "home"));
+  spawnSync("node", [CLI, "register"], { cwd: join(root, "sub"), env: { ...relative, CODEX_THREAD_ID: thread } });
+  // Codex passes the server only what the command sets, so give it exactly that PAIR_HOME.
+  const server = startMcp({ ...env, PAIR_HOME: home, PAIR_CODEX: fakeCodex(root).codex });
+  try {
+    assert.equal((await server.listen(thread)).isError, undefined, "registered from a subdirectory, found by the server");
+  } finally {
+    assert.equal(await server.stop(), 0);
+  }
+  const empty = spawnSync("node", [CLI, "status"], { cwd: root, env: { ...env, PAIR_HOME: "", HOME: root }, encoding: "utf8" }).stdout;
+  assert.match(empty, new RegExp(`channel: ${join(root, ".pair")}/`), "an empty PAIR_HOME means the default");
+});
+
 test("pair mcp writes nothing in the channel, so a channel swapped for a symlink can't redirect it", async () => {
   const { root, env, ok } = sandbox();
   const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";

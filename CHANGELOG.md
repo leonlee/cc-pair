@@ -16,3 +16,6 @@ live test. Without the MCP server, Codex checks once and then only checks again 
 
 The timeout line from `pair wait` no longer tells every agent to run it again. Each agent's generated
 instructions now decide whether to wait again.
+
+A relative `PAIR_HOME` now resolves against the worktree root instead of the current directory, so
+every subdirectory of a worktree uses one channel. An empty `PAIR_HOME` now means the default.

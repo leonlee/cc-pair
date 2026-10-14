@@ -178,15 +178,17 @@ function worktreeRoot(): string {
   return realpathSync(gitPath("--show-toplevel") ?? process.cwd());
 }
 
-function pairHome(): string {
-  return resolve(process.env.PAIR_HOME ?? join(homedir(), ".pair"));
+/** A relative PAIR_HOME resolves against the worktree root, not cwd, so every subdirectory finds one channel. */
+function pairHome(root: string): string {
+  const configured = process.env.PAIR_HOME;
+  return configured ? resolve(root, configured) : join(homedir(), ".pair"); // empty means unset
 }
 
 function channelDir(root: string): string {
   // One channel per worktree: a reviewer reads the author's files, so both must share a checkout.
   // realpath so /tmp/x and /private/tmp/x (or any symlinked checkout) share one channel.
   const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
-  return join(pairHome(), `${basename(root)}-${hash}`);
+  return join(pairHome(root), `${basename(root)}-${hash}`);
 }
 
 function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
@@ -636,7 +638,7 @@ function realpathOrSelf(path: string): string {
  * can write: the worktree, the channels, or a temporary directory.
  */
 function findCodex(root: string): string | undefined {
-  const untrusted = [root, pairHome(), tmpdir(), process.env.TMPDIR, "/tmp", "/var/tmp"]
+  const untrusted = [root, pairHome(root), tmpdir(), process.env.TMPDIR, "/tmp", "/var/tmp"]
     .filter((dir): dir is string => Boolean(dir))
     .flatMap((dir) => [resolve(dir), realpathOrSelf(dir)]);
   const agentWritable = (path: string): boolean =>
@@ -662,9 +664,10 @@ function listen(thread: unknown, watches: Map<string, Watch>): string {
     throw new PairError("the tool call carried no Codex session id (_meta.threadId), so pair can't notify this session");
   }
   const codex = pinnedCodex();
-  const registered = readdirOrEmpty(pairHome())
+  const home = pairHome(process.cwd()); // the server has no worktree; `pair init` passes an absolute PAIR_HOME
+  const registered = readdirOrEmpty(home)
     .filter((entry) => entry.isDirectory())
-    .map((entry) => join(pairHome(), entry.name))
+    .map((entry) => join(home, entry.name))
     .filter((channel) => {
       try {
         return readRegistration(channel)?.thread === thread;
@@ -1107,7 +1110,7 @@ function init(channel: string, root: string): string {
 function mcpAddCommand(root: string): string {
   const stateHome = process.env.XDG_STATE_HOME;
   const env = [
-    ...(process.env.PAIR_HOME ? [`PAIR_HOME=${pairHome()}`] : []),
+    ...(process.env.PAIR_HOME ? [`PAIR_HOME=${pairHome(root)}`] : []),
     ...(stateHome && isAbsolute(stateHome) ? [`XDG_STATE_HOME=${resolve(stateHome)}`] : []),
     `PAIR_CODEX=${findCodex(root) ?? "<absolute path of codex>"}`,
   ];
