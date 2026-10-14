@@ -60,6 +60,34 @@ writable_roots = ["/Users/you/.pair"]
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
 
+### Let pair wake Codex (recommended)
+
+Without this, an idle Codex checks for messages about once a minute, and every check is a model
+call. With it, Codex ends its turn and pair wakes it only when a message arrives. Register pair's MCP
+server once (`pair init` prints this command with your actual path):
+
+```sh
+codex mcp add --env "PAIR_CODEX=/opt/homebrew/bin/codex" pair -- "/path/to/node_modules/claude-codex-pair/dist/pair.js" mcp
+```
+
+Codex then runs `pair register` in its shell and calls the `pair_listen` tool before it waits. The
+MCP server watches the channel and runs `codex queue` with a fixed note when a message for Codex is
+pending. The note never contains message text. Codex reads the message itself with `pair wait`.
+
+- Point the command at the installed package, not at a checkout you edit. `PAIR_CODEX` pins the
+  `codex` executable the server runs. The server runs outside Codex's sandbox, so it never looks
+  `codex` up on `PATH`.
+- `pair_listen` needs MCP tool approval, so Codex's `never` approval policy is unsupported. With
+  `on-request`, approve the first call.
+- Notifications stop when the Codex session ends, or when Codex runs `pair unregister` ("stop as
+  reviewer"). A note that pair already queued still runs.
+- Not yet verified end to end. With Codex CLI 0.162.1 we measured each part separately: `codex queue`
+  wakes an idle session from a plain shell; an MCP server runs outside the shell sandbox; it receives
+  the session id in `_meta.threadId`; and it exits with the TUI. A real registered session waking
+  through `pair mcp` is still the release check. Desktop and IDE sessions are untested.
+- `pair status` shows the registered session and the listener's last event. The full log is
+  `codex.listen.log` in the channel directory.
+
 After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
 worktree has its own channel, so an agent started in another checkout won't see the messages
 (see [Worktrees](#worktrees)). Restart any sessions that were already open so they load the new
@@ -104,6 +132,8 @@ pair status
 pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
 pair clean --keep N        # delete all but the N newest finished threads
 pair init
+pair register | unregister # run by Codex in its shell: let pair_listen notify this session
+pair mcp                   # stdio MCP server for Codex (see "Let pair wake Codex")
 ```
 
 `pair status` shows the channel, worktree root, installed package version, and each lane's turn.
@@ -118,6 +148,8 @@ codex-to-claude: idle
 instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
   .claude/skills/pair/SKILL.md: current
+codex notifications: session 01a13922-c08f-79e3-a41f-6780876fd9c5, registered 2026-10-14T08:00:00.000Z
+  last listener event: 2026-10-14T08:05:12.345Z notified 01a13922-… about /Users/you/.pair/…/001-request.md
 ```
 
 Instruction states are `current`, `stale`, `missing`, or `unreadable`. The check compares only

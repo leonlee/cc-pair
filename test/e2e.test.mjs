@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
@@ -10,7 +11,8 @@ const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "pair-test-"));
-  const env = { ...process.env, PAIR_HOME: join(root, "home"), PAIR_AGENT: "" };
+  // CODEX_THREAD_ID is cleared so tests behave the same when run from a Codex shell.
+  const env = { ...process.env, PAIR_HOME: join(root, "home"), PAIR_AGENT: "", CODEX_THREAD_ID: "" };
   const run = (args, input) => {
     const result = spawnSync("node", [CLI, ...args], { cwd: root, env, input, encoding: "utf8" });
     return { code: result.status, out: result.stdout + result.stderr };
@@ -22,6 +24,51 @@ function sandbox() {
   };
   return { root, env, run, ok };
 }
+
+/** A fake codex that records each call's argv, optionally failing the first call. */
+function fakeCodex(root, { failFirst = false } = {}) {
+  const calls = join(root, "queue-calls");
+  const codex = join(root, "fake-codex");
+  const fail = failFirst ? `if [ ! -e "${calls}.failed" ]; then : > "${calls}.failed"; echo boom >&2; exit 1; fi\n` : "";
+  writeFileSync(codex, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\n${fail}`);
+  chmodSync(codex, 0o755);
+  return { codex, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trimEnd().split("\n") : []) };
+}
+
+function startMcp(env) {
+  const server = spawn("node", [CLI, "mcp"], { cwd: tmpdir(), env, stdio: ["pipe", "pipe", "inherit"] });
+  const responses = new Map();
+  const waiters = new Map();
+  createInterface({ input: server.stdout }).on("line", (line) => {
+    const message = JSON.parse(line);
+    responses.set(message.id, message);
+    waiters.get(message.id)?.(message);
+  });
+  let id = 0;
+  const call = (method, params) => {
+    id += 1;
+    server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    return responses.get(id) ?? new Promise((resolve) => waiters.set(id, resolve));
+  };
+  const listen = async (threadId) => (await call("tools/call", { name: "pair_listen", arguments: {}, ...(threadId ? { _meta: { threadId } } : {}) })).result;
+  const stop = () => {
+    server.stdin.end();
+    return Promise.race([
+      new Promise((resolve) => (server.exitCode !== null ? resolve(server.exitCode) : server.once("exit", resolve))),
+      new Promise((resolve) => setTimeout(() => resolve("still running"), 5000)),
+    ]);
+  };
+  return { server, call, listen, stop };
+}
+
+async function until(check, what) {
+  for (let i = 0; i < 100 && !check(); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(check(), what);
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 2500));
 
 test("full review loop: request, changes, response, approve", () => {
   const { run, ok } = sandbox();
@@ -539,4 +586,129 @@ test("each git worktree gets its own channel, so parallel pairs stay isolated", 
   assert.equal(send.status, 0, send.stderr);
   const other = spawnSync("node", [CLI, "wait", "--as", "codex", "--timeout", "1"], { cwd: linked, env, encoding: "utf8" });
   assert.match(other.stdout, /^pair: no message for codex yet\./, "a reviewer in another worktree doesn't see it");
+});
+
+test("register binds the calling Codex session and only that session can unregister it", () => {
+  const { root, env, ok } = sandbox();
+  const as = (thread, args) => {
+    const result = spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread }, encoding: "utf8" });
+    return { code: result.status, out: result.stdout + result.stderr };
+  };
+  const mine = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  const other = "01a13927-59e7-74b1-8f59-306c2811e2b1";
+  assert.match(as("", ["register"]).out, /CODEX_THREAD_ID is not set/);
+  assert.match(as("not-a-uuid", ["register"]).out, /not a session id/);
+  assert.match(as(mine, ["register"]).out, /registered codex session 01a13922/);
+  assert.match(ok(["status"]), /codex notifications: session 01a13922-c08f-79e3-a41f-6780876fd9c5, registered/);
+  assert.match(as(other, ["register"]).out, /replaced 01a13922/, "a newer session takes over and says so");
+
+  const refused = as(mine, ["unregister"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.out, /different codex session .*01a13927.*nothing changed/, "an old session can't silence the new one");
+  assert.match(ok(["status"]), /codex notifications: session 01a13927/);
+  assert.match(ok(["unregister"]), /unregistered codex session 01a13927/, "the user's own shell can always unregister");
+  assert.match(ok(["status"]), /codex notifications: no session registered/);
+});
+
+test("pair mcp notifies the registered session once per pending message, with a fixed nudge", async () => {
+  const { root, env, ok } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  const { codex, calls } = fakeCodex(root, { failFirst: true });
+  const registered = spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread }, encoding: "utf8" });
+  assert.equal(registered.status, 0, registered.stderr);
+
+  const servers = [];
+  const start = (serverEnv) => {
+    const server = startMcp(serverEnv);
+    servers.push(server);
+    return server;
+  };
+  try {
+    const unpinned = start({ ...env, PAIR_CODEX: "codex" });
+    assert.match((await unpinned.listen(thread)).content[0].text, /PAIR_CODEX must be the absolute path/, "codex is never looked up on PATH");
+
+    const first = start({ ...env, PAIR_CODEX: codex });
+    assert.equal((await first.call("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.name, "pair");
+    first.server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    assert.deepEqual((await first.call("tools/list", {})).result.tools.map((tool) => tool.name), ["pair_listen"]);
+    const noMeta = await first.listen(undefined);
+    assert.equal(noMeta.isError, true);
+    assert.match(noMeta.content[0].text, /no Codex session id/);
+    assert.match((await first.listen("01a13927-59e7-74b1-8f59-306c2811e2b1")).content[0].text, /isn't registered/);
+    const listening = await first.listen(thread);
+    assert.equal(listening.isError, undefined, listening.content[0].text);
+    assert.match(listening.content[0].text, /End your turn now/);
+    const second = start({ ...env, PAIR_CODEX: codex });
+    assert.equal((await second.listen(thread)).isError, undefined, "a second Codex process on the same session listens too");
+
+    ok(["send", "request", "--as", "claude", "-"], "SECRET partner text");
+    await until(() => calls().length === 2, "the failed queue call is retried");
+    const [, nudge] = calls();
+    assert.match(nudge, new RegExp(`^queue --thread ${thread} --message pair: a message is waiting for you\\. Run \`pair wait --as codex --timeout 5\``));
+    assert.doesNotMatch(nudge, /SECRET/, "channel content never reaches Codex as user input");
+    assert.equal((await first.listen(thread)).isError, undefined);
+    assert.equal((await second.listen(thread)).isError, undefined);
+    await settle();
+    assert.equal(calls().length, 2, "neither a second process nor listening again re-sends a pending message");
+
+    ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1");
+    ok(["send", "response", "--as", "claude", "-"], "### F1 fixed");
+    await until(() => calls().length === 3, "a new pending message is nudged");
+    await settle();
+    assert.equal(calls().length, 3, "exactly once across both processes");
+
+    ok(["unregister"]);
+    ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "ok");
+    ok(["wait", "--as", "claude", "--timeout", "1"]);
+    ok(["send", "request", "--as", "claude", "-"], "next");
+    await settle();
+    assert.equal(calls().length, 3, "an unregistered session is not notified");
+    assert.match(ok(["status"]), /last listener event: .*stopped notifying/);
+  } finally {
+    const codes = await Promise.all(servers.map((server) => server.stop()));
+    assert.deepEqual(codes, servers.map(() => 0), "each server exits when Codex closes its stdin");
+  }
+});
+
+test("a claim left by a server that died mid-send is taken over once its lease runs out", async () => {
+  const { root, env, ok } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  const { codex, calls } = fakeCodex(root);
+  spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } });
+  const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  const claim = join(dirname(pending), `.001-request.md.${thread}.notified`);
+  writeFileSync(claim, "sending\n"); // a sender that crashed between claiming and queueing
+
+  const server = startMcp({ ...env, PAIR_CODEX: codex });
+  try {
+    assert.equal((await server.listen(thread)).isError, undefined);
+    await settle();
+    assert.equal(calls().length, 0, "a fresh claim belongs to a sender that may still be working");
+    const longAgo = new Date(Date.now() - 5 * 60 * 1000);
+    utimesSync(claim, longAgo, longAgo);
+    await until(() => calls().length === 1, "an abandoned claim is taken over and the message delivered");
+    await until(() => readFileSync(claim, "utf8") === "sent\n", "a confirmed send is recorded");
+    await settle();
+    assert.equal(calls().length, 1);
+  } finally {
+    assert.equal(await server.stop(), 0);
+  }
+});
+
+test("init pins codex outside the worktree, even through a symlink", () => {
+  const { root, env } = sandbox();
+  const inside = join(root, "tools");
+  mkdirSync(inside);
+  writeFileSync(join(inside, "codex"), "#!/bin/sh\n");
+  chmodSync(join(inside, "codex"), 0o755);
+  const outside = mkdtempSync(join(tmpdir(), "pair-path-"));
+  symlinkSync(join(inside, "codex"), join(outside, "codex"));
+  const init = (path) => spawnSync("node", [CLI, "init"], { cwd: root, env: { ...env, PATH: `${path}:${dirname(process.execPath)}` }, encoding: "utf8" }).stdout;
+
+  assert.match(init(outside), /--env "PAIR_CODEX=<absolute path of codex>"/, "a link into the worktree is refused");
+  assert.match(init(inside), /--env "PAIR_CODEX=<absolute path of codex>"/, "a codex inside the worktree is refused");
+  rmSync(join(outside, "codex"));
+  writeFileSync(join(outside, "codex"), "#!/bin/sh\n");
+  chmodSync(join(outside, "codex"), 0o755);
+  assert.match(init(outside), new RegExp(`--env "PAIR_CODEX=${join(outside, "codex")}" pair -- ".*dist/pair\\.js" mcp`));
 });

@@ -10,7 +10,7 @@ and they talk through a shared directory that works like a chat channel.
 | Topology | Two live sessions. No headless spawning. |
 | Roles | Symmetric. Either agent can author or review. |
 | Interface | One `pair` CLI (Node/TS). The agents learn it from a thin prompt: a Claude skill and an AGENTS.md section for Codex. |
-| Waiting | `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s, printing `no message … yet` and exiting 0 (agent UIs show any non-zero exit as a failure), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex starts one `pair wait --timeout 3600` and checks on the running command. In the sessions observed so far, its instructions limit each check (a single blocking tool wait) to 60 seconds and ask for a progress update at least every minute, so an idle Codex wakes about once a minute to check. That limit applies to each check, not to how long the command runs, so Codex doesn't restart `pair wait` every minute. Headless runs wait in the foreground. |
+| Waiting | `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s, printing `no message … yet` and exiting 0 (agent UIs show any non-zero exit as a failure), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex can't do the same, because a finished background command doesn't resume it. Instead, pair's MCP server queues a fixed note into the Codex session when a message is pending (see Notifications), so an idle Codex makes no model calls. Without the MCP server, Codex starts one `pair wait --timeout 3600` and checks on it about once a minute, as its runtime limits each check. Headless runs wait in the foreground. |
 | Pickup | The reviewer runs `pair wait` in a loop ("be my reviewer"). |
 | Request | The author's summary plus a list of files. The reviewer reads the files from the shared repo. |
 | Review | Numbered findings with severity, and a verdict of `approve` or `changes`. Multiple rounds. |
@@ -31,6 +31,8 @@ and they talk through a shared directory that works like a chat channel.
       004-review.md                   # round 2, verdict approve, status approved
   codex-to-claude/
   archive/<iso-ts>-<rand>-<lane>-<approved|escalated>/
+  codex.session                       # Codex session that pair_listen may notify (pair register)
+  codex.listen.log                    # what the MCP listener did, newest last
 ```
 
 Each message has this frontmatter, written by the CLI: `from`, `type`, `round`, `verdict` (reviews only), and `status` (`open`/`approved`/`escalated`).
@@ -77,6 +79,45 @@ cause these failures. Input message files, instruction files, and installed asse
 separately. Automatic pruning still warns and continues; its diagnostics follow the delivered
 message so `wait` keeps its protocol header first even when stdout and stderr are merged.
 
+## Notifications
+
+`codex queue --thread <id> --message <text>` starts a turn in an idle Codex session, and queues
+behind a busy one. It works only outside both sandboxes, because it opens Codex's state databases
+under `~/.codex` read-write. Claude's sandbox can't run it unless it's given write access to
+`~/.codex`, which holds Codex's own config. So `send` doesn't call it. Instead, `pair mcp` runs as
+a stdio MCP server that Codex starts outside its shell sandbox.
+
+1. Codex runs `pair register` in its shell. The CLI writes `codex.session` with `CODEX_THREAD_ID`,
+   which Codex sets in its shell environment, into the channel of that shell's worktree.
+2. Codex calls `pair_listen`, which takes no arguments. The server reads the session id from the
+   call's `_meta.threadId`, which Codex sets, and requires exactly one channel whose `codex.session`
+   names that id. The model supplies no id or path, and the server's own cwd is never used.
+3. Every second, the server reads `pendingFor(channel, "codex")`. It never calls `wait`, so it
+   never archives anything. When the newest pending message file differs from the last one it
+   announced, it runs `codex queue` with a fixed note telling Codex to run `pair wait --timeout 5`.
+   Message text never goes into the note, so the partner's words never arrive as user input. Before
+   every dispatch it checks that `codex.session` still names its session. `pair unregister` or a
+   newer `pair register` stops it.
+
+Before sending, a server creates `.<message file>.<session id>.notified` next to the message, using
+an exclusive create, and writes `sending` in it. Only the server that creates it sends the note, so
+two Codex processes attached to one session, or a repeated `pair_listen`, don't send it twice. After
+`codex queue` succeeds, the claim says `sent`. Other servers then treat the message as notified.
+While it says `sending`, they wait. If `codex queue` fails, the claim is removed, so the retry can
+claim it again. If a claim still says `sending` after 60s, twice the queue timeout, its sender died
+mid-send, and the next server takes it over. Two servers taking over at the same moment can both
+send, which costs one extra short turn. The claim lives in the thread directory and is archived with
+the thread. The server runs `PAIR_CODEX`, an absolute path set when the server is registered,
+never `codex` from `PATH`, because a `PATH` entry an agent can write would turn the fixed call into
+unsandboxed code execution.
+
+A message is announced once. A failed `codex queue` is retried with backoff up to 60s. If a message
+is still pending 10 minutes after its note, the server logs a stall warning and doesn't announce it
+again: the turn may have failed or been cancelled, may be waiting for an approval, or the review may
+just be long. Watches live in the MCP process, which Codex ends with the session, so notifications
+stop with it. A note already accepted by Codex's daemon still runs. A repeated note costs one short
+turn: `pair wait --timeout 5` prints `no message` and Codex ends its turn.
+
 ## Usage
 
 ```
@@ -95,6 +136,8 @@ pair status
 pair history [thread-id]
 pair clean --keep N
 pair init
+pair register | unregister
+pair mcp
 ```
 
 ## Known limits
@@ -102,4 +145,5 @@ pair init
 - A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a hint to move its files into a subdirectory, and the messages are left untouched.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
 - Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
+- Notifications aren't verified end to end yet. With Codex CLI 0.162.1, only the parts were measured: queue wake-up from a plain shell, an MCP server outside the shell sandbox, `_meta.threadId`, and the server exiting with the TUI. A real registered session woken by `pair mcp` is the release check, followed by resume, two worktrees, fork, a second attached TUI, and unregister. Desktop and IDE sessions, `--no-daemon`, and `--remote` are untested. Approval policy `never` makes the `pair_listen` call fail.
 - Completion-driven waiting is verified only for interactive Claude Code sessions, with waits of up to a few minutes. A full hour is untested. Headless `claude -p` ends background commands after its final result, so the prompt falls back to a foreground wait. Codex's built-in instructions (observed in these sessions: no blocking sleep or wait call over 60 seconds, and a progress update at least every minute) outrank a repo prompt, so the prompt leaves the length of each check to those instructions and only fixes the command's lifetime. Two earlier versions got this wrong. One asked for a 5-minute check window, which conflicted with the cap. The next applied the cap to the command itself (`--timeout 55`), so Codex restarted `pair wait` every minute and each run showed up as a separate entry. Whether Codex resumes automatically after ending its turn is unverified.
