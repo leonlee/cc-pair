@@ -1099,8 +1099,20 @@ function init(channel: string, root: string): string {
     sandboxConfig(channel),
     "",
     "To let pair wake Codex when a message arrives, instead of Codex polling, register pair's MCP server once:",
-    `  codex mcp add --env ${JSON.stringify(`PAIR_CODEX=${findCodex(root) ?? "<absolute path of codex>"}`)} pair -- ${JSON.stringify(join(PACKAGE_ROOT, "dist", "pair.js"))} mcp`,
+    `  ${mcpAddCommand(root)}`,
   ].join("\n");
+}
+
+/** Codex starts MCP servers with only HOME, PATH and a few more, so the command carries what `pair mcp` reads. */
+function mcpAddCommand(root: string): string {
+  const stateHome = process.env.XDG_STATE_HOME;
+  const env = [
+    ...(process.env.PAIR_HOME ? [`PAIR_HOME=${pairHome()}`] : []),
+    ...(stateHome && isAbsolute(stateHome) ? [`XDG_STATE_HOME=${resolve(stateHome)}`] : []),
+    `PAIR_CODEX=${findCodex(root) ?? "<absolute path of codex>"}`,
+  ];
+  const flags = env.map((entry) => `--env ${shellQuote(entry)}`).join(" ");
+  return `codex mcp add ${flags} pair -- ${shellQuote(join(PACKAGE_ROOT, "dist", "pair.js"))} mcp`;
 }
 
 /**

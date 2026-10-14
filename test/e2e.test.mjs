@@ -720,7 +720,7 @@ test("init pins codex only outside the worktree, the channels and temp directori
   // Outside the test's worktree and outside every temp directory: the test checkout itself.
   const trusted = mkdtempSync(join(import.meta.dirname, ".pair-path-"));
   const init = (path) => spawnSync("node", [CLI, "init"], { cwd: root, env: { ...env, PATH: `${path}:${dirname(process.execPath)}` }, encoding: "utf8" }).stdout;
-  const placeholder = /--env "PAIR_CODEX=<absolute path of codex>"/;
+  const placeholder = /--env 'PAIR_CODEX=<absolute path of codex>'/;
   try {
     assert.match(init(inside), placeholder, "a codex inside the worktree is refused");
     executable(join(temp, "codex"));
@@ -729,7 +729,9 @@ test("init pins codex only outside the worktree, the channels and temp directori
     assert.match(init(trusted), placeholder, "a link into the worktree is refused");
     rmSync(join(trusted, "codex"));
     executable(join(trusted, "codex"));
-    assert.match(init(trusted), new RegExp(`--env "PAIR_CODEX=${join(trusted, "codex")}" pair -- ".*dist/pair\\.js" mcp`));
+    // Codex hands MCP servers only HOME, PATH and a few more, so pair's own settings travel in the command.
+    const forwarded = `--env 'PAIR_HOME=${env.PAIR_HOME}' --env 'XDG_STATE_HOME=${env.XDG_STATE_HOME}'`;
+    assert.match(init(trusted), new RegExp(`${forwarded} --env 'PAIR_CODEX=${join(trusted, "codex")}' pair -- '.*dist/pair\\.js' mcp`));
   } finally {
     rmSync(trusted, { recursive: true, force: true });
   }

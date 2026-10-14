@@ -69,7 +69,7 @@ you it can't be woken, and checks again only when you ask ("check pair"). Regist
 `pair init` prints this command with your actual paths:
 
 ```sh
-codex mcp add --env "PAIR_CODEX=/opt/homebrew/bin/codex" pair -- "/path/to/node_modules/claude-codex-pair/dist/pair.js" mcp
+codex mcp add --env 'PAIR_CODEX=/opt/homebrew/bin/codex' pair -- '/path/to/node_modules/claude-codex-pair/dist/pair.js' mcp
 ```
 
 Codex then runs `pair register` in its shell and calls the `pair_listen` tool before it waits. The
@@ -82,6 +82,9 @@ pending. The note never contains message text. Codex reads the message itself wi
   (see below). `pair init` won't pin a
   `codex` that is in, or links into, the worktree, the channel directory, or a temp directory,
   because agents can write there.
+- Codex starts MCP servers with only a few variables from your shell, such as `HOME` and `PATH`.
+  If you set `PAIR_HOME` or `XDG_STATE_HOME`, `pair init` adds them to the command. If you change
+  them later, run `codex mcp remove pair` and add the server again.
 - `pair_listen` needs MCP tool approval, so Codex's `never` approval policy is unsupported. With
   `on-request`, approve the first call.
 - Notifications stop when Codex runs `pair unregister` ("stop as reviewer"), or when Codex's
