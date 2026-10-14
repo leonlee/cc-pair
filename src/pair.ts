@@ -26,6 +26,9 @@ const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
 // archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
 const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated)$/;
 const PAIR_SECTION = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->\n?/;
+const PAIR_SECTIONS = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->(?:\r?\n)?/g; // for removal, CRLF too
+// SKILL.md as released versions wrote it (0.1.0 and 0.1.1), so `uninit` can tell it from an edited one.
+const RELEASED_SKILL_SHA256 = ["e9afb64c53d5e90f935bcb66406601a31a91b37758467cf867713e245f8af288"];
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
@@ -1100,6 +1103,11 @@ function init(channel: string, root: string): string {
   ].join("\n");
 }
 
+/** Single-quoted for sh: the channel name comes from the worktree's name, which may hold `$(…)`. */
+function shellQuote(text: string): string {
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
 /**
  * Undoes `init` in this worktree. Every version so far wrote the same two paths and section markers,
  * so this also cleans up after older versions. History and global setup are only reported.
@@ -1111,7 +1119,8 @@ function uninit(channel: string, root: string): string {
   const skillDir = join(root, ".claude", "skills", "pair");
   const skillPath = join(skillDir, "SKILL.md");
   if (existsSync(skillPath)) {
-    if (parseFrontmatter(readFileSync(skillPath, "utf8")).fields.name === "pair") {
+    const skill = readFileSync(skillPath, "utf8");
+    if (skill === claudeSkill() || RELEASED_SKILL_SHA256.includes(createHash("sha256").update(skill).digest("hex"))) {
       rmSync(skillPath);
       removed.push(skillPath);
       // Drop the directories init created, up to the first one that holds something else.
@@ -1123,15 +1132,17 @@ function uninit(channel: string, root: string): string {
         }
       }
     } else {
-      notes.push(`kept: ${skillPath} (its frontmatter doesn't say name: pair, so pair init didn't write it)`);
+      notes.push(`kept: ${skillPath} (it isn't a file pair init wrote, so it may hold your changes; delete it yourself if not)`);
     }
   }
 
   const agentsPath = join(root, "AGENTS.md");
   const agents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
   if (PAIR_SECTION.test(agents)) {
-    // Also take the blank line init put before the section, so the user's text ends as it did.
-    const rest = agents.replace(new RegExp(`\\n?${PAIR_SECTION.source}`, "g"), "");
+    let rest = agents.replace(PAIR_SECTIONS, "");
+    if (/<!-- pair:end -->\s*$/.test(agents)) {
+      rest = rest.replace(/(\r?\n)\r?\n$/, "$1"); // the blank line init put before an appended section
+    }
     if (rest.trim() === "") {
       rmSync(agentsPath);
       removed.push(`${agentsPath} (it held only the pair section)`);
@@ -1149,7 +1160,7 @@ function uninit(channel: string, root: string): string {
 
   const history = [channel, stateDir(channel)].filter((dir) => existsSync(dir));
   if (history.length > 0) {
-    notes.push(`kept: message history. To delete it: rm -rf ${history.map((dir) => JSON.stringify(dir)).join(" ")}`);
+    notes.push(`kept: message history. To delete it: rm -rf ${history.map(shellQuote).join(" ")}`);
   }
   notes.push(
     "If no repo uses pair anymore: run `codex mcp remove pair`, then `npm uninstall -g claude-codex-pair`, and remove the pair home from the sandbox settings `pair init` printed.",

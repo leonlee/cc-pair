@@ -781,7 +781,7 @@ test("uninit removes what init wrote, even from an older version, and keeps ever
   assert.match(out, /removed: .*SKILL\.md/);
   assert.match(out, /removed: the pair section of .*AGENTS\.md/);
   assert.match(out, /removed: the codex session registration/);
-  assert.match(out, /kept: message history\. To delete it: rm -rf /);
+  assert.match(out, /kept: message history\. To delete it: rm -rf '/);
   assert.match(out, /codex mcp remove pair/);
   assert.equal(readFileSync(agents, "utf8"), "# My rules\n\nBe kind.\n", "the user's own text is untouched");
   assert.equal(existsSync(join(root, ".claude")), false, "directories init created are gone once empty");
@@ -789,13 +789,50 @@ test("uninit removes what init wrote, even from an older version, and keeps ever
   assert.match(ok(["status"]), /claude-to-codex: awaiting-review/, "history is kept");
   assert.match(ok(["uninit"]), /^nothing from pair init found in /);
 
-  // A 0.1.x section with different text, in a file that held nothing else, plus a user's own pair skill.
-  writeFileSync(agents, "<!-- pair:start -->\n# pair: old instructions\n<!-- pair:end -->\n");
+  // What 0.1.x wrote: its exact skill, and an AGENTS.md holding only an older section.
   mkdirSync(dirname(skill), { recursive: true });
-  writeFileSync(skill, "---\nname: my-pair-notes\n---\nmine\n");
-  const again = ok(["uninit"]);
-  assert.match(again, /removed: .*AGENTS\.md \(it held only the pair section\)/);
+  writeFileSync(skill, readFileSync(join(import.meta.dirname, "fixtures", "skill-0.1.x.md")));
+  writeFileSync(agents, "<!-- pair:start -->\n# pair: old instructions\n<!-- pair:end -->\n");
+  const old = ok(["uninit"]);
+  assert.match(old, /removed: .*SKILL\.md/, "a skill exactly as 0.1.x wrote it is recognized");
+  assert.match(old, /removed: .*AGENTS\.md \(it held only the pair section\)/);
   assert.equal(existsSync(agents), false);
-  assert.match(again, /kept: .*SKILL\.md \(its frontmatter doesn't say name: pair/);
-  assert.equal(readFileSync(skill, "utf8"), "---\nname: my-pair-notes\n---\nmine\n");
+
+  // A pair skill someone edited is theirs now.
+  mkdirSync(dirname(skill), { recursive: true });
+  writeFileSync(skill, `${readFileSync(join(import.meta.dirname, "fixtures", "skill-0.1.x.md"), "utf8")}\nMy extra rule.\n`);
+  assert.match(ok(["uninit"]), /kept: .*SKILL\.md \(it isn't a file pair init wrote/);
+  assert.match(readFileSync(skill, "utf8"), /My extra rule\./);
+});
+
+test("uninit keeps the text around pair sections in the middle, repeated, or with CRLF", () => {
+  const { root, ok } = sandbox();
+  const agents = join(root, "AGENTS.md");
+  const section = (eol) => ["<!-- pair:start -->", "old", "<!-- pair:end -->", ""].join(eol);
+  const cases = [
+    [`before\n${section("\n")}after\n`, "before\nafter\n"],
+    [`A\n${section("\n")}between\n${section("\n")}Z\n`, "A\nbetween\nZ\n"],
+    [`before\r\n${section("\r\n")}after\r\n`, "before\r\nafter\r\n"],
+    [`mine\r\n\r\n${section("\r\n")}`, "mine\r\n"],
+  ];
+  for (const [text, expected] of cases) {
+    writeFileSync(agents, text);
+    ok(["uninit"]);
+    assert.equal(readFileSync(agents, "utf8"), expected, JSON.stringify(text));
+  }
+});
+
+test("uninit's printed cleanup command is safe to paste for any worktree name", () => {
+  const { root, env } = sandbox();
+  const worktree = join(root, "it's $(touch PWNED) `touch PWNED2`");
+  mkdirSync(worktree);
+  const run = (args, input) => spawnSync("node", [CLI, ...args], { cwd: worktree, env, input, encoding: "utf8" });
+  assert.equal(run(["send", "request", "--as", "claude", "-"], "req").status, 0);
+  const out = run(["uninit"]).stdout;
+  const command = /To delete it: (rm -rf .*)/.exec(out)?.[1];
+  assert.ok(command, out);
+  const channel = join(root, "home", readdirSync(join(root, "home"))[0]);
+  assert.equal(spawnSync("sh", ["-c", command], { cwd: root }).status, 0);
+  assert.equal(existsSync(channel), false, "the command deletes the channel it names");
+  assert.deepEqual(readdirSync(root).filter((name) => name.startsWith("PWNED")), [], "and runs nothing from the name");
 });

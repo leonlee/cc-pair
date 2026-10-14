@@ -210,7 +210,8 @@ pair uninit
 
 This removes three things: `.claude/skills/pair/SKILL.md`, the pair section of `AGENTS.md` (or the
 whole file, if it held nothing else), and the Codex session registration. It also cleans up files
-written by older versions, and it leaves your own content alone. Message history stays in
+written by older versions, and it leaves your own content alone: text outside the pair section stays
+as it was, and a `SKILL.md` you edited is kept and reported. Message history stays in
 `~/.pair/<repo>-<hash>/` and `~/.local/state/pair/<repo>-<hash>/`; `pair uninit` prints the
 `rm -rf` command to delete it. Once no repo uses pair, also run:
 
