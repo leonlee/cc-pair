@@ -62,9 +62,11 @@ writable_roots = ["/Users/you/.pair"]
 
 ### Let pair wake Codex (recommended)
 
-Without this, an idle Codex checks for messages about once a minute, and every check is a model
-call. With it, Codex ends its turn and pair wakes it only when a message arrives. Register pair's MCP
-server once (`pair init` prints this command with your actual path):
+Codex can't wait in the background the way Claude Code does: a finished background command doesn't
+resume it, and keeping a `pair wait` running costs a model call for every check. So Codex doesn't
+poll. Pair's MCP server wakes it when a message arrives. Without the server, Codex checks once, tells
+you it can't be woken, and checks again only when you ask ("check pair"). Register the server once;
+`pair init` prints this command with your actual paths:
 
 ```sh
 codex mcp add --env "PAIR_CODEX=/opt/homebrew/bin/codex" pair -- "/path/to/node_modules/claude-codex-pair/dist/pair.js" mcp
@@ -86,7 +88,8 @@ pending. The note never contains message text. Codex reads the message itself wi
   the session id in `_meta.threadId`; and it exits with the TUI. A real registered session waking
   through `pair mcp` is still the release check. Desktop and IDE sessions are untested.
 - `pair status` shows the registered session and the listener's last event. The full log is
-  `codex.listen.log` in the channel directory.
+  `codex.listen.log` in the channel directory. At 256 KB it becomes `codex.listen.log.1`, replacing
+  the previous one.
 
 After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
 worktree has its own channel, so an agent started in another checkout won't see the messages
@@ -95,7 +98,8 @@ instructions and sandbox settings.
 
 ## Use
 
-1. In the reviewer's terminal, say **"be my reviewer"**. The agent loops on `pair wait`.
+1. In the reviewer's terminal, say **"be my reviewer"**. Claude waits on `pair wait` in a background
+   command. Codex registers with pair's MCP server and ends its turn until a message wakes it.
 2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
 3. Watch them go back and forth. The author verifies each finding before fixing it, and can reject
    one with a reason.

@@ -30,6 +30,7 @@ const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
 const LISTEN_LOG = "codex.listen.log";
+const LISTEN_LOG_MAX_BYTES = 256 * 1024; // then it becomes codex.listen.log.1, replacing the previous one
 const STALL_MS = 10 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 30_000;
 const CLAIM_LEASE_MS = 2 * QUEUE_TIMEOUT_MS; // longer than any live `codex queue` call can hold a claim
@@ -520,9 +521,25 @@ function unregister(channel: string): string {
   return `unregistered codex session ${current.thread}: pair stops notifying it`;
 }
 
+/** Keeps the log to at most two files, so a long-lived channel doesn't grow without bound. */
+function rotateLog(path: string): void {
+  if ((statSync(path, { throwIfNoEntry: false })?.size ?? 0) <= LISTEN_LOG_MAX_BYTES) {
+    return;
+  }
+  try {
+    renameSync(path, `${path}.1`);
+  } catch (error) {
+    if (!isMissing(error)) {
+      throw error; // ENOENT: another server rotated it first
+    }
+  }
+}
+
 function logListen(channel: string, text: string): void {
   try {
-    appendFileSync(join(channel, LISTEN_LOG), `${new Date().toISOString()} ${text}\n`);
+    const path = join(channel, LISTEN_LOG);
+    rotateLog(path);
+    appendFileSync(path, `${new Date().toISOString()} ${text}\n`);
   } catch (error) {
     console.error(`pair: cannot write ${LISTEN_LOG}: ${String(error)}\n${text}`); // stderr: stdout is the MCP stream
   }

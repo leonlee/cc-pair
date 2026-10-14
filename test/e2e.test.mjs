@@ -679,9 +679,14 @@ test("a claim left by a server that died mid-send is taken over once its lease r
   const claim = join(dirname(pending), `.001-request.md.${thread}.notified`);
   writeFileSync(claim, "sending\n"); // a sender that crashed between claiming and queueing
 
+  const log = join(dirname(dirname(dirname(pending))), "codex.listen.log");
+  writeFileSync(log, "old event\n".repeat(30_000)); // past the 256 KB rotation size
+
   const server = startMcp({ ...env, PAIR_CODEX: codex });
   try {
     assert.equal((await server.listen(thread)).isError, undefined);
+    assert.match(readFileSync(log, "utf8"), /^\S+ listening for 01a13922/, "a full log is rotated before the next event");
+    assert.equal(readFileSync(`${log}.1`, "utf8"), "old event\n".repeat(30_000), "one previous log is kept");
     await settle();
     assert.equal(calls().length, 0, "a fresh claim belongs to a sender that may still be working");
     const longAgo = new Date(Date.now() - 5 * 60 * 1000);
