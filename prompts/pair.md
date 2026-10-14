@@ -13,13 +13,17 @@ model turns:
 - If you are Claude Code in an interactive session: run `pair wait --as {{AGENT}} --timeout 3600` as
   a background command (`run_in_background: true`) and end your turn. You'll be resumed when it exits.
   Then read its output.
-- If you are Codex: start `pair wait --as {{AGENT}} --timeout 3600` once and keep it running. Check
-  on it as your tools allow, keeping each check within any wait limit in your instructions (for
-  example, 55 seconds). A limit on checks doesn't limit how long the command runs, unless your
-  instructions also limit command lifetime. Don't start another `pair wait` until the running one
-  exits, and re-run it only when it times out (see below). If a check is interrupted, the command
-  may still be running: keep checking that session, or stop it and confirm it exited before starting
-  a new one.
+- If you are Codex: run `pair register` in your shell, call the `pair_listen` tool, then end your
+  turn. Never keep a `pair wait` running or poll for messages: each check costs a model call. Do this
+  before your first wait in a session, and again after the session restarts or resumes; repeating it
+  is harmless. When a message arrives, pair queues a short note starting with `pair:` into this
+  session. Then run `pair wait --as {{AGENT}} --timeout 5`, act on what it prints, send your reply if
+  one is due, and end your turn again. If it prints `pair: no message for`, there's nothing to do:
+  end your turn.
+  If you don't have `pair_listen`, or `pair register` or `pair_listen` fails, run
+  `pair wait --as {{AGENT}} --timeout 5` once and act on any message. Then tell the user that pair
+  can't wake you, quoting the error if there was one, and that `pair init` prints the setup. End your
+  turn. When the user asks you to check pair, run `pair wait --as {{AGENT}} --timeout 5` once again.
 - Otherwise, including headless `claude -p` or when background commands are unavailable: run
   `pair wait --as {{AGENT}}` in the foreground with a shell timeout above 600 seconds. It gives up
   after 540 seconds by default.
@@ -33,7 +37,8 @@ report new messages or failures normally.
 finished, such as an approval you missed, run `pair history`, then `pair history <id>`.
 
 Read the first line of `pair wait`'s output. If it starts with `pair: no message for`, the wait timed
-out: start it again. That isn't an error. If it starts with `== pair:`, a message was delivered. Act on
+out: start it again, unless you are Codex (see above). That isn't an error. If it starts with
+`== pair:`, a message was delivered. Act on
 it, even if its body quotes timeout text. If `pair wait` ends any other way (a non-zero exit, or
 cancelled by you or the user), don't restart it. Tell the user what happened.
 
@@ -83,5 +88,10 @@ EOF
 
 Use `--verdict approve` when no high- or medium-severity finding is still open.
 If `send review` prints ESCALATED, stop the loop and ask the user how to proceed.
+When the user tells you to stop reviewing, stop waiting. If you ran `pair register`, also run
+`pair unregister` so pair stops notifying you. A `pair:` note that pair queued before that can still
+arrive, and so can one sent within a minute or two after Codex closes. If a note arrives after the
+user told you to stop, and they haven't asked you to review or check pair since, don't act on it: say
+that a pair message is waiting and end your turn.
 Severity levels: `high` (bug, data loss, security), `medium` (likely bug, missing edge case),
 `low` (style, naming).

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -25,7 +26,21 @@ const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
 // archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
 const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated)$/;
 const PAIR_SECTION = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->\n?/;
+const PAIR_SECTIONS = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->(?:\r?\n)?/g; // for removal, CRLF too
+// SKILL.md as released versions wrote it (0.1.0 and 0.1.1), so `uninit` can tell it from an edited one.
+const RELEASED_SKILL_SHA256 = ["e9afb64c53d5e90f935bcb66406601a31a91b37758467cf867713e245f8af288"];
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
+const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
+const LISTEN_LOG = "codex.listen.log";
+const LISTEN_LOG_MAX_BYTES = 256 * 1024; // then it becomes codex.listen.log.1, replacing the previous one
+const CLAIM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const STALL_MS = 10 * 60 * 1000;
+const QUEUE_TIMEOUT_MS = 30_000;
+const CLAIM_LEASE_MS = 2 * QUEUE_TIMEOUT_MS; // longer than any live `codex queue` call can hold a claim
+// Fixed text on purpose: nothing from the channel may reach Codex as user input.
+const NUDGE =
+  "pair: a message is waiting for you. Run `pair wait --as codex --timeout 5`, act on what it prints as the pair instructions in AGENTS.md describe, send your reply if one is due, then end your turn. Don't start another pair wait.";
 
 interface Message {
   file: string;
@@ -52,8 +67,12 @@ interface Thread {
 
 class PairError extends Error {}
 
+function hasCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
 function isMissing(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
+  return hasCode(error, "ENOENT");
 }
 
 function sandboxConfig(channel: string): string {
@@ -159,11 +178,17 @@ function worktreeRoot(): string {
   return realpathSync(gitPath("--show-toplevel") ?? process.cwd());
 }
 
+/** A relative PAIR_HOME resolves against the worktree root, not cwd, so every subdirectory finds one channel. */
+function pairHome(root: string): string {
+  const configured = process.env.PAIR_HOME;
+  return configured ? resolve(root, configured) : join(homedir(), ".pair"); // empty means unset
+}
+
 function channelDir(root: string): string {
   // One channel per worktree: a reviewer reads the author's files, so both must share a checkout.
   // realpath so /tmp/x and /private/tmp/x (or any symlinked checkout) share one channel.
   const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
-  return join(resolve(process.env.PAIR_HOME ?? join(homedir(), ".pair")), `${basename(root)}-${hash}`);
+  return join(pairHome(root), `${basename(root)}-${hash}`);
 }
 
 function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
@@ -183,7 +208,7 @@ function parseFrontmatter(text: string): { fields: Record<string, string>; body:
 
 /** Parses a stored message and rejects anything the CLI would not have written. */
 function readMessage(path: string, thread: Thread): Message {
-  const { fields, body } = parseFrontmatter(readFileSync(path, "utf8"));
+  const { fields, body } = parseFrontmatter(readChannelFile(path));
   const corrupt = `corrupt message ${path}:`;
   const type = oneOf(fields.type, MESSAGE_TYPES, `${corrupt} type`);
   if (!basename(path).endsWith(`-${type}.md`)) {
@@ -435,6 +460,454 @@ async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise
   }
 }
 
+interface Registration {
+  thread: string; // Codex session id, from CODEX_THREAD_ID in the session's own shell
+  worktree: string;
+  registeredAt: string;
+}
+
+/**
+ * `pair mcp` runs outside the agents' sandboxes, but agents can write the channel. So the files it
+ * opens there must never be symlinks, or an agent could make it read or write any file.
+ */
+function openChannelFile(path: string, flags: number): number {
+  try {
+    return openSync(path, flags | constants.O_NOFOLLOW, 0o600);
+  } catch (error) {
+    if (hasCode(error, "ELOOP")) {
+      throw new PairError(`refusing to follow the symlink at ${path}`);
+    }
+    throw error;
+  }
+}
+
+function readChannelFile(path: string): string {
+  const fd = openChannelFile(path, constants.O_RDONLY);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function writeChannelFile(path: string, text: string, flags: number): void {
+  const fd = openChannelFile(path, constants.O_WRONLY | constants.O_CREAT | flags);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readRegistration(channel: string): Registration | undefined {
+  const path = join(channel, SESSION_FILE);
+  let parsed: Partial<Registration>;
+  try {
+    parsed = JSON.parse(readChannelFile(path)) as Partial<Registration>;
+  } catch (error) {
+    if (isMissing(error)) {
+      return undefined;
+    }
+    throw error instanceof SyntaxError ? new PairError(`corrupt registration ${path}: ${error.message}`) : error;
+  }
+  const { thread, worktree, registeredAt } = parsed;
+  if (typeof thread !== "string" || !SESSION_ID.test(thread) || typeof worktree !== "string" || typeof registeredAt !== "string") {
+    throw new PairError(`corrupt registration ${path}: expected thread, worktree and registeredAt`);
+  }
+  return { thread, worktree, registeredAt };
+}
+
+/** The calling Codex session, or undefined outside Codex. */
+function codexThreadId(): string | undefined {
+  const id = process.env.CODEX_THREAD_ID;
+  if (id === undefined || id === "") {
+    return undefined;
+  }
+  if (!SESSION_ID.test(id)) {
+    throw new PairError(`CODEX_THREAD_ID is not a session id (got "${id}")`);
+  }
+  return id;
+}
+
+/** Runs in Codex's shell, so the worktree comes from the session's real cwd, not from a tool argument. */
+function register(channel: string, root: string): string {
+  const thread = codexThreadId();
+  if (!thread) {
+    throw new PairError("register must run in a Codex session's shell: CODEX_THREAD_ID is not set");
+  }
+  const previous = readRegistration(channel);
+  mkdirSync(channel, { recursive: true });
+  const registration: Registration = { thread, worktree: root, registeredAt: new Date().toISOString() };
+  const tmpPath = join(channel, `.${SESSION_FILE}.${randomBytes(3).toString("hex")}.tmp`);
+  writeFileSync(tmpPath, `${JSON.stringify(registration)}\n`);
+  renameSync(tmpPath, join(channel, SESSION_FILE));
+  const replaced = previous && previous.thread !== thread ? ` (replaced ${previous.thread})` : "";
+  return `registered codex session ${thread} for ${root}${replaced}. Now call the pair_listen tool.`;
+}
+
+function unregister(channel: string): string {
+  const current = readRegistration(channel);
+  if (!current) {
+    return "no codex session is registered for this worktree";
+  }
+  const caller = codexThreadId();
+  // An old session saying "stop" must not silence a newer one. A shell outside Codex is the user.
+  if (caller !== undefined && caller !== current.thread) {
+    throw new PairError(`a different codex session (${current.thread}) is registered here; nothing changed`);
+  }
+  // ponytail: check-then-delete; a re-register in the same instant would be removed too. status shows it.
+  rmSync(join(channel, SESSION_FILE), { force: true });
+  return `unregistered codex session ${current.thread}: pair stops notifying it`;
+}
+
+/** Keeps the log to at most two files, so a long-lived channel doesn't grow without bound. */
+function rotateLog(path: string): void {
+  const stats = lstatSync(path, { throwIfNoEntry: false });
+  if (stats && !stats.isFile()) {
+    rmSync(path, { force: true }); // a symlink planted here: remove the link itself, never its target
+    return;
+  }
+  if ((stats?.size ?? 0) <= LISTEN_LOG_MAX_BYTES) {
+    return;
+  }
+  try {
+    renameSync(path, `${path}.1`);
+  } catch (error) {
+    if (!isMissing(error)) {
+      throw error; // ENOENT: another server rotated it first
+    }
+  }
+}
+
+/**
+ * Where `pair mcp` keeps its own files, the log and the claims: outside every agent's writable roots.
+ * Agents can write the channel, and could swap a directory on a channel path for a symlink between
+ * any check and the write that follows, so the unsandboxed server only ever reads channels.
+ */
+function stateDir(channel: string): string {
+  const configured = process.env.XDG_STATE_HOME;
+  const root = configured && isAbsolute(configured) ? configured : join(homedir(), ".local", "state");
+  return join(resolve(root), "pair", basename(channel));
+}
+
+function logListen(channel: string, text: string): void {
+  try {
+    const path = join(stateDir(channel), LISTEN_LOG);
+    mkdirSync(dirname(path), { recursive: true });
+    rotateLog(path);
+    const singleLine = JSON.stringify(text).slice(1, -1); // escape control characters in agent-chosen paths
+    writeChannelFile(path, `${new Date().toISOString()} ${singleLine}\n`, constants.O_APPEND);
+  } catch (error) {
+    console.error(`pair: cannot write ${LISTEN_LOG}: ${String(error)}\n${text}`); // stderr: stdout is the MCP stream
+  }
+}
+
+interface Watch {
+  channel: string;
+  codex: string; // pinned executable, see pinnedCodex()
+  notified?: string; // the pending message file the last successful nudge was about
+  notifiedAt: number;
+  stallReported: boolean;
+  dispatching: boolean;
+  failures: number;
+  retryAt: number;
+}
+
+/**
+ * The MCP server runs outside Codex's sandbox, so it must not run whatever `codex` PATH points at:
+ * an agent-writable PATH entry would turn the fixed queue call into unsandboxed code execution.
+ */
+function pinnedCodex(): string {
+  const path = process.env.PAIR_CODEX;
+  if (!path || !isAbsolute(path)) {
+    throw new PairError("PAIR_CODEX must be the absolute path of the codex executable. Re-add the MCP server with the command `pair init` prints.");
+  }
+  return path;
+}
+
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path; // doesn't exist (yet); compare it as written
+  }
+}
+
+/**
+ * For `init`: the codex a shell here would run, unless it is, or links to, a file in a place agents
+ * can write: the worktree, the channels, or a temporary directory.
+ */
+function findCodex(root: string): string | undefined {
+  const untrusted = [root, pairHome(root), tmpdir(), process.env.TMPDIR, "/tmp", "/var/tmp"]
+    .filter((dir): dir is string => Boolean(dir))
+    .flatMap((dir) => [resolve(dir), realpathOrSelf(dir)]);
+  const agentWritable = (path: string): boolean =>
+    untrusted.some((dir) => path === dir || path.startsWith(`${dir}${sep}`));
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(dir)) {
+      continue;
+    }
+    const candidate = join(dir, "codex");
+    try {
+      accessSync(candidate, constants.X_OK);
+    } catch {
+      continue; // not in this PATH entry
+    }
+    return agentWritable(candidate) || agentWritable(realpathSync(candidate)) ? undefined : candidate;
+  }
+  return undefined;
+}
+
+/** Finds the one channel where this session ran `pair register`. Thread id comes from trusted call metadata. */
+function listen(thread: unknown, watches: Map<string, Watch>): string {
+  if (typeof thread !== "string" || !SESSION_ID.test(thread)) {
+    throw new PairError("the tool call carried no Codex session id (_meta.threadId), so pair can't notify this session");
+  }
+  const codex = pinnedCodex();
+  const home = pairHome(process.cwd()); // the server has no worktree; `pair init` passes an absolute PAIR_HOME
+  const registered = readdirOrEmpty(home)
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(home, entry.name))
+    .filter((channel) => {
+      try {
+        return readRegistration(channel)?.thread === thread;
+      } catch {
+        return false; // another channel's corrupt registration is that channel's problem; status reports it
+      }
+    });
+  if (registered.length === 0) {
+    throw new PairError("this session isn't registered: run `pair register` in your shell, then call pair_listen again");
+  }
+  if (registered.length > 1) {
+    throw new PairError(`this session is registered in ${registered.length} channels (${registered.join(", ")}); run \`pair unregister\` in the worktrees you don't want`);
+  }
+  const [channel] = registered;
+  if (watches.get(thread)?.channel !== channel) {
+    watches.set(thread, { channel, codex, notifiedAt: 0, stallReported: false, dispatching: false, failures: 0, retryAt: 0 });
+    logListen(channel, `listening for ${thread}`);
+    pruneClaims(channel);
+  }
+  return `listening: pair will queue a short "pair:" note into this session when a message for codex arrives in ${channel}. End your turn now.`;
+}
+
+/**
+ * One nudge per session and message, even with several MCP processes on one session. It says
+ * "sending" while a server holds the right to send, and "sent" once `codex queue` succeeded.
+ */
+function claimPath(channel: string, thread: string, pending: string): string {
+  return join(stateDir(channel), "claims", `${basename(dirname(pending))}.${basename(pending)}.${thread}`);
+}
+
+/** Claims outlive their threads, so old ones are dropped. A still-pending message may get one more note. */
+function pruneClaims(channel: string): void {
+  const dir = join(stateDir(channel), "claims");
+  try {
+    for (const entry of readdirOrEmpty(dir)) {
+      const path = join(dir, entry.name);
+      const stats = lstatSync(path, { throwIfNoEntry: false });
+      if (stats && Date.now() - stats.mtimeMs > CLAIM_MAX_AGE_MS) {
+        rmSync(path, { force: true });
+      }
+    }
+  } catch (error) {
+    logListen(channel, `couldn't prune old claims: ${String(error)}`);
+  }
+}
+
+type Claim = "claimed" | "sent" | "busy";
+
+/** Exclusive create: true if this server now holds the claim. O_EXCL never follows a symlink. */
+function createClaim(path: string): boolean {
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeChannelFile(path, "sending\n", constants.O_EXCL);
+    return true;
+  } catch (error) {
+    if (!hasCode(error, "EEXIST")) {
+      throw error;
+    }
+    return false;
+  }
+}
+
+function claim(path: string): Claim {
+  if (createClaim(path)) {
+    return "claimed";
+  }
+  const stats = lstatSync(path);
+  if (stats.isFile() && readChannelFile(path).trim() === "sent") {
+    return "sent";
+  }
+  if (stats.isFile() && Date.now() - stats.mtimeMs < CLAIM_LEASE_MS) {
+    return "busy"; // another server is sending; if it fails it removes the claim and we try again
+  }
+  // Its sender died mid-send, or this isn't a plain file (say, a planted symlink). Unlinking removes
+  // the entry itself, never a link's target. ponytail: two servers taking over at the same moment
+  // may both send, which costs one extra short turn; a lock for the takeover would be the upgrade.
+  rmSync(path, { force: true });
+  return createClaim(path) ? "claimed" : "busy";
+}
+
+/** Replaces the claim's directory entry, so a symlink put there is replaced, not written through. */
+function markSent(path: string): void {
+  const tmpPath = `${path}.${randomBytes(3).toString("hex")}.tmp`;
+  writeChannelFile(tmpPath, "sent\n", constants.O_EXCL);
+  renameSync(tmpPath, path);
+}
+
+function dispatch(thread: string, watch: Watch, pending: string): void {
+  watch.dispatching = true;
+  const child = execFile(watch.codex, ["queue", "--thread", thread, "--message", NUDGE], { timeout: QUEUE_TIMEOUT_MS }, (error, _stdout, stderr) => {
+    watch.dispatching = false;
+    if (error) {
+      rmSync(claimPath(watch.channel, thread, pending), { force: true }); // let the retry, here or in another process, claim it again
+      watch.failures += 1;
+      const delay = Math.min(60_000, 1000 * 2 ** watch.failures);
+      watch.retryAt = Date.now() + delay;
+      logListen(watch.channel, `codex queue failed for ${pending}, retrying in ${delay / 1000}s: ${stderr.trim() || error.message}`);
+      return;
+    }
+    Object.assign(watch, { notified: pending, notifiedAt: Date.now(), stallReported: false, failures: 0 });
+    logListen(watch.channel, `notified ${thread} about ${pending}`);
+    try {
+      markSent(claimPath(watch.channel, thread, pending));
+    } catch (claimError) {
+      if (!isMissing(claimError)) {
+        logListen(watch.channel, `couldn't mark ${pending} as sent, so another server may send it again: ${String(claimError)}`);
+      }
+    }
+  });
+  child.stdin?.end();
+}
+
+/** One poll for one session. Never archives: reading a closed thread stays the agent's own `pair wait`. */
+function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
+  if (watch.dispatching || Date.now() < watch.retryAt) {
+    return;
+  }
+  try {
+    if (readRegistration(watch.channel)?.thread !== thread) {
+      watches.delete(thread);
+      logListen(watch.channel, `stopped notifying ${thread}: it is no longer the registered session`);
+      return;
+    }
+    const pending = pendingFor(watch.channel, "codex")?.state.last.file;
+    if (pending === undefined) {
+      return;
+    }
+    if (pending !== watch.notified) {
+      let claimed: Claim;
+      try {
+        claimed = claim(claimPath(watch.channel, thread, pending));
+      } catch (error) {
+        if (isMissing(error)) {
+          return; // another server released the claim since we looked: look again next tick
+        }
+        throw error;
+      }
+      if (claimed === "sent") {
+        // Sent by another MCP process on this session, or by an earlier run of this one.
+        Object.assign(watch, { notified: pending, notifiedAt: Date.now(), stallReported: false });
+      } else if (claimed === "claimed") {
+        dispatch(thread, watch, pending);
+      }
+      return;
+    }
+    if (!watch.stallReported && Date.now() - watch.notifiedAt > STALL_MS) {
+      watch.stallReported = true;
+      logListen(
+        watch.channel,
+        `no reply to ${pending} after 10 minutes. The review may just be long, or the turn failed, was cancelled, or waits for an approval. Pair won't notify again; ask Codex to check pair.`,
+      );
+    }
+  } catch (error) {
+    watch.retryAt = Date.now() + 60_000;
+    logListen(watch.channel, `poll failed, retrying in 60s: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+interface McpRequest {
+  jsonrpc?: string;
+  id?: string | number | null;
+  method?: string;
+  params?: { protocolVersion?: string; name?: string; _meta?: { threadId?: unknown } };
+}
+
+const LISTEN_TOOL = {
+  name: "pair_listen",
+  description:
+    "Have pair notify this Codex session when a pair message for codex arrives, so you can end your turn instead of polling. Run `pair register` in your shell first. Takes no arguments.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+};
+
+function mcpResult(request: McpRequest, watches: Map<string, Watch>): unknown {
+  switch (request.method) {
+    case "initialize": {
+      const { version } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string };
+      return {
+        protocolVersion: request.params?.protocolVersion ?? "2025-06-18",
+        capabilities: { tools: {} },
+        serverInfo: { name: "pair", version },
+      };
+    }
+    case "ping":
+      return {};
+    case "tools/list":
+      return { tools: [LISTEN_TOOL] };
+    case "tools/call": {
+      if (request.params?.name !== LISTEN_TOOL.name) {
+        return { content: [{ type: "text", text: `unknown tool: ${String(request.params?.name)}` }], isError: true };
+      }
+      try {
+        return { content: [{ type: "text", text: listen(request.params._meta?.threadId, watches) }] };
+      } catch (error) {
+        if (!(error instanceof PairError)) {
+          throw error;
+        }
+        return { content: [{ type: "text", text: `pair: ${error.message}` }], isError: true };
+      }
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** stdio MCP server. Its watches live and die with this process, which Codex ends with the session. */
+async function serveMcp(): Promise<void> {
+  const watches = new Map<string, Watch>();
+  const timer = setInterval(() => {
+    for (const [thread, watch] of watches) {
+      tick(thread, watch, watches);
+    }
+  }, POLL_MS);
+  const respond = (message: object): void => {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+  };
+  for await (const line of createInterface({ input: process.stdin })) {
+    if (!line.trim()) {
+      continue;
+    }
+    let request: McpRequest;
+    try {
+      request = JSON.parse(line) as McpRequest;
+    } catch {
+      respond({ id: null, error: { code: -32700, message: "parse error" } });
+      continue;
+    }
+    if (request.id === undefined || request.id === null) {
+      continue; // a notification, such as notifications/initialized
+    }
+    try {
+      const result = mcpResult(request, watches);
+      respond(result === undefined ? { id: request.id, error: { code: -32601, message: `method not found: ${request.method}` } } : { id: request.id, result });
+    } catch (error) {
+      // Report it to Codex instead of dying: a crashed server would silently stop every watch.
+      respond({ id: request.id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
+    }
+  }
+  clearInterval(timer); // stdin closed: the session is gone, so stop notifying it
+}
+
 function describe(channel: string, author: Agent): string {
   const thread = threadFor(channel, author);
   const state = stateOf(listMessages(thread));
@@ -462,6 +935,30 @@ function instructionState(path: string, expected: string, sectionOnly = false): 
   }
 }
 
+function notificationStatus(channel: string): string[] {
+  let registration: string;
+  try {
+    const current = readRegistration(channel);
+    registration = current ? `session ${current.thread}, registered ${current.registeredAt}` : "no session registered";
+  } catch (error) {
+    if (!(error instanceof PairError)) {
+      throw error;
+    }
+    registration = error.message;
+  }
+  let lastEvent: string | undefined;
+  try {
+    lastEvent = readChannelFile(join(stateDir(channel), LISTEN_LOG)).trimEnd().split("\n").at(-1);
+  } catch (error) {
+    if (error instanceof PairError) {
+      lastEvent = error.message;
+    } else if (!isMissing(error)) {
+      throw error;
+    }
+  }
+  return [`codex notifications: ${registration}`, ...(lastEvent ? [`  last listener event: ${lastEvent}`] : [])];
+}
+
 function status(channel: string, root: string): string {
   const lanes = channelAccess(channel, () => AGENTS.map((agent) => describe(channel, agent)));
   const { name, version } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
@@ -475,6 +972,7 @@ function status(channel: string, root: string): string {
     "instructions on disk (does not verify what running agents loaded):",
     `  AGENTS.md (pair section): ${agents}`,
     `  .claude/skills/pair/SKILL.md: ${skill}`,
+    ...channelAccess(channel, () => notificationStatus(channel)),
     ...(agents === "missing" || agents === "stale" || skill === "missing" || skill === "stale"
       ? ["Run `pair init` to refresh missing or stale instructions, then reload agent sessions."] : []),
     ...(agents.startsWith("unreadable") || skill.startsWith("unreadable")
@@ -602,7 +1100,98 @@ function init(channel: string, root: string): string {
     `wrote: ${agentsPath} (pair section)`,
     "",
     sandboxConfig(channel),
+    "",
+    "To let pair wake Codex when a message arrives, instead of Codex polling, register pair's MCP server once:",
+    `  ${mcpAddCommand(root)}`,
   ].join("\n");
+}
+
+/** Codex starts MCP servers with only HOME, PATH and a few more, so the command carries what `pair mcp` reads. */
+function mcpAddCommand(root: string): string {
+  const stateHome = process.env.XDG_STATE_HOME;
+  const env = [
+    ...(process.env.PAIR_HOME ? [`PAIR_HOME=${pairHome(root)}`] : []),
+    ...(stateHome && isAbsolute(stateHome) ? [`XDG_STATE_HOME=${resolve(stateHome)}`] : []),
+    `PAIR_CODEX=${findCodex(root) ?? "<absolute path of codex>"}`,
+  ];
+  const flags = env.map((entry) => `--env ${shellQuote(entry)}`).join(" ");
+  return `codex mcp add ${flags} pair -- ${shellQuote(join(PACKAGE_ROOT, "dist", "pair.js"))} mcp`;
+}
+
+/**
+ * `init` appends its section after exactly one added line ending. When the last section ends the file,
+ * drop it with that one line ending, so the user's text ends exactly as before, final newline or not.
+ */
+function withoutAppendedSection(text: string): string {
+  const end = text.lastIndexOf("<!-- pair:end -->");
+  if (end === -1 || text.slice(end + "<!-- pair:end -->".length).trim() !== "") {
+    return text;
+  }
+  const start = text.lastIndexOf("<!-- pair:start -->", end);
+  return start === -1 ? text : text.slice(0, start).replace(/\r?\n$/, "");
+}
+
+/** Single-quoted for sh: the channel name comes from the worktree's name, which may hold `$(…)`. */
+function shellQuote(text: string): string {
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Undoes `init` in this worktree. Every version so far wrote the same two paths and section markers,
+ * so this also cleans up after older versions. History and global setup are only reported.
+ */
+function uninit(channel: string, root: string): string {
+  const removed: string[] = [];
+  const notes: string[] = [];
+
+  const skillDir = join(root, ".claude", "skills", "pair");
+  const skillPath = join(skillDir, "SKILL.md");
+  if (existsSync(skillPath)) {
+    const skill = readFileSync(skillPath, "utf8");
+    if (skill === claudeSkill() || RELEASED_SKILL_SHA256.includes(createHash("sha256").update(skill).digest("hex"))) {
+      rmSync(skillPath);
+      removed.push(skillPath);
+      // Drop the directories init created, up to the first one that holds something else.
+      for (const dir of [skillDir, dirname(skillDir), dirname(dirname(skillDir))]) {
+        try {
+          rmdirSync(dir);
+        } catch {
+          break; // not empty: someone else's files live there
+        }
+      }
+    } else {
+      notes.push(`kept: ${skillPath} (it isn't a file pair init wrote, so it may hold your changes; delete it yourself if not)`);
+    }
+  }
+
+  const agentsPath = join(root, "AGENTS.md");
+  const agents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
+  if (PAIR_SECTION.test(agents)) {
+    const rest = withoutAppendedSection(agents).replace(PAIR_SECTIONS, "");
+    if (rest.trim() === "") {
+      rmSync(agentsPath);
+      removed.push(`${agentsPath} (it held only the pair section)`);
+    } else {
+      writeFileSync(agentsPath, rest);
+      removed.push(`the pair section of ${agentsPath}`);
+    }
+  }
+
+  const registration = join(channel, SESSION_FILE);
+  if (channelAccess(channel, () => lstatSync(registration, { throwIfNoEntry: false }))) {
+    channelAccess(channel, () => rmSync(registration, { force: true }));
+    removed.push("the codex session registration, so pair stops notifying it");
+  }
+
+  const history = [channel, stateDir(channel)].filter((dir) => existsSync(dir));
+  if (history.length > 0) {
+    notes.push(`kept: message history. To delete it: rm -rf ${history.map(shellQuote).join(" ")}`);
+  }
+  notes.push(
+    "If no repo uses pair anymore: run `codex mcp remove pair`, then `npm uninstall -g claude-codex-pair`, and remove the pair home from the sandbox settings `pair init` printed.",
+  );
+  const summary = removed.length > 0 ? removed.map((item) => `removed: ${item}`) : [`nothing from pair init found in ${root}`];
+  return [...summary, ...notes].join("\n");
 }
 
 function readBody(source: string | undefined): string {
@@ -628,11 +1217,14 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 
 const USAGE = `usage:
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-  pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout: run again)
+  pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
-  pair init`;
+  pair init
+  pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
+  pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
+  pair mcp                                            (stdio MCP server for Codex, providing pair_listen)`;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -660,8 +1252,9 @@ async function main(argv: string[]): Promise<number> {
       const me = agent();
       const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
       if (!(await wait(channel, me, timeout))) {
-        // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure.
-        console.log(`pair: no message for ${me} yet. Run \`pair wait --as ${me}\` again.`);
+        // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
+        // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
+        console.log(`pair: no message for ${me} yet.`);
       }
       return 0;
     }
@@ -676,6 +1269,18 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "init":
       console.log(init(channel, root));
+      return 0;
+    case "uninit":
+      console.log(uninit(channel, root));
+      return 0;
+    case "register":
+      console.log(channelAccess(channel, () => register(channel, root)));
+      return 0;
+    case "unregister":
+      console.log(channelAccess(channel, () => unregister(channel)));
+      return 0;
+    case "mcp":
+      await serveMcp();
       return 0;
     default:
       console.error(USAGE);
