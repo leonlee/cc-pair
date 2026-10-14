@@ -114,8 +114,11 @@ unsandboxed code execution.
 A message is announced once. A failed `codex queue` is retried with backoff up to 60s. If a message
 is still pending 10 minutes after its note, the server logs a stall warning and doesn't announce it
 again: the turn may have failed or been cancelled, may be waiting for an approval, or the review may
-just be long. Watches live in the MCP process, which Codex ends with the session, so notifications
-stop with it. A note already accepted by Codex's daemon still runs. A repeated note costs one short
+just be long. Watches live in the MCP process. Codex's app-server daemon starts it and ends it when it unloads
+the session, which took 1–2 minutes after the last TUI on that session quit. Until then, a new
+message still starts a turn with no TUI attached. `pair unregister` stops notifications right away.
+A note already accepted by the daemon still runs either way, so the prompt tells Codex to ignore a
+note that arrives after the user said stop. A repeated note costs one short
 turn: `pair wait --timeout 5` prints `no message` and Codex ends its turn.
 
 ## Usage

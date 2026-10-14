@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, appendFileSync, constants, type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -202,7 +202,7 @@ function parseFrontmatter(text: string): { fields: Record<string, string>; body:
 
 /** Parses a stored message and rejects anything the CLI would not have written. */
 function readMessage(path: string, thread: Thread): Message {
-  const { fields, body } = parseFrontmatter(readFileSync(path, "utf8"));
+  const { fields, body } = parseFrontmatter(readChannelFile(path));
   const corrupt = `corrupt message ${path}:`;
   const type = oneOf(fields.type, MESSAGE_TYPES, `${corrupt} type`);
   if (!basename(path).endsWith(`-${type}.md`)) {
@@ -460,11 +460,44 @@ interface Registration {
   registeredAt: string;
 }
 
+/**
+ * `pair mcp` runs outside the agents' sandboxes, but agents can write the channel. So the files it
+ * opens there must never be symlinks, or an agent could make it read or write any file.
+ */
+function openChannelFile(path: string, flags: number): number {
+  try {
+    return openSync(path, flags | constants.O_NOFOLLOW, 0o600);
+  } catch (error) {
+    if (hasCode(error, "ELOOP")) {
+      throw new PairError(`refusing to follow the symlink at ${path}`);
+    }
+    throw error;
+  }
+}
+
+function readChannelFile(path: string): string {
+  const fd = openChannelFile(path, constants.O_RDONLY);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function writeChannelFile(path: string, text: string, flags: number): void {
+  const fd = openChannelFile(path, constants.O_WRONLY | constants.O_CREAT | flags);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function readRegistration(channel: string): Registration | undefined {
   const path = join(channel, SESSION_FILE);
   let parsed: Partial<Registration>;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Registration>;
+    parsed = JSON.parse(readChannelFile(path)) as Partial<Registration>;
   } catch (error) {
     if (isMissing(error)) {
       return undefined;
@@ -523,7 +556,12 @@ function unregister(channel: string): string {
 
 /** Keeps the log to at most two files, so a long-lived channel doesn't grow without bound. */
 function rotateLog(path: string): void {
-  if ((statSync(path, { throwIfNoEntry: false })?.size ?? 0) <= LISTEN_LOG_MAX_BYTES) {
+  const stats = lstatSync(path, { throwIfNoEntry: false });
+  if (stats && !stats.isFile()) {
+    rmSync(path, { force: true }); // a symlink planted here: remove the link itself, never its target
+    return;
+  }
+  if ((stats?.size ?? 0) <= LISTEN_LOG_MAX_BYTES) {
     return;
   }
   try {
@@ -539,7 +577,7 @@ function logListen(channel: string, text: string): void {
   try {
     const path = join(channel, LISTEN_LOG);
     rotateLog(path);
-    appendFileSync(path, `${new Date().toISOString()} ${text}\n`);
+    writeChannelFile(path, `${new Date().toISOString()} ${text}\n`, constants.O_APPEND);
   } catch (error) {
     console.error(`pair: cannot write ${LISTEN_LOG}: ${String(error)}\n${text}`); // stderr: stdout is the MCP stream
   }
@@ -568,10 +606,24 @@ function pinnedCodex(): string {
   return path;
 }
 
-/** For `init`: the codex a shell here would run, unless it is, or links to, a file agents can write. */
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path; // doesn't exist (yet); compare it as written
+  }
+}
+
+/**
+ * For `init`: the codex a shell here would run, unless it is, or links to, a file in a place agents
+ * can write: the worktree, the channels, or a temporary directory.
+ */
 function findCodex(root: string): string | undefined {
+  const untrusted = [root, pairHome(), tmpdir(), process.env.TMPDIR, "/tmp", "/var/tmp"]
+    .filter((dir): dir is string => Boolean(dir))
+    .flatMap((dir) => [resolve(dir), realpathOrSelf(dir)]);
   const agentWritable = (path: string): boolean =>
-    [root, pairHome()].some((dir) => path === dir || path.startsWith(`${dir}${sep}`));
+    untrusted.some((dir) => path === dir || path.startsWith(`${dir}${sep}`));
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!isAbsolute(dir)) {
       continue;
@@ -629,25 +681,42 @@ function claimPath(thread: string, pending: string): string {
 type Claim = "claimed" | "sent" | "busy";
 
 /** Throws ENOENT when the thread was archived since it was read. */
-function claim(path: string): Claim {
+/** Exclusive create: true if this server now holds the claim. O_EXCL never follows a symlink. */
+function createClaim(path: string): boolean {
   try {
-    writeFileSync(path, "sending\n", { flag: "wx" });
-    return "claimed";
+    writeChannelFile(path, "sending\n", constants.O_EXCL);
+    return true;
   } catch (error) {
     if (!hasCode(error, "EEXIST")) {
       throw error;
     }
+    return false;
   }
-  if (readFileSync(path, "utf8").trim() === "sent") {
+}
+
+function claim(path: string): Claim {
+  if (createClaim(path)) {
+    return "claimed";
+  }
+  const stats = lstatSync(path);
+  if (stats.isFile() && readChannelFile(path).trim() === "sent") {
     return "sent";
   }
-  if (Date.now() - statSync(path).mtimeMs < CLAIM_LEASE_MS) {
+  if (stats.isFile() && Date.now() - stats.mtimeMs < CLAIM_LEASE_MS) {
     return "busy"; // another server is sending; if it fails it removes the claim and we try again
   }
-  // Its sender died mid-send. ponytail: two servers taking over at the same moment may both send,
-  // which costs one extra short turn; a lock for the takeover would be the upgrade.
-  writeFileSync(path, "sending\n");
-  return "claimed";
+  // Its sender died mid-send, or this isn't a plain file (say, a planted symlink). Unlinking removes
+  // the entry itself, never a link's target. ponytail: two servers taking over at the same moment
+  // may both send, which costs one extra short turn; a lock for the takeover would be the upgrade.
+  rmSync(path, { force: true });
+  return createClaim(path) ? "claimed" : "busy";
+}
+
+/** Replaces the claim's directory entry, so a symlink put there is replaced, not written through. */
+function markSent(path: string): void {
+  const tmpPath = `${path}.${randomBytes(3).toString("hex")}.tmp`;
+  writeChannelFile(tmpPath, "sent\n", constants.O_EXCL);
+  renameSync(tmpPath, path);
 }
 
 function dispatch(thread: string, watch: Watch, pending: string): void {
@@ -665,7 +734,7 @@ function dispatch(thread: string, watch: Watch, pending: string): void {
     Object.assign(watch, { notified: pending, notifiedAt: Date.now(), stallReported: false, failures: 0 });
     logListen(watch.channel, `notified ${thread} about ${pending}`);
     try {
-      writeFileSync(claimPath(thread, pending), "sent\n");
+      markSent(claimPath(thread, pending));
     } catch (claimError) {
       if (!isMissing(claimError)) {
         logListen(watch.channel, `couldn't mark ${pending} as sent, so another server may send it again: ${String(claimError)}`);
@@ -843,9 +912,11 @@ function notificationStatus(channel: string): string[] {
   }
   let lastEvent: string | undefined;
   try {
-    lastEvent = readFileSync(join(channel, LISTEN_LOG), "utf8").trimEnd().split("\n").at(-1);
+    lastEvent = readChannelFile(join(channel, LISTEN_LOG)).trimEnd().split("\n").at(-1);
   } catch (error) {
-    if (!isMissing(error)) {
+    if (error instanceof PairError) {
+      lastEvent = error.message;
+    } else if (!isMissing(error)) {
       throw error;
     }
   }

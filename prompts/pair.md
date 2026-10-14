@@ -89,6 +89,9 @@ EOF
 Use `--verdict approve` when no high- or medium-severity finding is still open.
 If `send review` prints ESCALATED, stop the loop and ask the user how to proceed.
 When the user tells you to stop reviewing, stop waiting. If you ran `pair register`, also run
-`pair unregister` so pair stops notifying you.
+`pair unregister` so pair stops notifying you. A `pair:` note that pair queued before that can still
+arrive, and so can one sent within a minute or two after Codex closes. If a note arrives after the
+user told you to stop, and they haven't asked you to review or check pair since, don't act on it: say
+that a pair message is waiting and end your turn.
 Severity levels: `high` (bug, data loss, security), `medium` (likely bug, missing edge case),
 `low` (style, naming).

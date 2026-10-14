@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -700,20 +700,61 @@ test("a claim left by a server that died mid-send is taken over once its lease r
   }
 });
 
-test("init pins codex outside the worktree, even through a symlink", () => {
+test("init pins codex only outside the worktree, the channels and temp directories, even through a symlink", () => {
   const { root, env } = sandbox();
+  const executable = (path) => {
+    writeFileSync(path, "#!/bin/sh\n");
+    chmodSync(path, 0o755);
+  };
   const inside = join(root, "tools");
   mkdirSync(inside);
-  writeFileSync(join(inside, "codex"), "#!/bin/sh\n");
-  chmodSync(join(inside, "codex"), 0o755);
-  const outside = mkdtempSync(join(tmpdir(), "pair-path-"));
-  symlinkSync(join(inside, "codex"), join(outside, "codex"));
+  executable(join(inside, "codex"));
+  const temp = mkdtempSync(join(tmpdir(), "pair-path-"));
+  // Outside the test's worktree and outside every temp directory: the test checkout itself.
+  const trusted = mkdtempSync(join(import.meta.dirname, ".pair-path-"));
   const init = (path) => spawnSync("node", [CLI, "init"], { cwd: root, env: { ...env, PATH: `${path}:${dirname(process.execPath)}` }, encoding: "utf8" }).stdout;
+  const placeholder = /--env "PAIR_CODEX=<absolute path of codex>"/;
+  try {
+    assert.match(init(inside), placeholder, "a codex inside the worktree is refused");
+    executable(join(temp, "codex"));
+    assert.match(init(temp), placeholder, "a codex in a temp directory is refused: agents can write there");
+    symlinkSync(join(inside, "codex"), join(trusted, "codex"));
+    assert.match(init(trusted), placeholder, "a link into the worktree is refused");
+    rmSync(join(trusted, "codex"));
+    executable(join(trusted, "codex"));
+    assert.match(init(trusted), new RegExp(`--env "PAIR_CODEX=${join(trusted, "codex")}" pair -- ".*dist/pair\\.js" mcp`));
+  } finally {
+    rmSync(trusted, { recursive: true, force: true });
+  }
+});
 
-  assert.match(init(outside), /--env "PAIR_CODEX=<absolute path of codex>"/, "a link into the worktree is refused");
-  assert.match(init(inside), /--env "PAIR_CODEX=<absolute path of codex>"/, "a codex inside the worktree is refused");
-  rmSync(join(outside, "codex"));
-  writeFileSync(join(outside, "codex"), "#!/bin/sh\n");
-  chmodSync(join(outside, "codex"), 0o755);
-  assert.match(init(outside), new RegExp(`--env "PAIR_CODEX=${join(outside, "codex")}" pair -- ".*dist/pair\\.js" mcp`));
+test("pair mcp never reads or writes through a symlink planted in the channel", async () => {
+  const { root, env, ok } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  const { codex, calls } = fakeCodex(root);
+  spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } });
+  const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  const channel = dirname(dirname(dirname(pending)));
+  const target = join(root, "outside.txt"); // stands in for a file the agents' sandboxes protect
+  writeFileSync(target, "keep\n");
+  const log = join(channel, "codex.listen.log");
+  const claim = join(dirname(pending), `.001-request.md.${thread}.notified`);
+  symlinkSync(target, log);
+  symlinkSync(target, claim);
+
+  const server = startMcp({ ...env, PAIR_CODEX: codex });
+  try {
+    assert.equal((await server.listen(thread)).isError, undefined);
+    await until(() => calls().length === 1, "the message is still delivered");
+    await until(() => existsSync(claim) && readFileSync(claim, "utf8") === "sent\n", "the claim is recorded");
+    assert.equal(readFileSync(target, "utf8"), "keep\n", "neither the log nor the claim wrote through its link");
+    assert.ok(lstatSync(log).isFile() && lstatSync(claim).isFile(), "the links were replaced, not followed");
+    assert.match(readFileSync(log, "utf8"), /notified 01a13922/);
+
+    rmSync(join(channel, "codex.session"));
+    symlinkSync(target, join(channel, "codex.session"));
+    assert.match(ok(["status"]), /codex notifications: refusing to follow the symlink at .*codex\.session/);
+  } finally {
+    assert.equal(await server.stop(), 0);
+  }
 });
