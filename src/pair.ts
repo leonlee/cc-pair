@@ -1103,6 +1103,19 @@ function init(channel: string, root: string): string {
   ].join("\n");
 }
 
+/**
+ * `init` appends its section after exactly one added line ending. When the last section ends the file,
+ * drop it with that one line ending, so the user's text ends exactly as before, final newline or not.
+ */
+function withoutAppendedSection(text: string): string {
+  const end = text.lastIndexOf("<!-- pair:end -->");
+  if (end === -1 || text.slice(end + "<!-- pair:end -->".length).trim() !== "") {
+    return text;
+  }
+  const start = text.lastIndexOf("<!-- pair:start -->", end);
+  return start === -1 ? text : text.slice(0, start).replace(/\r?\n$/, "");
+}
+
 /** Single-quoted for sh: the channel name comes from the worktree's name, which may hold `$(…)`. */
 function shellQuote(text: string): string {
   return `'${text.replaceAll("'", `'\\''`)}'`;
@@ -1139,10 +1152,7 @@ function uninit(channel: string, root: string): string {
   const agentsPath = join(root, "AGENTS.md");
   const agents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
   if (PAIR_SECTION.test(agents)) {
-    let rest = agents.replace(PAIR_SECTIONS, "");
-    if (/<!-- pair:end -->\s*$/.test(agents)) {
-      rest = rest.replace(/(\r?\n)\r?\n$/, "$1"); // the blank line init put before an appended section
-    }
+    const rest = withoutAppendedSection(agents).replace(PAIR_SECTIONS, "");
     if (rest.trim() === "") {
       rmSync(agentsPath);
       removed.push(`${agentsPath} (it held only the pair section)`);

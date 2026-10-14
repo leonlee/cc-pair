@@ -815,6 +815,13 @@ test("uninit keeps the text around pair sections in the middle, repeated, or wit
     [`before\r\n${section("\r\n")}after\r\n`, "before\r\nafter\r\n"],
     [`mine\r\n\r\n${section("\r\n")}`, "mine\r\n"],
   ];
+  // And a real init/uninit round trip, whatever the file's last line looked like.
+  for (const original of ["mine", "mine\n", "mine\n\n", "mine\r\n"]) {
+    writeFileSync(agents, original);
+    ok(["init"]);
+    ok(["uninit"]);
+    assert.equal(readFileSync(agents, "utf8"), original, JSON.stringify(original));
+  }
   for (const [text, expected] of cases) {
     writeFileSync(agents, text);
     ok(["uninit"]);
