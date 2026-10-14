@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (planned 0.2.0)
+## 0.2.0 (2026-10-14)
 
 Codex now uses `pair mcp` to wake an idle session when a review message arrives. It no longer keeps
 a long `pair wait` running. Claude Code's background wait remains available.
