@@ -151,6 +151,7 @@ pair mcp
   - A fork's `register` stopped the original session's watch within 40ms.
   - Two TUIs on one session share one MCP process and got one note.
   - Two worktrees each woke only their own session.
+  - With Codex as the author, a `changes` review and the final approval each woke it once, and its `pair wait` archived the approved thread.
   - Approval policy `never` makes `pair_listen` fail, and Codex reports it and stops without polling.
 - The MCP server is a child of the app-server daemon, not of the TUI. After the last TUI on a session quit, it ran 1–2 more minutes, until the daemon unloaded the session. A message in that gap still wakes the session with no TUI attached. Desktop and IDE sessions, `--no-daemon`, and `--remote` are untested.
 - Completion-driven waiting is verified only for interactive Claude Code sessions, with waits of up to a few minutes. A full hour is untested. Headless `claude -p` ends background commands after its final result, so the prompt falls back to a foreground wait. Codex was tried with one long `pair wait` that it kept checking. Its built-in instructions cap each check at about 60 seconds, so an idle Codex made a model call every minute, enough to run a workspace out of credits. A finished background command doesn't resume Codex (measured with CLI 0.162.1), which is why Codex uses `pair mcp` instead.

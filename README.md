@@ -93,6 +93,8 @@ pending. The note never contains message text. Codex reads the message itself wi
   - a forked session took over the registration;
   - two windows on one session got one note;
   - two worktrees each woke only their own Codex;
+  - with Codex as the author, a `changes` review and the final approval each woke it once, and its
+    `pair wait` archived the approved thread;
   - the `never` approval policy failed.
 
   Desktop and IDE sessions are untested.
