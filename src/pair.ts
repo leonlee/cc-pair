@@ -580,7 +580,9 @@ function rotateLog(path: string): void {
  * any check and the write that follows, so the unsandboxed server only ever reads channels.
  */
 function stateDir(channel: string): string {
-  return join(resolve(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state")), "pair", basename(channel));
+  const configured = process.env.XDG_STATE_HOME;
+  const root = configured && isAbsolute(configured) ? configured : join(homedir(), ".local", "state");
+  return join(resolve(root), "pair", basename(channel));
 }
 
 function logListen(channel: string, text: string): void {
@@ -588,7 +590,8 @@ function logListen(channel: string, text: string): void {
     const path = join(stateDir(channel), LISTEN_LOG);
     mkdirSync(dirname(path), { recursive: true });
     rotateLog(path);
-    writeChannelFile(path, `${new Date().toISOString()} ${text}\n`, constants.O_APPEND);
+    const singleLine = JSON.stringify(text).slice(1, -1); // escape control characters in agent-chosen paths
+    writeChannelFile(path, `${new Date().toISOString()} ${singleLine}\n`, constants.O_APPEND);
   } catch (error) {
     console.error(`pair: cannot write ${LISTEN_LOG}: ${String(error)}\n${text}`); // stderr: stdout is the MCP stream
   }

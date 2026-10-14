@@ -60,7 +60,7 @@ writable_roots = ["/Users/you/.pair"]
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
 
-### Let pair wake Codex (recommended)
+### Let pair wake Codex (needed for automatic pickup)
 
 Codex can't wait in the background the way Claude Code does: a finished background command doesn't
 resume it, and keeping a `pair wait` running costs a model call for every check. So Codex doesn't
@@ -102,14 +102,24 @@ pending. The note never contains message text. Codex reads the message itself wi
 
   Desktop and IDE sessions are untested.
 - `pair status` shows the registered session and the listener's last event. The full log is
-  `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under `$XDG_STATE_HOME` if set). The server
-  writes only there, never in the channel, which agents can write. At 256 KB it becomes
+  `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under `$XDG_STATE_HOME` if it is absolute).
+  The server writes only there, never in the channel, which agents can write. At 256 KB it becomes
   `codex.listen.log.1`, replacing the previous one.
+
+### Start the agents
 
 After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
 worktree has its own channel, so an agent started in another checkout won't see the messages
 (see [Worktrees](#worktrees)). Restart any sessions that were already open so they load the new
 instructions and sandbox settings.
+
+## Upgrading from 0.1.x
+
+Codex no longer keeps a long `pair wait` running. To keep automatic pickup after upgrading, install
+the new package with `npm install -g claude-codex-pair`, run `pair init` in each worktree, run the
+printed `codex mcp add` command once, and restart Codex with an approval policy that permits MCP
+tools (`-a on-request` worked in the live test). Without the MCP server, Codex checks once and then
+checks again only when you ask it to "check pair", whether it is the author or reviewer.
 
 ## Use
 

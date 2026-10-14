@@ -109,15 +109,17 @@ two Codex processes attached to one session, or a repeated `pair_listen`, don't 
 While it says `sending`, they wait. If `codex queue` fails, the claim is removed, so the retry can
 claim it again. If a claim still says `sending` after 60s, twice the queue timeout, its sender died
 mid-send, and the next server takes it over. Two servers taking over at the same moment can both
-send, which costs one extra short turn. Claims older than 7 days are deleted when a session starts
-listening.
+send, which costs one extra short turn. A queue call that accepted the note but timed out before
+exiting can also be retried and send one extra note. Claims older than 7 days are deleted when a
+session starts listening.
 
 The server runs outside both sandboxes, and agents can write the channel. An agent could replace a
 file there, or a whole directory on the path to it, with a symlink, and could do it between any
 check and the write that follows. So `pair mcp` never writes in a channel. Its log and claims live
-in `${XDG_STATE_HOME:-~/.local/state}/pair/`, which no agent sandbox can write. It still reads the
-channel, and opens those files with `O_NOFOLLOW`. The server runs `PAIR_CODEX`, an absolute path set when the server is registered,
-never `codex` from `PATH`, because a `PATH` entry an agent can write would turn the fixed call into
+in `${XDG_STATE_HOME:-~/.local/state}/pair/`; relative `XDG_STATE_HOME` values are ignored. Agent
+sandboxes cannot write there by default. The server still reads the channel, opening those files
+with `O_NOFOLLOW`. It runs `PAIR_CODEX`, an absolute path set when the server is registered, never
+`codex` from `PATH`, because an agent-writable `PATH` entry would turn the fixed call into
 unsandboxed code execution.
 
 A message is announced once. A failed `codex queue` is retried with backoff up to 60s. If a message
