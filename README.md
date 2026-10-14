@@ -78,7 +78,8 @@ pending. The note never contains message text. Codex reads the message itself wi
 
 - Point the command at the installed package, not at a checkout you edit. `PAIR_CODEX` pins the
   `codex` executable the server runs. The server runs outside Codex's sandbox, so it never looks
-  `codex` up on `PATH`, and it never follows a symlink in the channel. `pair init` won't pin a
+  `codex` up on `PATH`. It only reads the channel and keeps its own writes in a state directory
+  (see below). `pair init` won't pin a
   `codex` that is in, or links into, the worktree, the channel directory, or a temp directory,
   because agents can write there.
 - `pair_listen` needs MCP tool approval, so Codex's `never` approval policy is unsupported. With
