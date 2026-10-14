@@ -4,7 +4,8 @@
 
 Codex now uses `pair mcp` to wake an idle session when a review message arrives. It no longer keeps
 a long `pair wait` running. Claude Code's background wait remains available.
-The release adds `pair register`, `pair unregister`, and `pair mcp`; `pair status` shows Codex
+The release adds `pair register`, `pair unregister`, `pair mcp`, and `pair uninit` (which undoes
+`pair init` in a worktree, including files written by 0.1.x, and keeps history); `pair status` shows Codex
 notification state, and `pair init` prints the `codex mcp add` command.
 
 If you are upgrading from 0.1.x, run `npm install -g claude-codex-pair`, run `pair init` in each

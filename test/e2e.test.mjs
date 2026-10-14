@@ -767,3 +767,35 @@ test("pair mcp writes nothing in the channel, so a channel swapped for a symlink
   symlinkSync(join(root, "elsewhere"), join(channel, "codex.session"));
   assert.match(ok(["status"]), /codex notifications: refusing to follow the symlink at .*codex\.session/);
 });
+
+test("uninit removes what init wrote, even from an older version, and keeps everything else", () => {
+  const { root, env, ok } = sandbox();
+  const agents = join(root, "AGENTS.md");
+  const skill = join(root, ".claude", "skills", "pair", "SKILL.md");
+  writeFileSync(agents, "# My rules\n\nBe kind.\n");
+  ok(["init"]);
+  spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: "01a13922-c08f-79e3-a41f-6780876fd9c5" } });
+  ok(["send", "request", "--as", "claude", "-"], "history to keep");
+
+  const out = ok(["uninit"]);
+  assert.match(out, /removed: .*SKILL\.md/);
+  assert.match(out, /removed: the pair section of .*AGENTS\.md/);
+  assert.match(out, /removed: the codex session registration/);
+  assert.match(out, /kept: message history\. To delete it: rm -rf /);
+  assert.match(out, /codex mcp remove pair/);
+  assert.equal(readFileSync(agents, "utf8"), "# My rules\n\nBe kind.\n", "the user's own text is untouched");
+  assert.equal(existsSync(join(root, ".claude")), false, "directories init created are gone once empty");
+  assert.match(ok(["status"]), /codex notifications: no session registered/);
+  assert.match(ok(["status"]), /claude-to-codex: awaiting-review/, "history is kept");
+  assert.match(ok(["uninit"]), /^nothing from pair init found in /);
+
+  // A 0.1.x section with different text, in a file that held nothing else, plus a user's own pair skill.
+  writeFileSync(agents, "<!-- pair:start -->\n# pair: old instructions\n<!-- pair:end -->\n");
+  mkdirSync(dirname(skill), { recursive: true });
+  writeFileSync(skill, "---\nname: my-pair-notes\n---\nmine\n");
+  const again = ok(["uninit"]);
+  assert.match(again, /removed: .*AGENTS\.md \(it held only the pair section\)/);
+  assert.equal(existsSync(agents), false);
+  assert.match(again, /kept: .*SKILL\.md \(its frontmatter doesn't say name: pair/);
+  assert.equal(readFileSync(skill, "utf8"), "---\nname: my-pair-notes\n---\nmine\n");
+});

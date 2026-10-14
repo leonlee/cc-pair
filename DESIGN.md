@@ -150,6 +150,7 @@ pair status
 pair history [thread-id]
 pair clean --keep N
 pair init
+pair uninit
 pair register | unregister
 pair mcp
 ```

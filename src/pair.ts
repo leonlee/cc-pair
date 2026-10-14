@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
@@ -1100,6 +1100,64 @@ function init(channel: string, root: string): string {
   ].join("\n");
 }
 
+/**
+ * Undoes `init` in this worktree. Every version so far wrote the same two paths and section markers,
+ * so this also cleans up after older versions. History and global setup are only reported.
+ */
+function uninit(channel: string, root: string): string {
+  const removed: string[] = [];
+  const notes: string[] = [];
+
+  const skillDir = join(root, ".claude", "skills", "pair");
+  const skillPath = join(skillDir, "SKILL.md");
+  if (existsSync(skillPath)) {
+    if (parseFrontmatter(readFileSync(skillPath, "utf8")).fields.name === "pair") {
+      rmSync(skillPath);
+      removed.push(skillPath);
+      // Drop the directories init created, up to the first one that holds something else.
+      for (const dir of [skillDir, dirname(skillDir), dirname(dirname(skillDir))]) {
+        try {
+          rmdirSync(dir);
+        } catch {
+          break; // not empty: someone else's files live there
+        }
+      }
+    } else {
+      notes.push(`kept: ${skillPath} (its frontmatter doesn't say name: pair, so pair init didn't write it)`);
+    }
+  }
+
+  const agentsPath = join(root, "AGENTS.md");
+  const agents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
+  if (PAIR_SECTION.test(agents)) {
+    // Also take the blank line init put before the section, so the user's text ends as it did.
+    const rest = agents.replace(new RegExp(`\\n?${PAIR_SECTION.source}`, "g"), "");
+    if (rest.trim() === "") {
+      rmSync(agentsPath);
+      removed.push(`${agentsPath} (it held only the pair section)`);
+    } else {
+      writeFileSync(agentsPath, rest);
+      removed.push(`the pair section of ${agentsPath}`);
+    }
+  }
+
+  const registration = join(channel, SESSION_FILE);
+  if (channelAccess(channel, () => lstatSync(registration, { throwIfNoEntry: false }))) {
+    channelAccess(channel, () => rmSync(registration, { force: true }));
+    removed.push("the codex session registration, so pair stops notifying it");
+  }
+
+  const history = [channel, stateDir(channel)].filter((dir) => existsSync(dir));
+  if (history.length > 0) {
+    notes.push(`kept: message history. To delete it: rm -rf ${history.map((dir) => JSON.stringify(dir)).join(" ")}`);
+  }
+  notes.push(
+    "If no repo uses pair anymore: run `codex mcp remove pair`, then `npm uninstall -g claude-codex-pair`, and remove the pair home from the sandbox settings `pair init` printed.",
+  );
+  const summary = removed.length > 0 ? removed.map((item) => `removed: ${item}`) : [`nothing from pair init found in ${root}`];
+  return [...summary, ...notes].join("\n");
+}
+
 function readBody(source: string | undefined): string {
   if (!source) {
     throw new PairError("send needs a message file, or - for stdin");
@@ -1128,6 +1186,7 @@ const USAGE = `usage:
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
   pair init
+  pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
   pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)`;
 
@@ -1174,6 +1233,9 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "init":
       console.log(init(channel, root));
+      return 0;
+    case "uninit":
+      console.log(uninit(channel, root));
       return 0;
     case "register":
       console.log(channelAccess(channel, () => register(channel, root)));
