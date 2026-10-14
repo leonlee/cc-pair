@@ -32,7 +32,10 @@ and they talk through a shared directory that works like a chat channel.
   codex-to-claude/
   archive/<iso-ts>-<rand>-<lane>-<approved|escalated>/
   codex.session                       # Codex session that pair_listen may notify (pair register)
+
+${XDG_STATE_HOME:-~/.local/state}/pair/<repo>-<hash>/   # written only by pair mcp, outside agent sandboxes
   codex.listen.log                    # what the MCP listener did, newest last; .1 holds the previous 256 KB
+  claims/<thread>.<message file>.<session id>
 ```
 
 Each message has this frontmatter, written by the CLI: `from`, `type`, `round`, `verdict` (reviews only), and `status` (`open`/`approved`/`escalated`).
@@ -99,15 +102,21 @@ a stdio MCP server that Codex starts outside its shell sandbox.
    every dispatch it checks that `codex.session` still names its session. `pair unregister` or a
    newer `pair register` stops it.
 
-Before sending, a server creates `.<message file>.<session id>.notified` next to the message, using
-an exclusive create, and writes `sending` in it. Only the server that creates it sends the note, so
+Before sending, a server creates a claim file for the message and session, using an exclusive
+create, and writes `sending` in it. Only the server that creates it sends the note, so
 two Codex processes attached to one session, or a repeated `pair_listen`, don't send it twice. After
 `codex queue` succeeds, the claim says `sent`. Other servers then treat the message as notified.
 While it says `sending`, they wait. If `codex queue` fails, the claim is removed, so the retry can
 claim it again. If a claim still says `sending` after 60s, twice the queue timeout, its sender died
 mid-send, and the next server takes it over. Two servers taking over at the same moment can both
-send, which costs one extra short turn. The claim lives in the thread directory and is archived with
-the thread. The server runs `PAIR_CODEX`, an absolute path set when the server is registered,
+send, which costs one extra short turn. Claims older than 7 days are deleted when a session starts
+listening.
+
+The server runs outside both sandboxes, and agents can write the channel. An agent could replace a
+file there, or a whole directory on the path to it, with a symlink, and could do it between any
+check and the write that follows. So `pair mcp` never writes in a channel. Its log and claims live
+in `${XDG_STATE_HOME:-~/.local/state}/pair/`, which no agent sandbox can write. It still reads the
+channel, and opens those files with `O_NOFOLLOW`. The server runs `PAIR_CODEX`, an absolute path set when the server is registered,
 never `codex` from `PATH`, because a `PATH` entry an agent can write would turn the fixed call into
 unsandboxed code execution.
 

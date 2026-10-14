@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -12,7 +12,7 @@ const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "pair-test-"));
   // CODEX_THREAD_ID is cleared so tests behave the same when run from a Codex shell.
-  const env = { ...process.env, PAIR_HOME: join(root, "home"), PAIR_AGENT: "", CODEX_THREAD_ID: "" };
+  const env = { ...process.env, PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AGENT: "", CODEX_THREAD_ID: "" };
   const run = (args, input) => {
     const result = spawnSync("node", [CLI, ...args], { cwd: root, env, input, encoding: "utf8" });
     return { code: result.status, out: result.stdout + result.stderr };
@@ -69,6 +69,13 @@ async function until(check, what) {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 2500));
+
+/** pair mcp's own files for the channel holding `pending`: they live in XDG_STATE_HOME, not the channel. */
+function mcpState(root, pending, thread) {
+  const channel = dirname(dirname(dirname(pending)));
+  const dir = join(root, "state", "pair", basename(channel));
+  return { channel, log: join(dir, "codex.listen.log"), claim: join(dir, "claims", `${basename(dirname(pending))}.${basename(pending)}.${thread}`) };
+}
 
 test("full review loop: request, changes, response, approve", () => {
   const { run, ok } = sandbox();
@@ -676,10 +683,10 @@ test("a claim left by a server that died mid-send is taken over once its lease r
   const { codex, calls } = fakeCodex(root);
   spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } });
   const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
-  const claim = join(dirname(pending), `.001-request.md.${thread}.notified`);
+  const { log, claim } = mcpState(root, pending, thread);
+  mkdirSync(dirname(claim), { recursive: true });
   writeFileSync(claim, "sending\n"); // a sender that crashed between claiming and queueing
 
-  const log = join(dirname(dirname(dirname(pending))), "codex.listen.log");
   writeFileSync(log, "old event\n".repeat(30_000)); // past the 256 KB rotation size
 
   const server = startMcp({ ...env, PAIR_CODEX: codex });
@@ -728,33 +735,35 @@ test("init pins codex only outside the worktree, the channels and temp directori
   }
 });
 
-test("pair mcp never reads or writes through a symlink planted in the channel", async () => {
+test("pair mcp writes nothing in the channel, so a channel swapped for a symlink can't redirect it", async () => {
   const { root, env, ok } = sandbox();
   const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
   const { codex, calls } = fakeCodex(root);
   spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } });
   const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
-  const channel = dirname(dirname(dirname(pending)));
-  const target = join(root, "outside.txt"); // stands in for a file the agents' sandboxes protect
-  writeFileSync(target, "keep\n");
-  const log = join(channel, "codex.listen.log");
-  const claim = join(dirname(pending), `.001-request.md.${thread}.notified`);
-  symlinkSync(target, log);
-  symlinkSync(target, claim);
+  const { channel, log } = mcpState(root, pending, thread);
 
   const server = startMcp({ ...env, PAIR_CODEX: codex });
   try {
     assert.equal((await server.listen(thread)).isError, undefined);
-    await until(() => calls().length === 1, "the message is still delivered");
-    await until(() => existsSync(claim) && readFileSync(claim, "utf8") === "sent\n", "the claim is recorded");
-    assert.equal(readFileSync(target, "utf8"), "keep\n", "neither the log nor the claim wrote through its link");
-    assert.ok(lstatSync(log).isFile() && lstatSync(claim).isFile(), "the links were replaced, not followed");
-    assert.match(readFileSync(log, "utf8"), /notified 01a13922/);
+    await until(() => calls().length === 1, "the message is delivered");
+    assert.deepEqual(readdirSync(channel).sort(), ["claude-to-codex", "codex.session"], "the listener left nothing in the channel");
 
-    rmSync(join(channel, "codex.session"));
-    symlinkSync(target, join(channel, "codex.session"));
-    assert.match(ok(["status"]), /codex notifications: refusing to follow the symlink at .*codex\.session/);
+    // An agent swaps its channel for a link to a directory it shouldn't be able to write.
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    renameSync(channel, `${channel}.moved`);
+    symlinkSync(elsewhere, channel);
+    await until(() => existsSync(log) && /stopped notifying/.test(readFileSync(log, "utf8")), "the listener notices and stops");
+    assert.deepEqual(readdirSync(elsewhere), [], "nothing was written through the swapped channel");
   } finally {
     assert.equal(await server.stop(), 0);
   }
+
+  // The CLI won't read a planted registration link either.
+  rmSync(channel);
+  renameSync(`${channel}.moved`, channel);
+  rmSync(join(channel, "codex.session"));
+  symlinkSync(join(root, "elsewhere"), join(channel, "codex.session"));
+  assert.match(ok(["status"]), /codex notifications: refusing to follow the symlink at .*codex\.session/);
 });

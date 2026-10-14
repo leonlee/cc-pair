@@ -31,6 +31,7 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
 const LISTEN_LOG = "codex.listen.log";
 const LISTEN_LOG_MAX_BYTES = 256 * 1024; // then it becomes codex.listen.log.1, replacing the previous one
+const CLAIM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const STALL_MS = 10 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 30_000;
 const CLAIM_LEASE_MS = 2 * QUEUE_TIMEOUT_MS; // longer than any live `codex queue` call can hold a claim
@@ -573,9 +574,19 @@ function rotateLog(path: string): void {
   }
 }
 
+/**
+ * Where `pair mcp` keeps its own files, the log and the claims: outside every agent's writable roots.
+ * Agents can write the channel, and could swap a directory on a channel path for a symlink between
+ * any check and the write that follows, so the unsandboxed server only ever reads channels.
+ */
+function stateDir(channel: string): string {
+  return join(resolve(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state")), "pair", basename(channel));
+}
+
 function logListen(channel: string, text: string): void {
   try {
-    const path = join(channel, LISTEN_LOG);
+    const path = join(stateDir(channel), LISTEN_LOG);
+    mkdirSync(dirname(path), { recursive: true });
     rotateLog(path);
     writeChannelFile(path, `${new Date().toISOString()} ${text}\n`, constants.O_APPEND);
   } catch (error) {
@@ -665,24 +676,40 @@ function listen(thread: unknown, watches: Map<string, Watch>): string {
   if (watches.get(thread)?.channel !== channel) {
     watches.set(thread, { channel, codex, notifiedAt: 0, stallReported: false, dispatching: false, failures: 0, retryAt: 0 });
     logListen(channel, `listening for ${thread}`);
+    pruneClaims(channel);
   }
   return `listening: pair will queue a short "pair:" note into this session when a message for codex arrives in ${channel}. End your turn now.`;
 }
 
 /**
- * One nudge per session and message, even with several MCP processes on one session. The file sits in
- * the thread directory, so it's archived with the thread. It says "sending" while a server holds the
- * right to send, and "sent" once `codex queue` succeeded.
+ * One nudge per session and message, even with several MCP processes on one session. It says
+ * "sending" while a server holds the right to send, and "sent" once `codex queue` succeeded.
  */
-function claimPath(thread: string, pending: string): string {
-  return join(dirname(pending), `.${basename(pending)}.${thread}.notified`);
+function claimPath(channel: string, thread: string, pending: string): string {
+  return join(stateDir(channel), "claims", `${basename(dirname(pending))}.${basename(pending)}.${thread}`);
+}
+
+/** Claims outlive their threads, so old ones are dropped. A still-pending message may get one more note. */
+function pruneClaims(channel: string): void {
+  const dir = join(stateDir(channel), "claims");
+  try {
+    for (const entry of readdirOrEmpty(dir)) {
+      const path = join(dir, entry.name);
+      const stats = lstatSync(path, { throwIfNoEntry: false });
+      if (stats && Date.now() - stats.mtimeMs > CLAIM_MAX_AGE_MS) {
+        rmSync(path, { force: true });
+      }
+    }
+  } catch (error) {
+    logListen(channel, `couldn't prune old claims: ${String(error)}`);
+  }
 }
 
 type Claim = "claimed" | "sent" | "busy";
 
-/** Throws ENOENT when the thread was archived since it was read. */
 /** Exclusive create: true if this server now holds the claim. O_EXCL never follows a symlink. */
 function createClaim(path: string): boolean {
+  mkdirSync(dirname(path), { recursive: true });
   try {
     writeChannelFile(path, "sending\n", constants.O_EXCL);
     return true;
@@ -724,7 +751,7 @@ function dispatch(thread: string, watch: Watch, pending: string): void {
   const child = execFile(watch.codex, ["queue", "--thread", thread, "--message", NUDGE], { timeout: QUEUE_TIMEOUT_MS }, (error, _stdout, stderr) => {
     watch.dispatching = false;
     if (error) {
-      rmSync(claimPath(thread, pending), { force: true }); // let the retry, here or in another process, claim it again
+      rmSync(claimPath(watch.channel, thread, pending), { force: true }); // let the retry, here or in another process, claim it again
       watch.failures += 1;
       const delay = Math.min(60_000, 1000 * 2 ** watch.failures);
       watch.retryAt = Date.now() + delay;
@@ -734,7 +761,7 @@ function dispatch(thread: string, watch: Watch, pending: string): void {
     Object.assign(watch, { notified: pending, notifiedAt: Date.now(), stallReported: false, failures: 0 });
     logListen(watch.channel, `notified ${thread} about ${pending}`);
     try {
-      markSent(claimPath(thread, pending));
+      markSent(claimPath(watch.channel, thread, pending));
     } catch (claimError) {
       if (!isMissing(claimError)) {
         logListen(watch.channel, `couldn't mark ${pending} as sent, so another server may send it again: ${String(claimError)}`);
@@ -762,10 +789,10 @@ function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
     if (pending !== watch.notified) {
       let claimed: Claim;
       try {
-        claimed = claim(claimPath(thread, pending));
+        claimed = claim(claimPath(watch.channel, thread, pending));
       } catch (error) {
         if (isMissing(error)) {
-          return; // the thread was archived, or the claim released, since we looked: look again next tick
+          return; // another server released the claim since we looked: look again next tick
         }
         throw error;
       }
@@ -912,7 +939,7 @@ function notificationStatus(channel: string): string[] {
   }
   let lastEvent: string | undefined;
   try {
-    lastEvent = readChannelFile(join(channel, LISTEN_LOG)).trimEnd().split("\n").at(-1);
+    lastEvent = readChannelFile(join(stateDir(channel), LISTEN_LOG)).trimEnd().split("\n").at(-1);
   } catch (error) {
     if (error instanceof PairError) {
       lastEvent = error.message;

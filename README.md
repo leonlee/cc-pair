@@ -101,8 +101,9 @@ pending. The note never contains message text. Codex reads the message itself wi
 
   Desktop and IDE sessions are untested.
 - `pair status` shows the registered session and the listener's last event. The full log is
-  `codex.listen.log` in the channel directory. At 256 KB it becomes `codex.listen.log.1`, replacing
-  the previous one.
+  `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under `$XDG_STATE_HOME` if set). The server
+  writes only there, never in the channel, which agents can write. At 256 KB it becomes
+  `codex.listen.log.1`, replacing the previous one.
 
 After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
 worktree has its own channel, so an agent started in another checkout won't see the messages
