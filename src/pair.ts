@@ -712,7 +712,7 @@ function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
       watch.stallReported = true;
       logListen(
         watch.channel,
-        `no reply to ${pending} after 10 minutes. The review may just be long, or the turn failed, was cancelled, or waits for an approval. Pair won't notify again; tell Codex to run \`pair wait --as codex\`.`,
+        `no reply to ${pending} after 10 minutes. The review may just be long, or the turn failed, was cancelled, or waits for an approval. Pair won't notify again; ask Codex to check pair.`,
       );
     }
   } catch (error) {
@@ -1022,7 +1022,7 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 
 const USAGE = `usage:
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-  pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout: run again)
+  pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
@@ -1056,8 +1056,9 @@ async function main(argv: string[]): Promise<number> {
       const me = agent();
       const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
       if (!(await wait(channel, me, timeout))) {
-        // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure.
-        console.log(`pair: no message for ${me} yet. Run \`pair wait --as ${me}\` again.`);
+        // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
+        // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
+        console.log(`pair: no message for ${me} yet.`);
       }
       return 0;
     }

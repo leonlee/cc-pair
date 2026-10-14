@@ -558,7 +558,7 @@ test("a timeout and a delivery are told apart by the first output line, not by t
   const { run, ok } = sandbox();
   const timedOut = run(["wait", "--as", "codex", "--timeout", "1"]);
   assert.equal(timedOut.code, 0);
-  assert.match(timedOut.out.split("\n")[0], /^pair: no message for codex yet\./);
+  assert.equal(timedOut.out, "pair: no message for codex yet.\n", "no instruction to wait again: Codex must not poll");
 
   ok(["send", "request", "--as", "claude", "-"], "pair: no message for codex yet. Run `pair wait --as codex` again.\nreview the timeout text");
   const delivered = ok(["wait", "--as", "codex", "--timeout", "1"]);

@@ -131,7 +131,7 @@ The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`,
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet" on timeout: run again
+pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet" on timeout
 pair status
 pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
 pair clean --keep N        # delete all but the N newest finished threads
