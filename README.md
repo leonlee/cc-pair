@@ -83,10 +83,10 @@ pending. The note never contains message text. Codex reads the message itself wi
   `on-request`, approve the first call.
 - Notifications stop when the Codex session ends, or when Codex runs `pair unregister` ("stop as
   reviewer"). A note that pair already queued still runs.
-- Not yet verified end to end. With Codex CLI 0.162.1 we measured each part separately: `codex queue`
-  wakes an idle session from a plain shell; an MCP server runs outside the shell sandbox; it receives
-  the session id in `_meta.threadId`; and it exits with the TUI. A real registered session waking
-  through `pair mcp` is still the release check. Desktop and IDE sessions are untested.
+- Verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session
+  that ended its turn was woken by the note about 1s after Claude's request, and it reviewed and
+  replied in one turn. The `never` approval policy failed as described above. Resume, a second
+  attached TUI, two worktrees and forked sessions are untested, and so are Desktop and IDE sessions.
 - `pair status` shows the registered session and the listener's last event. The full log is
   `codex.listen.log` in the channel directory. At 256 KB it becomes `codex.listen.log.1`, replacing
   the previous one.
