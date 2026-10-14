@@ -81,12 +81,21 @@ pending. The note never contains message text. Codex reads the message itself wi
   `codex` up on `PATH`.
 - `pair_listen` needs MCP tool approval, so Codex's `never` approval policy is unsupported. With
   `on-request`, approve the first call.
-- Notifications stop when the Codex session ends, or when Codex runs `pair unregister` ("stop as
-  reviewer"). A note that pair already queued still runs.
+- Notifications stop when Codex runs `pair unregister` ("stop as reviewer"), or when Codex's
+  background service unloads the session, which happened 1–2 minutes after the last window on it
+  closed. A message that arrives in that gap still starts a turn with no window attached, and so does
+  a note that pair already queued. Say "stop as reviewer" before closing Codex if that matters.
 - Verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session
   that ended its turn was woken by the note about 1s after Claude's request, and it reviewed and
-  replied in one turn. The `never` approval policy failed as described above. Resume, a second
-  attached TUI, two worktrees and forked sessions are untested, and so are Desktop and IDE sessions.
+  replied in one turn. These also behaved as described:
+  - a message that arrived while Codex was closed was delivered right after resume;
+  - `pair unregister` stopped notifications;
+  - a forked session took over the registration;
+  - two windows on one session got one note;
+  - two worktrees each woke only their own Codex;
+  - the `never` approval policy failed.
+
+  Desktop and IDE sessions are untested.
 - `pair status` shows the registered session and the listener's last event. The full log is
   `codex.listen.log` in the channel directory. At 256 KB it becomes `codex.listen.log.1`, replacing
   the previous one.

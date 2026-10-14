@@ -145,5 +145,12 @@ pair mcp
 - A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a hint to move its files into a subdirectory, and the messages are left untouched.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
 - Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
-- Notifications are verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session that had ended its turn was woken about 1s after Claude's request, then reviewed and replied in one turn. Approval policy `never` makes `pair_listen` fail, and Codex reports it and stops without polling. Resume, two worktrees, fork, a second attached TUI, Desktop and IDE sessions, `--no-daemon`, and `--remote` are untested.
+- Notifications are verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session that had ended its turn was woken about 1s after Claude's request, then reviewed and replied in one turn. Other cases also verified:
+  - A message sent while Codex was closed was queued about 1s after `pair_listen` on resume.
+  - `pair unregister` stopped the watch.
+  - A fork's `register` stopped the original session's watch within 40ms.
+  - Two TUIs on one session share one MCP process and got one note.
+  - Two worktrees each woke only their own session.
+  - Approval policy `never` makes `pair_listen` fail, and Codex reports it and stops without polling.
+- The MCP server is a child of the app-server daemon, not of the TUI. After the last TUI on a session quit, it ran 1–2 more minutes, until the daemon unloaded the session. A message in that gap still wakes the session with no TUI attached. Desktop and IDE sessions, `--no-daemon`, and `--remote` are untested.
 - Completion-driven waiting is verified only for interactive Claude Code sessions, with waits of up to a few minutes. A full hour is untested. Headless `claude -p` ends background commands after its final result, so the prompt falls back to a foreground wait. Codex was tried with one long `pair wait` that it kept checking. Its built-in instructions cap each check at about 60 seconds, so an idle Codex made a model call every minute, enough to run a workspace out of credits. A finished background command doesn't resume Codex (measured with CLI 0.162.1), which is why Codex uses `pair mcp` instead.
