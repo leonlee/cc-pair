@@ -175,7 +175,7 @@ It also checks the generated instructions on disk:
 ```
 channel: /Users/you/.pair/your-repo-12345678
 worktree: /Users/you/your-repo
-version: claude-codex-pair 0.1.0
+version: claude-codex-pair 0.2.0
 claude-to-codex: idle
 codex-to-claude: idle
 instructions on disk (does not verify what running agents loaded):
