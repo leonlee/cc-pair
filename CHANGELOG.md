@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-20)
 
 `pair ps` lists every running `pair mcp` and `pair wait` on the machine, with its directory and the
 process that started it (the Codex daemon, the ChatGPT app, or a Claude Code session). It needs `ps`,
