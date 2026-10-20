@@ -103,7 +103,8 @@ pending. The note never contains message text. Codex reads the message itself wi
     `pair wait` archived the approved thread;
   - the `never` approval policy failed.
 
-  Desktop and IDE sessions are untested.
+  Codex in the ChatGPT desktop app works too: the app starts its own `pair mcp`, and in daily use
+  with Codex as the author, each review woke it and it replied. IDE sessions are untested.
 - `pair status` shows the registered session and the listener's last event. The full log is
   `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under `$XDG_STATE_HOME` if it is absolute).
   The server writes only there, never in the channel, which agents can write. At 256 KB it becomes
