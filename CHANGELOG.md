@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-10-20)
 
 `pair ps` prints the full command of the process that started each pair process, instead of cutting it
 at 160 characters. The README no longer lists the ChatGPT desktop app as untested: waking Codex there works.
