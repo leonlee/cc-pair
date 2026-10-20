@@ -167,6 +167,7 @@ pair init
 pair uninit                # undo pair init in this worktree (keeps history; see "Uninstall")
 pair register | unregister # run by Codex in its shell: let pair_listen notify this session
 pair mcp                   # stdio MCP server for Codex (see "Let pair wake Codex")
+pair ps                    # list running pair mcp and pair wait processes, where they run, and what started them
 ```
 
 `pair status` shows the channel, worktree root, installed package version, and each lane's turn.

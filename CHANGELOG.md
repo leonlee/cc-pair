@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+`pair ps` lists every running `pair mcp` and `pair wait` on the machine, with its directory and the
+process that started it (the Codex daemon, the ChatGPT app, or a Claude Code session). It needs `ps`,
+which agent sandboxes often block, so run it in your own terminal.
+
 ## 0.2.0 (2026-10-14)
 
 Codex now uses `pair mcp` to wake an idle session when a review message arrives. It no longer keeps

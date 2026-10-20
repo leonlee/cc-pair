@@ -1194,6 +1194,88 @@ function uninit(channel: string, root: string): string {
   return [...summary, ...notes].join("\n");
 }
 
+interface OsProcess {
+  pid: number;
+  ppid: number;
+  started: string;
+  command: string;
+}
+
+const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\w{3} \w{3}\s+\d+ [\d:]+ \d{4})\s+(.*)$/; // lstart is always 5 fields
+// node itself runs the script, so a wrapper whose command line mentions it (`zsh -c "… pair.js wait"`) doesn't match
+const PAIR_PROCESS = /^(?:\S*\/)?node(?: -\S+)* \S*\/(?:bin\/pair|dist\/pair\.js) ((?:mcp|wait)\b.*)$/;
+const SHELL = /^(?:\S*\/)?(?:zsh|bash|sh|dash|fish)(?: |$)/;
+
+function listProcesses(): OsProcess[] {
+  let out: string;
+  try {
+    out = execFileSync("ps", ["-axo", "pid=,ppid=,lstart=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
+  } catch (error) {
+    throw new PairError(`can't list processes (${error instanceof Error ? error.message : String(error)}); agent sandboxes often block ps, so run pair ps in your own terminal`);
+  }
+  return out.split("\n").flatMap((line) => {
+    const match = PS_LINE.exec(line);
+    return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), started: match[3], command: match[4] }] : [];
+  });
+}
+
+/** Working directories by pid: /proc on Linux, lsof elsewhere. Unknown ones are left out. */
+function workingDirs(pids: number[]): Map<number, string> {
+  const dirs = new Map<number, string>();
+  if (existsSync("/proc/self/cwd")) {
+    for (const pid of pids) {
+      try {
+        dirs.set(pid, realpathSync(`/proc/${pid}/cwd`));
+      } catch {
+        // gone, or not ours
+      }
+    }
+    return dirs;
+  }
+  let out = "";
+  try {
+    out = execFileSync("lsof", ["-a", "-d", "cwd", "-Fpn", "-p", pids.join(",")], { encoding: "utf8" });
+  } catch (error) {
+    // lsof exits 1 when one of the pids is gone, but still prints the rest
+    out = error instanceof Error && "stdout" in error ? String(error.stdout) : "";
+  }
+  let pid = 0;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("p")) {
+      pid = Number(line.slice(1));
+    } else if (line.startsWith("n")) {
+      dirs.set(pid, line.slice(1));
+    }
+  }
+  return dirs;
+}
+
+/** Every running `pair mcp` and `pair wait` on this machine, with what started it. */
+function ps(): string {
+  const all = listProcesses();
+  const byPid = new Map(all.map((proc) => [proc.pid, proc]));
+  const ours = all.flatMap((proc) => {
+    const match = PAIR_PROCESS.exec(proc.command);
+    return match ? [{ ...proc, args: match[1] }] : [];
+  });
+  if (ours.length === 0) {
+    return "no pair mcp or pair wait is running";
+  }
+  const dirs = workingDirs(ours.map((proc) => proc.pid));
+  return ours
+    .flatMap((proc) => {
+      let host = byPid.get(proc.ppid);
+      while (host && SHELL.test(host.command)) {
+        host = byPid.get(host.ppid); // an agent runs pair wait through a shell; show the agent
+      }
+      return [
+        `pair ${proc.args}  pid ${proc.pid}  since ${proc.started}  in ${dirs.get(proc.pid) ?? "?"}`,
+        `  started by ${host ? `${host.pid}: ${host.command.slice(0, 160)}` : `${proc.ppid} (gone)`}`,
+      ];
+    })
+    .join("\n");
+}
+
 function readBody(source: string | undefined): string {
   if (!source) {
     throw new PairError("send needs a message file, or - for stdin");
@@ -1224,7 +1306,8 @@ const USAGE = `usage:
   pair init
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
   pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
-  pair mcp                                            (stdio MCP server for Codex, providing pair_listen)`;
+  pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
+  pair ps                                             (list running pair mcp and pair wait processes)`;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -1281,6 +1364,9 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "mcp":
       await serveMcp();
+      return 0;
+    case "ps":
+      console.log(ps());
       return 0;
     default:
       console.error(USAGE);

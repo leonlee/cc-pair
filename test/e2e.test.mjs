@@ -866,3 +866,27 @@ test("uninit's printed cleanup command is safe to paste for any worktree name", 
   assert.equal(existsSync(channel), false, "the command deletes the channel it names");
   assert.deepEqual(readdirSync(root).filter((name) => name.startsWith("PWNED")), [], "and runs nothing from the name");
 });
+
+test("ps lists a running pair mcp with its directory and the process that started it", { skip: spawnSync("ps", ["-p", String(process.pid)]).status !== 0 && "ps is blocked here" }, async () => {
+  const { env } = sandbox();
+  const server = startMcp(env);
+  // A shell wrapper whose own command line names the script; `; true` keeps sh from exec'ing node.
+  const wrapper = spawn("sh", ["-c", `node ${CLI} wait --as codex --timeout 30; true`], { cwd: tmpdir(), env, detached: true });
+  try {
+    await server.call("ping");
+    let out = "";
+    await until(() => {
+      out = spawnSync("node", [CLI, "ps"], { env, encoding: "utf8" }).stdout;
+      return out.includes("pair wait --as codex --timeout 30");
+    }, "the wrapped pair wait shows up");
+    const pid = server.server.pid;
+    assert.match(out, new RegExp(`^pair mcp  pid ${pid}  since .+  in ${realpathSync(tmpdir())}\\n  started by ${process.pid}: `, "m"));
+    const waits = out.split("\n").filter((line) => line.startsWith("pair wait --as codex --timeout 30"));
+    assert.equal(waits.length, 1, "the wrapper isn't listed, only node running the script");
+    assert.doesNotMatch(waits[0], new RegExp(`pid ${wrapper.pid} `));
+    assert.match(out, new RegExp(`pair wait --as codex --timeout 30  pid \\d+  .+\\n  started by ${process.pid}: `), "the shell is skipped");
+  } finally {
+    process.kill(-wrapper.pid); // the group: sh and the node it started
+    assert.equal(await server.stop(), 0);
+  }
+});
