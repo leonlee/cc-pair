@@ -1270,7 +1270,7 @@ function ps(): string {
       }
       return [
         `pair ${proc.args}  pid ${proc.pid}  since ${proc.started}  in ${dirs.get(proc.pid) ?? "?"}`,
-        `  started by ${host ? `${host.pid}: ${host.command.slice(0, 160)}` : `${proc.ppid} (gone)`}`,
+        `  started by ${host ? `${host.pid}: ${host.command}` : `${proc.ppid} (gone)`}`,
       ];
     })
     .join("\n");
