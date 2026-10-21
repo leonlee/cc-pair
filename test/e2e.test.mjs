@@ -35,8 +35,8 @@ function fakeCodex(root, { failFirst = false } = {}) {
   return { codex, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trimEnd().split("\n") : []) };
 }
 
-function startMcp(env) {
-  const server = spawn("node", [CLI, "mcp"], { cwd: tmpdir(), env, stdio: ["pipe", "pipe", "inherit"] });
+function startMcp(env, cwd = tmpdir()) {
+  const server = spawn("node", [CLI, "mcp"], { cwd, env, stdio: ["pipe", "pipe", "inherit"] });
   const responses = new Map();
   const waiters = new Map();
   createInterface({ input: server.stdout }).on("line", (line) => {
@@ -867,24 +867,39 @@ test("uninit's printed cleanup command is safe to paste for any worktree name", 
   assert.deepEqual(readdirSync(root).filter((name) => name.startsWith("PWNED")), [], "and runs nothing from the name");
 });
 
-test("ps lists a running pair mcp with its directory and the process that started it", { skip: spawnSync("ps", ["-p", String(process.pid)]).status !== 0 && "ps is blocked here" }, async () => {
-  const { env } = sandbox();
-  const server = startMcp(env);
+test("ps groups pair processes by worktree, with its Codex registration, and skips shell wrappers", { skip: spawnSync("ps", ["-p", String(process.pid)]).status !== 0 && "ps is blocked here" }, async () => {
+  const { root, env } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  spawnSync("git", ["init", "-q"], { cwd: root });
+  spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } });
+  const server = startMcp(env, root);
   // A shell wrapper whose own command line names the script; `; true` keeps sh from exec'ing node.
-  const wrapper = spawn("sh", ["-c", `node ${CLI} wait --as codex --timeout 30; true`], { cwd: tmpdir(), env, detached: true });
+  const wrapper = spawn("sh", ["-c", `node ${CLI} wait --as codex --timeout 30; true`], { cwd: root, env, detached: true });
+  const ps = (...args) => spawnSync("node", [CLI, "ps", ...args], { env, encoding: "utf8" }).stdout;
+  const ourBlock = (out) => out.split("\n\n").find((block) => block.startsWith(`${basename(realpathSync(root))}  `)) ?? "";
   try {
     await server.call("ping");
-    let out = "";
-    await until(() => {
-      out = spawnSync("node", [CLI, "ps"], { env, encoding: "utf8" }).stdout;
-      return out.includes("pair wait --as codex --timeout 30");
-    }, "the wrapped pair wait shows up");
-    const pid = server.server.pid;
-    assert.match(out, new RegExp(`^pair mcp  pid ${pid}  since .+  in ${realpathSync(tmpdir())}\\n  started by ${process.pid}: `, "m"));
-    const waits = out.split("\n").filter((line) => line.startsWith("pair wait --as codex --timeout 30"));
+    let block = "";
+    await until(() => (block = ourBlock(ps())).includes("\n  wait "), "the wrapped pair wait shows up");
+    assert.match(block, /^ {2}codex {3}registered 01a13922$/m, "no note found: no claim about notes");
+    // A note to an earlier session in this worktree isn't this session's note.
+    const [channelName] = readdirSync(env.PAIR_HOME);
+    mkdirSync(join(env.XDG_STATE_HOME, "pair", channelName), { recursive: true });
+    writeFileSync(join(env.XDG_STATE_HOME, "pair", channelName, "codex.listen.log"), "2026-10-20T00:00:00.000Z notified 01a0aaaa-0000-7000-8000-000000000000 about /x/001-request.md\n");
+    assert.match(ourBlock(ps()), /^ {2}codex {3}registered 01a13922$/m);
+    writeFileSync(join(env.XDG_STATE_HOME, "pair", channelName, "codex.listen.log"), `${new Date().toISOString()} notified ${thread} about /x/001-request.md\n`, { flag: "a" });
+    assert.match(ourBlock(ps()), /^ {2}codex {3}registered 01a13922 · last note 0m ago$/m);
+    // The agents may use another PAIR_HOME, so finding no registration here claims nothing.
+    const elsewhere = spawnSync("node", [CLI, "ps"], { env: { ...env, PAIR_HOME: join(root, "other-home") }, encoding: "utf8" }).stdout;
+    assert.doesNotMatch(ourBlock(elsewhere), /codex/);
+    spawnSync("node", [CLI, "unregister"], { cwd: root, env });
+    assert.doesNotMatch(ourBlock(ps()), /codex/, "a channel without a registration claims nothing either");
+    assert.match(block, new RegExp(`^  mcp     ${server.server.pid} +\\d+m +node$`, "m"), "started by the test's node");
+    const waits = block.split("\n").filter((line) => line.startsWith("  wait "));
     assert.equal(waits.length, 1, "the wrapper isn't listed, only node running the script");
-    assert.doesNotMatch(waits[0], new RegExp(`pid ${wrapper.pid} `));
-    assert.match(out, new RegExp(`pair wait --as codex --timeout 30  pid \\d+  .+\\n  started by ${process.pid}: `), "the shell is skipped");
+    assert.doesNotMatch(waits[0], new RegExp(` ${wrapper.pid} `));
+    assert.match(waits[0], / node$/, "the shell is skipped");
+    assert.match(ourBlock(ps("-v")), new RegExp(`\\n  wait .+\\n {10}started by ${process.pid}: `), "-v shows the full command");
   } finally {
     process.kill(-wrapper.pid); // the group: sh and the node it started
     assert.equal(await server.stop(), 0);

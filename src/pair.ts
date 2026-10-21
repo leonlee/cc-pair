@@ -162,9 +162,10 @@ function newThreadId(): string {
   return `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
 }
 
-function gitPath(flag: string): string | undefined {
+function gitPath(flag: string, cwd?: string): string | undefined {
   try {
     return execFileSync("git", ["rev-parse", "--path-format=absolute", flag], {
+      cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -1250,30 +1251,117 @@ function workingDirs(pids: number[]): Map<number, string> {
   return dirs;
 }
 
-/** Every running `pair mcp` and `pair wait` on this machine, with what started it. */
-function ps(): string {
+/** A short name for what started a pair process; `pair ps -v` shows the full command. */
+function hostName(command: string): string {
+  if (command.includes("/ChatGPT.app/")) {
+    return "ChatGPT app";
+  }
+  const daemon = /\/app-server-daemon\/releases\/(\d[\w.]*?)-/.exec(command);
+  if (daemon) {
+    return `Codex CLI ${daemon[1]}`;
+  }
+  const [argv0 = "", ...args] = command.split(" ");
+  const name = basename(argv0);
+  if (name === "claude") {
+    const worktree = /--worktree (\S+)/.exec(command)?.[1];
+    const session = /--resume ([0-9a-f]{8})/.exec(command)?.[1];
+    const hint = worktree ? `worktree ${worktree}` : session ? `resume ${session}` : args.includes("--resume") ? "resume" : "";
+    return hint ? `Claude Code (${hint})` : "Claude Code";
+  }
+  return name === "codex" ? "Codex CLI" : name;
+}
+
+function age(started: string): string {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(started).getTime()) / 60_000));
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  return minutes < 24 * 60 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / (24 * 60))}d`;
+}
+
+/** `~` for home, and only the last four parts of a long path. */
+function shortPath(path: string): string {
+  const home = homedir();
+  const tilde = path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
+  const parts = tilde.split(sep);
+  return tilde.length > 40 && parts.length > 5 ? [parts[0], "…", ...parts.slice(-4)].join(sep) : tilde;
+}
+
+/**
+ * The worktree's registered Codex session and when pair last woke it, or undefined. It reads with this shell's
+ * PAIR_HOME and XDG_STATE_HOME, which may not be the agents', so it only reports what it finds, never an absence.
+ */
+function codexLine(root: string): string | undefined {
+  const channel = channelDir(root);
+  try {
+    const registration = readRegistration(channel);
+    if (!registration) {
+      return undefined;
+    }
+    const mine = ` notified ${registration.thread} about `; // not a note to an earlier session
+    const log = join(stateDir(channel), LISTEN_LOG);
+    const notified = existsSync(log) ? readChannelFile(log).trimEnd().split("\n").findLast((line) => line.includes(mine)) : undefined;
+    const id = registration.thread.slice(0, 8);
+    return notified ? `registered ${id} · last note ${age(notified.split(" ")[0])} ago` : `registered ${id}`;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+interface PairProcess extends OsProcess {
+  kind: "mcp" | "wait";
+  host: OsProcess | undefined;
+}
+
+/** Every running `pair mcp` and `pair wait` on this machine, grouped by worktree. */
+function ps(verbose: boolean): string {
   const all = listProcesses();
   const byPid = new Map(all.map((proc) => [proc.pid, proc]));
-  const ours = all.flatMap((proc) => {
+  const ours: PairProcess[] = all.flatMap((proc) => {
     const match = PAIR_PROCESS.exec(proc.command);
-    return match ? [{ ...proc, args: match[1] }] : [];
+    if (!match) {
+      return [];
+    }
+    let host = byPid.get(proc.ppid);
+    while (host && SHELL.test(host.command)) {
+      host = byPid.get(host.ppid); // an agent runs pair wait through a shell; show the agent
+    }
+    return [{ ...proc, kind: match[1].startsWith("mcp") ? "mcp" : "wait", host }];
   });
   if (ours.length === 0) {
     return "no pair mcp or pair wait is running";
   }
   const dirs = workingDirs(ours.map((proc) => proc.pid));
-  return ours
-    .flatMap((proc) => {
-      let host = byPid.get(proc.ppid);
-      while (host && SHELL.test(host.command)) {
-        host = byPid.get(host.ppid); // an agent runs pair wait through a shell; show the agent
+  const groups = new Map<string, { root: string | undefined; procs: PairProcess[] }>();
+  for (const proc of ours) {
+    const dir = dirs.get(proc.pid) ?? "?";
+    const top = dir === "?" ? undefined : gitPath("--show-toplevel", dir);
+    const root = top ? realpathOrSelf(top) : undefined;
+    const key = root ?? dir;
+    const group = groups.get(key) ?? { root, procs: [] };
+    group.procs.push(proc);
+    groups.set(key, group);
+  }
+  const blocks = [...groups].sort(([a, x], [b, y]) => Number(!x.root) - Number(!y.root) || a.localeCompare(b));
+  return blocks
+    .map(([path, { root, procs }]) => {
+      const name = root ? basename(root) : path !== "?" && !existsSync(path) ? "(deleted)" : "(no worktree)";
+      const lines = [`${name}  ${shortPath(path)}`];
+      const codex = root ? codexLine(root) : undefined;
+      if (codex) {
+        lines.push(`  codex   ${codex}`);
       }
-      return [
-        `pair ${proc.args}  pid ${proc.pid}  since ${proc.started}  in ${dirs.get(proc.pid) ?? "?"}`,
-        `  started by ${host ? `${host.pid}: ${host.command}` : `${proc.ppid} (gone)`}`,
-      ];
+      procs.sort((a, b) => a.kind.localeCompare(b.kind) || a.pid - b.pid);
+      for (const proc of procs) {
+        const host = proc.host ? hostName(proc.host.command) : `⚠ parent gone (${proc.ppid})`;
+        lines.push(`  ${proc.kind.padEnd(6)}  ${String(proc.pid).padEnd(6)} ${age(proc.started).padEnd(4)} ${host}`);
+        if (verbose && proc.host) {
+          lines.push(`          started by ${proc.host.pid}: ${proc.host.command}`);
+        }
+      }
+      return lines.join("\n");
     })
-    .join("\n");
+    .join("\n\n");
 }
 
 function readBody(source: string | undefined): string {
@@ -1307,13 +1395,13 @@ const USAGE = `usage:
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
   pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
-  pair ps                                             (list running pair mcp and pair wait processes)`;
+  pair ps [-v]                                        (running pair mcp and pair wait processes, by worktree; -v: full commands)`;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" } },
   });
   const [command, ...rest] = positionals;
   const root = worktreeRoot();
@@ -1366,7 +1454,7 @@ async function main(argv: string[]): Promise<number> {
       await serveMcp();
       return 0;
     case "ps":
-      console.log(ps());
+      console.log(ps(values.verbose ?? false));
       return 0;
     default:
       console.error(USAGE);

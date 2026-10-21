@@ -2,8 +2,11 @@
 
 ## 0.3.1 (2026-10-21)
 
-`pair ps` prints the full command of the process that started each pair process, instead of cutting it
-at 160 characters, and no longer passes on `lsof` warnings. The README no longer lists the ChatGPT desktop app as untested: waking Codex there works.
+`pair ps` groups processes by worktree: each block shows the worktree's registered Codex session (when found) and
+when pair last woke it, then one line per process with its age and a short host name (`Codex CLI 0.163.0`,
+`ChatGPT app`, `Claude Code (worktree leak)`). A session whose worktree was deleted shows as `(deleted)`, and
+one whose parent exited as `⚠ parent gone`. `pair ps -v` adds each host's full command. `lsof` warnings no
+longer leak into the output. The README no longer lists the ChatGPT desktop app as untested: waking Codex there works.
 
 ## 0.3.0 (2026-10-20)
 
