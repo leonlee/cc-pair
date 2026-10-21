@@ -101,9 +101,12 @@ pending. The note never contains message text. Codex reads the message itself wi
   - two worktrees each woke only their own Codex;
   - with Codex as the author, a `changes` review and the final approval each woke it once, and its
     `pair wait` archived the approved thread;
-  - the `never` approval policy failed.
+  - the `never` approval policy failed;
+  - with Codex CLI 0.163.0, a session idle for about 2 hours was still woken 0.9s after the request
+    and replied 9s after it.
 
-  Desktop and IDE sessions are untested.
+  Codex in the ChatGPT desktop app works too: the app starts its own `pair mcp`, and in daily use
+  with Codex as the author, each review woke it and it replied. IDE sessions are untested.
 - `pair status` shows the registered session and the listener's last event. The full log is
   `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under `$XDG_STATE_HOME` if it is absolute).
   The server writes only there, never in the channel, which agents can write. At 256 KB it becomes
@@ -167,7 +170,7 @@ pair init
 pair uninit                # undo pair init in this worktree (keeps history; see "Uninstall")
 pair register | unregister # run by Codex in its shell: let pair_listen notify this session
 pair mcp                   # stdio MCP server for Codex (see "Let pair wake Codex")
-pair ps                    # list running pair mcp and pair wait processes, where they run, and what started them
+pair ps [-v]               # running pair mcp and pair wait processes by worktree, with each worktree's Codex registration (-v: full commands)
 ```
 
 `pair status` shows the channel, worktree root, installed package version, and each lane's turn.
