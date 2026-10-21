@@ -101,7 +101,9 @@ pending. The note never contains message text. Codex reads the message itself wi
   - two worktrees each woke only their own Codex;
   - with Codex as the author, a `changes` review and the final approval each woke it once, and its
     `pair wait` archived the approved thread;
-  - the `never` approval policy failed.
+  - the `never` approval policy failed;
+  - with Codex CLI 0.163.0, a session idle for about 2 hours was still woken 0.9s after the request
+    and replied 9s after it.
 
   Codex in the ChatGPT desktop app works too: the app starts its own `pair mcp`, and in daily use
   with Codex as the author, each review woke it and it replied. IDE sessions are untested.

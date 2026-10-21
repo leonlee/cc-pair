@@ -1234,7 +1234,7 @@ function workingDirs(pids: number[]): Map<number, string> {
   }
   let out = "";
   try {
-    out = execFileSync("lsof", ["-a", "-d", "cwd", "-Fpn", "-p", pids.join(",")], { encoding: "utf8" });
+    out = execFileSync("lsof", ["-w", "-a", "-d", "cwd", "-Fpn", "-p", pids.join(",")], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (error) {
     // lsof exits 1 when one of the pids is gone, but still prints the rest
     out = error instanceof Error && "stdout" in error ? String(error.stdout) : "";
