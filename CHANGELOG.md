@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+`pair upgrade` asks npm for the latest version first. When you're already on it, it installs
+nothing and prints `already up to date`. After an install it shows only the files the new
+`pair init` wrote or kept, not the sandbox and `codex mcp add` setup, and names the version it
+upgraded to.
+
 ## 0.4.0 (2026-10-22)
 
 `pair upgrade` installs the latest version from npm, then runs the new `pair init` in the current

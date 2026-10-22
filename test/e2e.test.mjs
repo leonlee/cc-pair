@@ -974,38 +974,63 @@ test("status shows the cached npm version when it is newer, and never checks whe
   assert.doesNotMatch(status({ PAIR_NO_UPDATE_CHECK: "" }), /update available/);
 });
 
-test("upgrade installs the latest version, then runs the new pair init only where pair is set up", () => {
+test("upgrade installs only a newer version, then reports just the new init's file changes where pair is set up", () => {
   const { root, env, ok } = sandbox();
   const bin = join(root, "bin");
   mkdirSync(bin);
   const calls = join(root, "calls");
   const globalRoot = join(root, "global");
-  const npm = `[ "$1" = root ] && echo "${globalRoot}" && exit 0\nexit \${NPM_EXIT:-0}`;
+  const npm = `[ "$1" = root ] && echo "${globalRoot}" && exit 0\n[ "$1" = view ] && echo "\${NPM_LATEST:-99.0.0}" && exit \${NPM_VIEW_EXIT:-0}\nexit \${NPM_EXIT:-0}`;
   for (const [name, rest] of [["npm", npm], ["pair", "exit 0"]]) {
     writeFileSync(join(bin, name), `#!/bin/sh\nprintf '%s %s\\n' "${name}" "$*" >> "${calls}"\n${rest}\n`);
     chmodSync(join(bin, name), 0o755);
   }
   const installed = join(globalRoot, "claude-codex-pair", "dist", "pair.js");
   mkdirSync(dirname(installed), { recursive: true });
-  writeFileSync(installed, `require("node:fs").appendFileSync(${JSON.stringify(calls)}, "new pair " + process.argv.slice(2).join(" ") + "\\n");\n`);
+  writeFileSync(
+    installed,
+    `require("node:fs").appendFileSync(${JSON.stringify(calls)}, "new pair " + process.argv.slice(2).join(" ") + "\\n");\n` +
+      `console.log("channel: c\\nwrote: /x/SKILL.md\\nkept: /x/AGENTS.md (pair section) (current)\\n\\nsandbox setup\\n  codex mcp add …");\n`,
+  );
   const upgrade = (extra = {}) => {
     rmSync(calls, { force: true });
     const result = spawnSync("node", [CLI, "upgrade"], { cwd: root, env: { ...env, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, ...extra }, encoding: "utf8" });
     return { code: result.status, out: result.stdout + result.stderr, calls: readFileSync(calls, "utf8").trimEnd().split("\n") };
   };
 
+  const view = "npm view claude-codex-pair version";
+  const install = "npm install --global claude-codex-pair@latest";
   const fresh = upgrade();
   assert.equal(fresh.code, 0, fresh.out);
-  assert.deepEqual(fresh.calls, ["npm install --global claude-codex-pair@latest"], "no init where pair isn't set up");
-  assert.match(fresh.out, /Restart Claude Code and Codex sessions/);
+  assert.deepEqual(fresh.calls, [view, install], "no init where pair isn't set up");
+  assert.match(fresh.out, /upgraded: claude-codex-pair \S+ → 99\.0\.0\. Restart Claude Code and Codex sessions/);
 
   ok(["init"]);
-  assert.deepEqual(
-    upgrade().calls,
-    ["npm install --global claude-codex-pair@latest", "npm root --global", "new pair init"],
-    "the init of the package just installed, not an older pair earlier on PATH",
-  );
+  const upgraded = upgrade();
+  assert.deepEqual(upgraded.calls, [view, install, "npm root --global", "new pair init"], "the init of the package just installed, not an older pair earlier on PATH");
+  assert.match(upgraded.out, /^wrote: \/x\/SKILL\.md\nkept: \/x\/AGENTS\.md \(pair section\) \(current\)\nupgraded: /m);
+  assert.doesNotMatch(upgraded.out, /channel: c|sandbox setup|codex mcp add/, "only what init did to the files");
+
+  const version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")).version;
+  const current = upgrade({ NPM_LATEST: version });
+  assert.equal(current.code, 0, current.out);
+  assert.deepEqual(current.calls, [view], "nothing to install");
+  assert.equal(current.out, `already up to date: claude-codex-pair ${version}\n`);
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  writeFileSync(skillPath, "old skill\n");
+  if (process.getuid?.() !== 0) {
+    chmodSync(skillPath, 0o444);
+    const unwritable = upgrade({ NPM_LATEST: version });
+    chmodSync(skillPath, 0o644);
+    assert.equal(unwritable.code, 1, unwritable.out);
+    assert.match(unwritable.out, /^pair: already up to date, but couldn't refresh instructions \(EACCES/);
+  }
+  assert.match(upgrade({ NPM_LATEST: version }).out, /^already up to date: .*\npair: refreshed .*SKILL\.md/, "but still refreshes this worktree");
+
+  const offline = upgrade({ NPM_VIEW_EXIT: "1" });
+  assert.deepEqual(offline.calls.slice(0, 2), [view, install], "a failed version check leaves it to the install");
+  assert.match(offline.out, /→ latest\./);
   const failed = upgrade({ NPM_EXIT: "3" });
   assert.equal(failed.code, 3);
-  assert.deepEqual(failed.calls, ["npm install --global claude-codex-pair@latest"], "no init after a failed install");
+  assert.deepEqual(failed.calls, [view, install], "no init after a failed install");
 });

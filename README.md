@@ -203,8 +203,10 @@ offline or sandboxed.
 ## Upgrading
 
 Run `pair upgrade` in your own terminal, not through an agent: agent sandboxes block the network and
-global installs. It runs `npm install -g claude-codex-pair@latest`, then the new `pair init` in the
-current worktree if pair is set up there. Other worktrees refresh their instructions on the next
+global installs. If npm has a newer version, it runs `npm install -g claude-codex-pair@latest`, then
+the new `pair init` in the current worktree if pair is set up there, and prints only the files that
+`init` wrote or kept. Already on the latest version, it installs nothing and only refreshes this
+worktree's stale instructions. Other worktrees refresh their instructions on the next
 `pair send`, `wait`, `history` or `clean`. pair owns these files, so edits inside them are
 overwritten. pair, including `pair init`, never rewrites instructions that a newer pair wrote, so
 worktrees shared by different versions don't flip back and forth. To downgrade, delete them first. Restart Claude Code and Codex afterwards. Running
