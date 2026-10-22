@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-22)
 
 `pair upgrade` installs the latest version from npm, then runs the new `pair init` in the current
 worktree. `pair send`, `wait`, `history`, `clean`, `register` and `unregister` refresh stale
@@ -8,6 +8,9 @@ instructions on their own and say so on stderr. `pair status` stays read-only. I
 carry the pair version that wrote them, so an older pair never rolls back a newer one's, and status
 reports those as `newer`. `pair status` and `pair init` print a line when npm has a newer version.
 They check at most once a day, and `PAIR_NO_UPDATE_CHECK` turns the check off.
+
+From 0.3.x, upgrade this once with `npm install -g claude-codex-pair`. After that, use `pair upgrade`;
+worktrees refresh their instructions on the next `pair send` or `wait`.
 
 ## 0.3.1 (2026-10-21)
 
