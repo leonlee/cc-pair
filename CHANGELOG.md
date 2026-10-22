@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (2026-10-22)
 
 `pair upgrade` asks npm for the latest version first. When you're already on it, it installs
 nothing and prints `already up to date`. After an install it shows only the files the new
