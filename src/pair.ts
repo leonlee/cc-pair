@@ -1001,23 +1001,32 @@ function status(channel: string, root: string): string {
  * Returns a note for after the command's output: agents read `pair wait`'s first line, with stderr merged.
  */
 function refreshInstructions(root: string): string | undefined {
-  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
-  const agentsPath = join(root, "AGENTS.md");
-  const refreshed: string[] = [];
   try {
-    if (instructionState(skillPath, claudeSkill()) === "stale") {
-      writeFileSync(skillPath, claudeSkill());
-      refreshed.push(skillPath);
-    }
-    if (instructionState(agentsPath, codexSection(), true) === "stale") {
-      writeFileSync(agentsPath, readFileSync(agentsPath, "utf8").replace(PAIR_SECTION, () => codexSection()));
-      refreshed.push(`${agentsPath} (pair section)`);
-    }
+    return refreshedNote(refreshStale(root));
   } catch (error) {
     // A read-only sandbox: message delivery must still work, so report and go on.
     const reason = error instanceof Error ? error.message : String(error);
     return `pair: couldn't refresh instructions (${reason}); run \`pair init\` in your own terminal`;
   }
+}
+
+/** The stale instruction files it rewrote. A write failure throws. */
+function refreshStale(root: string): string[] {
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  const agentsPath = join(root, "AGENTS.md");
+  const refreshed: string[] = [];
+  if (instructionState(skillPath, claudeSkill()) === "stale") {
+    writeFileSync(skillPath, claudeSkill());
+    refreshed.push(skillPath);
+  }
+  if (instructionState(agentsPath, codexSection(), true) === "stale") {
+    writeFileSync(agentsPath, readFileSync(agentsPath, "utf8").replace(PAIR_SECTION, () => codexSection()));
+    refreshed.push(`${agentsPath} (pair section)`);
+  }
+  return refreshed;
+}
+
+function refreshedNote(refreshed: string[]): string | undefined {
   return refreshed.length > 0
     ? `pair: refreshed ${refreshed.join(", ")} to pair ${PACKAGE.version}; reload agent sessions to load them`
     : undefined;
@@ -1074,6 +1083,20 @@ async function updateNotice(): Promise<string[]> {
 
 /** Installs the latest pair, then lets the new version refresh this worktree's instructions. */
 function upgrade(root: string): number {
+  // npm's own answer, from the registry it installs from; if it fails, the install reports why.
+  const view = spawnSync("npm", ["view", PACKAGE.name, "version"], { encoding: "utf8" });
+  const latest = view.status === 0 ? view.stdout.trim() : undefined;
+  if (latest && !isNewer(latest, PACKAGE.version)) {
+    let note: string | undefined;
+    try {
+      note = refreshedNote(refreshStale(root)); // refreshing is all that is left to do, so a failure fails upgrade
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new PairError(`already up to date, but couldn't refresh instructions (${reason})`);
+    }
+    console.log(`already up to date: ${PACKAGE.name} ${PACKAGE.version}${note ? `\n${note}` : ""}`);
+    return 0;
+  }
   const install = spawnSync("npm", ["install", "--global", `${PACKAGE.name}@latest`], { stdio: "inherit" });
   if (install.error) {
     throw new PairError(`couldn't run npm: ${install.error.message}`);
@@ -1092,12 +1115,16 @@ function upgrade(root: string): number {
       throw new PairError("installed, but `npm root --global` failed; run `pair init` yourself");
     }
     const installed = join(globalRoot.stdout.trim(), PACKAGE.name, "dist", "pair.js");
-    const init = spawnSync(process.execPath, [installed, "init"], { cwd: root, stdio: "inherit" });
+    const init = spawnSync(process.execPath, [installed, "init"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
     if (init.error || init.status !== 0) {
       throw new PairError(`installed, but the new \`pair init\` failed${init.error ? `: ${init.error.message}` : ""}; run it yourself`);
     }
+    // Only what it did to the files: the sandbox and `codex mcp add` setup it also prints is already done.
+    console.log(init.stdout.split("\n").filter((line) => /^(?:wrote|kept): /.test(line)).join("\n"));
   }
-  console.log("Restart Claude Code and Codex sessions to load the new version. Other worktrees refresh on their next pair send or wait.");
+  console.log(
+    `upgraded: ${PACKAGE.name} ${PACKAGE.version} → ${latest ?? "latest"}. Restart Claude Code and Codex sessions to load it; other worktrees refresh on their next pair send or wait.`,
+  );
   return 0;
 }
 

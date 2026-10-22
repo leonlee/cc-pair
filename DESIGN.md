@@ -86,7 +86,9 @@ at most once a day, cache the answer under the state directory, and stay quiet o
 to stderr after the command's own output, so `pair wait`'s first line is still the delivery or
 timeout line agents read. `pair upgrade` installs with npm, then runs the `init` of the package it
 just installed (found with `npm root --global`), not the first `pair` on PATH, because both this
-process and an older copy on PATH would write the old templates.
+process and an older copy on PATH would write the old templates. It asks `npm view` first, so it uses
+the same registry as the install. Already on the latest version, it only runs the in-process
+refresh. If the check fails, it goes ahead with the install, which reports the actual npm error.
 
 Channel operations report `EACCES` and `EPERM` with the affected path and the sandbox
 configuration printed by `init`. Either ordinary permissions or sandbox restrictions can
