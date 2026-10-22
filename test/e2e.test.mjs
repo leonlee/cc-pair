@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,8 +11,8 @@ const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "pair-test-"));
-  // CODEX_THREAD_ID is cleared so tests behave the same when run from a Codex shell.
-  const env = { ...process.env, PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AGENT: "", CODEX_THREAD_ID: "" };
+  // CODEX_THREAD_ID is cleared so tests behave the same when run from a Codex shell; no test asks npm for updates.
+  const env = { ...process.env, PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AGENT: "", CODEX_THREAD_ID: "", PAIR_NO_UPDATE_CHECK: "1" };
   const run = (args, input) => {
     const result = spawnSync("node", [CLI, ...args], { cwd: root, env, input, encoding: "utf8" });
     return { code: result.status, out: result.stdout + result.stderr };
@@ -904,4 +904,108 @@ test("ps groups pair processes by worktree, with its Codex registration, and ski
     process.kill(-wrapper.pid); // the group: sh and the node it started
     assert.equal(await server.stop(), 0);
   }
+});
+
+test("send and wait refresh instructions an older pair wrote, never ones a newer pair wrote", () => {
+  const { root, env, ok, run } = sandbox();
+  ok(["init"]);
+  const agentsPath = join(root, "AGENTS.md");
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  const current = { agents: readFileSync(agentsPath, "utf8"), skill: readFileSync(skillPath, "utf8") };
+  assert.match(current.skill, /<!-- pair \d+\.\d+\.\d+ -->\n/);
+
+  // As 0.3.x wrote them: no stamp, older text.
+  const old = (text) => text.replace(/<!-- pair \S+ -->\n/, "").replace("# pair: review loop", "# pair: old review loop");
+  writeFileSync(agentsPath, `Mine\n${old(current.agents)}`);
+  writeFileSync(skillPath, old(current.skill));
+  assert.match(ok(["status"]), /SKILL\.md: stale/, "status stays read-only");
+  // Agents read stdout and stderr merged, and decide by wait's first line.
+  const merged = (args) => {
+    const path = join(root, "merged.out");
+    const fd = openSync(path, "w");
+    spawnSync("node", [CLI, ...args], { cwd: root, env, stdio: ["ignore", fd, fd] });
+    closeSync(fd);
+    return readFileSync(path, "utf8");
+  };
+  if (process.getuid?.() !== 0) {
+    chmodSync(skillPath, 0o444);
+    const unwritable = merged(["wait", "--as", "codex", "--timeout", "1"]);
+    chmodSync(skillPath, 0o644);
+    assert.match(unwritable, /^pair: no message for codex yet\.\npair: couldn't refresh instructions \(EACCES/);
+    assert.equal(readFileSync(agentsPath, "utf8"), `Mine\n${old(current.agents)}`, "nothing written after the failure");
+  }
+  const refreshed = merged(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.match(refreshed, /^pair: no message for codex yet\.\npair: refreshed .*SKILL\.md, .*AGENTS\.md \(pair section\) to pair /);
+  assert.equal(readFileSync(agentsPath, "utf8"), `Mine\n${current.agents}`);
+  assert.equal(readFileSync(skillPath, "utf8"), current.skill);
+  assert.doesNotMatch(run(["wait", "--as", "codex", "--timeout", "1"]).out, /refreshed/, "nothing left to refresh");
+
+  // Same text under an older stamp is current: no churn on releases that leave the prompt alone.
+  writeFileSync(skillPath, current.skill.replace(/<!-- pair \S+ -->/, "<!-- pair 0.0.1 -->"));
+  assert.match(ok(["status"]), /SKILL\.md: current/);
+  // And the same text under a newer stamp keeps that stamp, even through init.
+  const sameNewer = current.skill.replace(/<!-- pair \S+ -->/, "<!-- pair 99.0.0 -->");
+  writeFileSync(skillPath, sameNewer);
+  assert.match(ok(["init"]), /kept: .*SKILL\.md \(current\)/);
+  ok(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.equal(readFileSync(skillPath, "utf8"), sameNewer);
+
+  const newer = old(current.skill).replace("---\n\n", "---\n\n<!-- pair 99.0.0 -->\n");
+  writeFileSync(skillPath, newer);
+  ok(["send", "request", "--as", "claude", "-"], "hi");
+  assert.equal(readFileSync(skillPath, "utf8"), newer, "an older pair never rolls back a newer one");
+  assert.match(ok(["init"]), /kept: .*SKILL\.md \(a newer pair wrote it/);
+  assert.equal(readFileSync(skillPath, "utf8"), newer, "not even through init");
+  const status = ok(["status"]);
+  assert.match(status, /SKILL\.md: newer \(pair 99\.0\.0\)/);
+  assert.match(status, /run `pair upgrade`/);
+  assert.doesNotMatch(status, /Run `pair init`/);
+});
+
+test("status shows the cached npm version when it is newer, and never checks when opted out", () => {
+  const { root, env } = sandbox();
+  const status = (extra) => spawnSync("node", [CLI, "status"], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" }).stdout;
+  const cache = join(root, "state", "pair", "latest.json");
+  mkdirSync(dirname(cache), { recursive: true });
+  writeFileSync(cache, JSON.stringify({ checkedAt: Date.now(), version: "99.0.0" }));
+  assert.match(status({ PAIR_NO_UPDATE_CHECK: "" }), /update available: claude-codex-pair \S+ → 99\.0\.0\. Run `pair upgrade`/);
+  assert.doesNotMatch(status({}), /update available/);
+  writeFileSync(cache, JSON.stringify({ checkedAt: Date.now(), version: "0.0.1" }));
+  assert.doesNotMatch(status({ PAIR_NO_UPDATE_CHECK: "" }), /update available/);
+});
+
+test("upgrade installs the latest version, then runs the new pair init only where pair is set up", () => {
+  const { root, env, ok } = sandbox();
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const calls = join(root, "calls");
+  const globalRoot = join(root, "global");
+  const npm = `[ "$1" = root ] && echo "${globalRoot}" && exit 0\nexit \${NPM_EXIT:-0}`;
+  for (const [name, rest] of [["npm", npm], ["pair", "exit 0"]]) {
+    writeFileSync(join(bin, name), `#!/bin/sh\nprintf '%s %s\\n' "${name}" "$*" >> "${calls}"\n${rest}\n`);
+    chmodSync(join(bin, name), 0o755);
+  }
+  const installed = join(globalRoot, "claude-codex-pair", "dist", "pair.js");
+  mkdirSync(dirname(installed), { recursive: true });
+  writeFileSync(installed, `require("node:fs").appendFileSync(${JSON.stringify(calls)}, "new pair " + process.argv.slice(2).join(" ") + "\\n");\n`);
+  const upgrade = (extra = {}) => {
+    rmSync(calls, { force: true });
+    const result = spawnSync("node", [CLI, "upgrade"], { cwd: root, env: { ...env, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, ...extra }, encoding: "utf8" });
+    return { code: result.status, out: result.stdout + result.stderr, calls: readFileSync(calls, "utf8").trimEnd().split("\n") };
+  };
+
+  const fresh = upgrade();
+  assert.equal(fresh.code, 0, fresh.out);
+  assert.deepEqual(fresh.calls, ["npm install --global claude-codex-pair@latest"], "no init where pair isn't set up");
+  assert.match(fresh.out, /Restart Claude Code and Codex sessions/);
+
+  ok(["init"]);
+  assert.deepEqual(
+    upgrade().calls,
+    ["npm install --global claude-codex-pair@latest", "npm root --global", "new pair init"],
+    "the init of the package just installed, not an older pair earlier on PATH",
+  );
+  const failed = upgrade({ NPM_EXIT: "3" });
+  assert.equal(failed.code, 3);
+  assert.deepEqual(failed.calls, ["npm install --global claude-codex-pair@latest"], "no init after a failed install");
 });

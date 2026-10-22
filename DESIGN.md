@@ -74,7 +74,19 @@ active threads.
 freshness to the channel and lane states. Freshness compares the marked pair section in
 `AGENTS.md` and the generated Claude skill against the same templates used by `init`. It is
 read-only and describes files on disk, not instructions already loaded into a running session.
-The check runs only on `status`, not during polling or message delivery.
+The comparison ignores the `<!-- pair x.y.z -->` stamp that records which version wrote a file.
+
+`send`, `wait`, `history`, `clean`, `register` and `unregister` run the same check once at startup,
+not on each poll, and rewrite stale files. They skip files stamped by a newer pair, so worktrees
+shared by two versions don't flip back and forth. A write failure is a warning on stderr, so a
+read-only sandbox still delivers messages. `status` stays read-only, and `mcp` never refreshes:
+it runs unsandboxed and only reads. `status` and `init` also report a newer npm version. They check
+at most once a day, cache the answer under the state directory, and stay quiet on failure.
+`init` also keeps files a newer pair wrote; deleting them is the way to downgrade. The refresh note goes
+to stderr after the command's own output, so `pair wait`'s first line is still the delivery or
+timeout line agents read. `pair upgrade` installs with npm, then runs the `init` of the package it
+just installed (found with `npm root --global`), not the first `pair` on PATH, because both this
+process and an older copy on PATH would write the old templates.
 
 Channel operations report `EACCES` and `EPERM` with the affected path and the sandbox
 configuration printed by `init`. Either ordinary permissions or sandbox restrictions can
