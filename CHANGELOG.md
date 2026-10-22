@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+`pair upgrade` installs the latest version from npm, then runs the new `pair init` in the current
+worktree. `pair send`, `wait`, `history`, `clean`, `register` and `unregister` refresh stale
+instructions on their own and say so on stderr. `pair status` stays read-only. Instructions now
+carry the pair version that wrote them, so an older pair never rolls back a newer one's, and status
+reports those as `newer`. `pair status` and `pair init` print a line when npm has a newer version.
+They check at most once a day, and `PAIR_NO_UPDATE_CHECK` turns the check off.
+
 ## 0.3.1 (2026-10-21)
 
 `pair ps` groups processes by worktree: each block shows the worktree's registered Codex session (when found) and

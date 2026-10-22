@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -30,6 +30,12 @@ const PAIR_SECTIONS = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->(?:\r?\n)?/g;
 // SKILL.md as released versions wrote it (0.1.0 and 0.1.1), so `uninit` can tell it from an edited one.
 const RELEASED_SKILL_SHA256 = ["e9afb64c53d5e90f935bcb66406601a31a91b37758467cf867713e245f8af288"];
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PACKAGE: { name: string; version: string } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
+// Which pair wrote an instruction file, so an older pair never rolls back what a newer one wrote.
+const STAMP = /<!-- pair (\S+) -->\n/;
+// Commands that refresh stale instructions. Not status (a read-only diagnosis) or mcp (unsandboxed, so it only reads).
+const REFRESHING_COMMANDS = ["send", "wait", "history", "clean", "register", "unregister"];
+const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
 const LISTEN_LOG = "codex.listen.log";
@@ -586,9 +592,13 @@ function rotateLog(path: string): void {
  * any check and the write that follows, so the unsandboxed server only ever reads channels.
  */
 function stateDir(channel: string): string {
+  return join(stateHome(), basename(channel));
+}
+
+function stateHome(): string {
   const configured = process.env.XDG_STATE_HOME;
   const root = configured && isAbsolute(configured) ? configured : join(homedir(), ".local", "state");
-  return join(resolve(root), "pair", basename(channel));
+  return join(resolve(root), "pair");
 }
 
 function logListen(channel: string, text: string): void {
@@ -926,7 +936,11 @@ function instructionState(path: string, expected: string, sectionOnly = false): 
     if (actual === undefined) {
       return "missing"; // AGENTS.md exists but has no complete pair section
     }
-    return actual === expected ? "current" : "stale";
+    if (unstamped(actual) === unstamped(expected)) {
+      return "current";
+    }
+    const writer = STAMP.exec(actual)?.[1];
+    return writer && isNewer(writer, PACKAGE.version) ? `newer (pair ${writer})` : "stale";
   } catch (error) {
     if (isMissing(error)) {
       return "missing";
@@ -962,13 +976,12 @@ function notificationStatus(channel: string): string[] {
 
 function status(channel: string, root: string): string {
   const lanes = channelAccess(channel, () => AGENTS.map((agent) => describe(channel, agent)));
-  const { name, version } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
   const agents = instructionState(join(root, "AGENTS.md"), codexSection(), true);
   const skill = instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill());
   return [
     `channel: ${channel}`,
     `worktree: ${root}`,
-    `version: ${name} ${version}`,
+    `version: ${PACKAGE.name} ${PACKAGE.version}`,
     ...lanes,
     "instructions on disk (does not verify what running agents loaded):",
     `  AGENTS.md (pair section): ${agents}`,
@@ -978,7 +991,114 @@ function status(channel: string, root: string): string {
       ? ["Run `pair init` to refresh missing or stale instructions, then reload agent sessions."] : []),
     ...(agents.startsWith("unreadable") || skill.startsWith("unreadable")
       ? ["Check permissions on the unreadable instruction paths before refreshing them."] : []),
+    ...(agents.startsWith("newer") || skill.startsWith("newer")
+      ? ["A newer pair wrote these instructions: run `pair upgrade` in your own terminal."] : []),
   ].join("\n");
+}
+
+/**
+ * Rewrites instructions an older pair wrote; leaves missing, unreadable and newer ones for `pair status` to report.
+ * Returns a note for after the command's output: agents read `pair wait`'s first line, with stderr merged.
+ */
+function refreshInstructions(root: string): string | undefined {
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  const agentsPath = join(root, "AGENTS.md");
+  const refreshed: string[] = [];
+  try {
+    if (instructionState(skillPath, claudeSkill()) === "stale") {
+      writeFileSync(skillPath, claudeSkill());
+      refreshed.push(skillPath);
+    }
+    if (instructionState(agentsPath, codexSection(), true) === "stale") {
+      writeFileSync(agentsPath, readFileSync(agentsPath, "utf8").replace(PAIR_SECTION, () => codexSection()));
+      refreshed.push(`${agentsPath} (pair section)`);
+    }
+  } catch (error) {
+    // A read-only sandbox: message delivery must still work, so report and go on.
+    const reason = error instanceof Error ? error.message : String(error);
+    return `pair: couldn't refresh instructions (${reason}); run \`pair init\` in your own terminal`;
+  }
+  return refreshed.length > 0
+    ? `pair: refreshed ${refreshed.join(", ")} to pair ${PACKAGE.version}; reload agent sessions to load them`
+    : undefined;
+}
+
+function unstamped(text: string): string {
+  return text.replace(STAMP, "");
+}
+
+function isNewer(version: string, than: string): boolean {
+  return version.localeCompare(than, "en", { numeric: true }) > 0;
+}
+
+/** The latest version on npm, checked at most once a day; undefined when opted out or the check fails. */
+async function latestVersion(): Promise<string | undefined> {
+  if (process.env.PAIR_NO_UPDATE_CHECK) {
+    return undefined;
+  }
+  const cache = join(stateHome(), "latest.json");
+  try {
+    const cached = JSON.parse(readFileSync(cache, "utf8"));
+    if (Date.now() - cached.checkedAt < UPDATE_CHECK_MS && typeof cached.version === "string") {
+      return cached.version;
+    }
+  } catch {
+    // no cache yet, or a corrupt one: check again
+  }
+  let version: unknown;
+  try {
+    // ponytail: the public registry, not npm's configured one; read `npm config get registry` if mirrors matter
+    const response = await fetch(`https://registry.npmjs.org/${PACKAGE.name}/latest`, { signal: AbortSignal.timeout(2000) });
+    version = ((await response.json()) as { version?: unknown }).version;
+  } catch {
+    return undefined; // offline or sandboxed: the notice is best-effort
+  }
+  if (typeof version !== "string") {
+    return undefined;
+  }
+  try {
+    mkdirSync(dirname(cache), { recursive: true });
+    writeFileSync(cache, JSON.stringify({ checkedAt: Date.now(), version }));
+  } catch {
+    // a read-only state dir only means checking again next time
+  }
+  return version;
+}
+
+async function updateNotice(): Promise<string[]> {
+  const latest = await latestVersion();
+  return latest && isNewer(latest, PACKAGE.version)
+    ? [`update available: ${PACKAGE.name} ${PACKAGE.version} → ${latest}. Run \`pair upgrade\` in your own terminal.`]
+    : [];
+}
+
+/** Installs the latest pair, then lets the new version refresh this worktree's instructions. */
+function upgrade(root: string): number {
+  const install = spawnSync("npm", ["install", "--global", `${PACKAGE.name}@latest`], { stdio: "inherit" });
+  if (install.error) {
+    throw new PairError(`couldn't run npm: ${install.error.message}`);
+  }
+  if (install.status !== 0) {
+    return install.status ?? 1;
+  }
+  const states = [
+    instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()),
+    instructionState(join(root, "AGENTS.md"), codexSection(), true),
+  ];
+  if (states.some((state) => state !== "missing")) {
+    // The package just installed, not whatever `pair` comes first on PATH, which may be an older copy.
+    const globalRoot = spawnSync("npm", ["root", "--global"], { encoding: "utf8" });
+    if (globalRoot.error || globalRoot.status !== 0) {
+      throw new PairError("installed, but `npm root --global` failed; run `pair init` yourself");
+    }
+    const installed = join(globalRoot.stdout.trim(), PACKAGE.name, "dist", "pair.js");
+    const init = spawnSync(process.execPath, [installed, "init"], { cwd: root, stdio: "inherit" });
+    if (init.error || init.status !== 0) {
+      throw new PairError(`installed, but the new \`pair init\` failed${init.error ? `: ${init.error.message}` : ""}; run it yourself`);
+    }
+  }
+  console.log("Restart Claude Code and Codex sessions to load the new version. Other worktrees refresh on their next pair send or wait.");
+  return 0;
 }
 
 interface ArchivedThread {
@@ -1075,30 +1195,46 @@ function renderPrompt(agent: Agent): string {
 
 function claudeSkill(): string {
   const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
-  return header + renderPrompt("claude");
+  return `${header}<!-- pair ${PACKAGE.version} -->\n${renderPrompt("claude")}`;
 }
 
 function codexSection(): string {
-  return `<!-- pair:start -->\n${renderPrompt("codex").trimEnd()}\n<!-- pair:end -->\n`;
+  return `<!-- pair:start -->\n<!-- pair ${PACKAGE.version} -->\n${renderPrompt("codex").trimEnd()}\n<!-- pair:end -->\n`;
 }
 
 function init(channel: string, root: string): string {
   channelAccess(channel, () => mkdirSync(channel, { recursive: true }));
 
+  // Current files keep their stamp too: a newer pair may have written the same text.
+  const kept = (state: string): string | undefined =>
+    state === "current" ? " (current)" : state.startsWith("newer") ? " (a newer pair wrote it; run `pair upgrade`, or delete it to downgrade)" : undefined;
+  const done: string[] = [];
   const skillDir = join(root, ".claude", "skills", "pair");
-  mkdirSync(skillDir, { recursive: true });
-  writeFileSync(join(skillDir, "SKILL.md"), claudeSkill());
+  const skillPath = join(skillDir, "SKILL.md");
+  const skillKept = kept(instructionState(skillPath, claudeSkill()));
+  if (skillKept) {
+    done.push(`kept: ${skillPath}${skillKept}`);
+  } else {
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, claudeSkill());
+    done.push(`wrote: ${skillPath}`);
+  }
 
   const agentsPath = join(root, "AGENTS.md");
   const section = codexSection();
-  const existing = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
-  const updated = PAIR_SECTION.test(existing) ? existing.replace(PAIR_SECTION, () => section) : `${existing}${existing ? "\n" : ""}${section}`;
-  writeFileSync(agentsPath, updated);
+  const agentsKept = kept(instructionState(agentsPath, section, true));
+  if (agentsKept) {
+    done.push(`kept: ${agentsPath} (pair section)${agentsKept}`);
+  } else {
+    const existing = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
+    const updated = PAIR_SECTION.test(existing) ? existing.replace(PAIR_SECTION, () => section) : `${existing}${existing ? "\n" : ""}${section}`;
+    writeFileSync(agentsPath, updated);
+    done.push(`wrote: ${agentsPath} (pair section)`);
+  }
 
   return [
     `channel: ${channel}`,
-    `wrote: ${join(skillDir, "SKILL.md")}`,
-    `wrote: ${agentsPath} (pair section)`,
+    ...done,
     "",
     sandboxConfig(channel),
     "",
@@ -1149,7 +1285,7 @@ function uninit(channel: string, root: string): string {
   const skillPath = join(skillDir, "SKILL.md");
   if (existsSync(skillPath)) {
     const skill = readFileSync(skillPath, "utf8");
-    if (skill === claudeSkill() || RELEASED_SKILL_SHA256.includes(createHash("sha256").update(skill).digest("hex"))) {
+    if (unstamped(skill) === unstamped(claudeSkill()) || RELEASED_SKILL_SHA256.includes(createHash("sha256").update(skill).digest("hex"))) {
       rmSync(skillPath);
       removed.push(skillPath);
       // Drop the directories init created, up to the first one that holds something else.
@@ -1392,6 +1528,7 @@ const USAGE = `usage:
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
   pair init
+  pair upgrade                                        (install the latest pair from npm, then refresh this worktree)
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
   pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
@@ -1407,58 +1544,66 @@ async function main(argv: string[]): Promise<number> {
   const root = worktreeRoot();
   const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
-
-  switch (command) {
-    case "send": {
-      autoKeep(); // reject a bad PAIR_KEEP before touching any thread
-      const type = oneOf(rest[0], MESSAGE_TYPES, "message type");
-      const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
-      const me = agent();
-      const body = readBody(rest[1]);
-      console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict))}`);
-      return 0;
-    }
-    case "wait": {
-      autoKeep(); // reject a bad PAIR_KEEP before touching any thread
-      const me = agent();
-      const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
-      if (!(await wait(channel, me, timeout))) {
-        // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
-        // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
-        console.log(`pair: no message for ${me} yet.`);
+  const refreshNote = REFRESHING_COMMANDS.includes(command) ? refreshInstructions(root) : undefined;
+  try {
+    switch (command) {
+      case "send": {
+        autoKeep(); // reject a bad PAIR_KEEP before touching any thread
+        const type = oneOf(rest[0], MESSAGE_TYPES, "message type");
+        const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
+        const me = agent();
+        const body = readBody(rest[1]);
+        console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict))}`);
+        return 0;
       }
-      return 0;
+      case "wait": {
+        autoKeep(); // reject a bad PAIR_KEEP before touching any thread
+        const me = agent();
+        const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
+        if (!(await wait(channel, me, timeout))) {
+          // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
+          // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
+          console.log(`pair: no message for ${me} yet.`);
+        }
+        return 0;
+      }
+      case "status":
+        console.log([status(channel, root), ...(await updateNotice())].join("\n"));
+        return 0;
+      case "history":
+        console.log(channelAccess(channel, () => history(channel, rest[0])));
+        return 0;
+      case "clean":
+        console.log(channelAccess(channel, () => clean(channel, values.keep)));
+        return 0;
+      case "init":
+        console.log([init(channel, root), ...(await updateNotice())].join("\n"));
+        return 0;
+      case "upgrade":
+        return upgrade(root);
+      case "uninit":
+        console.log(uninit(channel, root));
+        return 0;
+      case "register":
+        console.log(channelAccess(channel, () => register(channel, root)));
+        return 0;
+      case "unregister":
+        console.log(channelAccess(channel, () => unregister(channel)));
+        return 0;
+      case "mcp":
+        await serveMcp();
+        return 0;
+      case "ps":
+        console.log(ps(values.verbose ?? false));
+        return 0;
+      default:
+        console.error(USAGE);
+        return 1;
     }
-    case "status":
-      console.log(status(channel, root));
-      return 0;
-    case "history":
-      console.log(channelAccess(channel, () => history(channel, rest[0])));
-      return 0;
-    case "clean":
-      console.log(channelAccess(channel, () => clean(channel, values.keep)));
-      return 0;
-    case "init":
-      console.log(init(channel, root));
-      return 0;
-    case "uninit":
-      console.log(uninit(channel, root));
-      return 0;
-    case "register":
-      console.log(channelAccess(channel, () => register(channel, root)));
-      return 0;
-    case "unregister":
-      console.log(channelAccess(channel, () => unregister(channel)));
-      return 0;
-    case "mcp":
-      await serveMcp();
-      return 0;
-    case "ps":
-      console.log(ps(values.verbose ?? false));
-      return 0;
-    default:
-      console.error(USAGE);
-      return 1;
+  } finally {
+    if (refreshNote) {
+      console.error(refreshNote);
+    }
   }
 }
 

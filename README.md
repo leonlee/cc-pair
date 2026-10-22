@@ -158,7 +158,7 @@ lines. Pair needs no extra sandbox config, because every channel lives under `~/
 
 ## Commands
 
-The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`, `history` and `clean`.
+The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`, `history`, `clean` and `upgrade`.
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
@@ -167,6 +167,7 @@ pair status
 pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
 pair clean --keep N        # delete all but the N newest finished threads
 pair init
+pair upgrade               # install the latest pair from npm, then refresh this worktree's instructions
 pair uninit                # undo pair init in this worktree (keeps history; see "Uninstall")
 pair register | unregister # run by Codex in its shell: let pair_listen notify this session
 pair mcp                   # stdio MCP server for Codex (see "Let pair wake Codex")
@@ -189,11 +190,26 @@ codex notifications: session 01a13922-c08f-79e3-a41f-6780876fd9c5, registered 20
   last listener event: 2026-10-14T08:05:12.345Z notified 01a13922-… about /Users/you/.pair/…/001-request.md
 ```
 
-Instruction states are `current`, `stale`, `missing`, or `unreadable`. The check compares only
+Instruction states are `current`, `stale`, `newer`, `missing`, or `unreadable`. The check compares only
 the marked pair section in `AGENTS.md`, so your other instructions don't affect it. Status
 doesn't change files. Run `pair init` to refresh missing or stale instructions, then reload
 agent sessions; fix access to unreadable files first. Current files on disk don't guarantee
-that a running agent has loaded them.
+that a running agent has loaded them. `newer` means a newer pair wrote them: run `pair upgrade`.
+
+`pair status` and `pair init` also print a line when npm has a newer version. They check at most
+once a day and cache the answer in `~/.local/state/pair/latest.json`. The check stays quiet when
+offline or sandboxed.
+
+## Upgrading
+
+Run `pair upgrade` in your own terminal, not through an agent: agent sandboxes block the network and
+global installs. It runs `npm install -g claude-codex-pair@latest`, then the new `pair init` in the
+current worktree if pair is set up there. Other worktrees refresh their instructions on the next
+`pair send`, `wait`, `history` or `clean`. pair owns these files, so edits inside them are
+overwritten. pair, including `pair init`, never rewrites instructions that a newer pair wrote, so
+worktrees shared by different versions don't flip back and forth. To downgrade, delete them first. Restart Claude Code and Codex afterwards. Running
+sessions keep the instructions they loaded at start, and Codex keeps its old `pair mcp` until
+it restarts.
 
 If a channel read or write fails with `EACCES` or `EPERM`, the command names the path and prints
 sandbox configuration snippets using your actual channel directory. Check ordinary filesystem
@@ -206,6 +222,7 @@ so a cleanup problem doesn't prevent delivering a review or starting the next th
 | `PAIR_AGENT` | (none) | Default for `--as` |
 | `PAIR_MAX_ROUNDS` | `3` | Number of review rounds before escalation |
 | `PAIR_KEEP` | `100` | Finished threads to keep, by finish time. Older ones are deleted whenever a thread finishes. `all` keeps everything, `0` keeps none |
+| `PAIR_NO_UPDATE_CHECK` | (none) | Any value turns off the daily npm version check |
 
 ## Uninstall
 
