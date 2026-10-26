@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-10-26)
+
+Version 0.5.0 was briefly published and then unpublished. This release uses a new version number
+because npm does not allow a published version to be reused.
 
 Opt-in auto mode: `pair start --as claude|codex` opens an interactive author and manages its
 reviewer automatically. Reviewers run one bounded round, resume their saved session for follow-ups,
@@ -13,6 +16,11 @@ supports macOS and Linux.
 settings on fresh and resumed rounds. Status and process listings show the requested overrides;
 omitted values continue to inherit the CLI defaults. Author settings and CLI config files are
 left alone.
+
+`pair reset` clears stale pending requests in this worktree by moving the selected lanes into a
+timestamped backup, preserving source files and finished history. `--as claude|codex` selects the
+request author; `--dry-run` previews the reset. Reset refuses an active auto session and handles
+malformed or legacy requests without parsing them.
 
 ## 0.4.1 (2026-10-22)
 

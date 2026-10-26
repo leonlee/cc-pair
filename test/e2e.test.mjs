@@ -7,6 +7,10 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
+// These protocol tests create their own agents/channels. Do not inherit an auto author's or
+// reviewer's role when the developer runs npm test from inside a managed session.
+for (const name of ["PAIR_AUTO_ROLE", "PAIR_AUTO_RUN", "PAIR_AUTO_MESSAGE", "PAIR_BIN"]) delete process.env[name];
+
 const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
 
 function sandbox() {

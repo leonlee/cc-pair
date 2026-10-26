@@ -151,6 +151,25 @@ export async function stopAuto(stateDir: string): Promise<string> {
   }
 }
 
+/** Serialize a manual channel reset with auto startup using the same exclusive socket. */
+export async function withAutoStopped<T>(stateDir: string, operation: () => T): Promise<T> {
+  if (process.platform === "win32") return operation(); // auto mode is unsupported there
+  const path = autoSocketPath(stateDir, true);
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, () => { server.removeListener("error", reject); resolve(); });
+  }).catch((error) => {
+    if (missing(error, "EADDRINUSE")) {
+      throw new Error(`cannot reset while auto mode or another reset owns this worktree. Run pair stop first for auto mode, or wait for the other reset. If the owner is gone, inspect the stale socket reported by pair status: ${path}`);
+    }
+    if (missing(error, "EPERM", "EACCES")) throw new Error(`reset needs the auto-mode lock socket at ${path}; run pair reset in your own terminal, outside agent sandboxes. Socket access was denied (${(error as NodeJS.ErrnoException).code}).`);
+    throw error;
+  });
+  try { return await operation(); }
+  finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+}
+
 function executable(name: Agent, override?: string): string {
   const candidates = override ? [override] : (process.env.PATH ?? "").split(delimiter).filter(isAbsolute).map((dir) => join(dir, name));
   for (const path of candidates) {

@@ -199,6 +199,23 @@ own sessions/groups can escape it, and killing both supervisors can leave a stal
 Stale sockets are reported for manual inspection, never silently replaced. Windows auto mode is
 not yet supported. Manual mode and its notification lifecycle remain unchanged.
 
+## Manual reset
+
+`pair reset` moves whole pending lanes into `resets/<reset-id>/` in the current channel, leaving
+source files, archived history, and session registrations untouched. `--as` selects the lane's
+author; omitting it resets both, independent of `PAIR_AGENT`. Moving whole lanes also handles
+legacy flat files, malformed messages, partial writes, and older thread directories without
+requiring successful protocol parsing. A small `reset.json` records the time, worktree and planned
+lanes. Reset backups are deliberately outside archive retention and `pair history`.
+Both preview and reset output show best-effort lane states. Unread closed threads still in their
+lanes are included in the backup; only already-archived history is left in `pair history`.
+
+Each lane rename is atomic. If a later rename fails, the command reports which lanes moved and
+where their backup is; it never deletes or rolls back over new data. Manual agents must be stopped
+before reset. On macOS/Linux, reset exclusively binds the auto-mode control socket until it finishes,
+so it refuses live or stale ownership and serializes with `pair start`. `--dry-run` only inspects
+the pending lanes and creates neither backups nor an ownership socket, even while auto mode runs.
+
 ## Usage
 
 ```
@@ -216,6 +233,7 @@ pair wait --as <agent> [--timeout s]
 pair status
 pair history [thread-id]
 pair clean --keep N
+pair reset [--as <agent>] [--dry-run]
 pair init
 pair uninit
 pair register | unregister
@@ -224,7 +242,7 @@ pair mcp
 
 ## Known limits
 
-- A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a hint to move its files into a subdirectory, and the messages are left untouched.
+- A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a recovery hint; `pair reset` can back up and clear it without parsing the old files.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
 - Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
 - Notifications are verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session that had ended its turn was woken about 1s after Claude's request, then reviewed and replied in one turn. Other cases also verified:

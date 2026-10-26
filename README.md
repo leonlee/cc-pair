@@ -216,6 +216,39 @@ combination fails the review round and keeps the request available for recovery.
 `pair status` and `pair ps` display the requested model and effort overrides. An omitted override
 is shown as `CLI default`; pair does not claim to resolve the provider's inherited settings.
 
+## Reset stale requests
+
+Run `pair reset` manually from the affected worktree to clear outdated pending requests:
+
+```sh
+pair reset --dry-run          # preview the affected lanes without changing files
+pair reset                    # reset both directions in this worktree
+pair reset --as claude        # only requests authored by Claude (claude-to-codex)
+pair reset --as codex         # only requests authored by Codex (codex-to-claude)
+```
+
+`--dry-run` is only supported by `reset`; other commands reject it before making changes.
+
+Stop manual author/reviewer sessions first. If an auto session owns the worktree, reset refuses
+to change it; run `pair stop` before resetting. Preview remains available while auto mode runs.
+Reset also holds the auto-mode ownership socket while moving requests, so another auto launcher
+cannot start during the operation. If a stale socket is left after all supervising processes were
+killed, inspect the path reported by `pair status` before removing that socket and retrying.
+
+Reset moves each selected lane into `~/.pair/<repo>-<hash>/resets/<reset-id>/` (under `PAIR_HOME`
+when configured) and prints the backup path. It preserves every file, including malformed requests,
+legacy layouts, older threads, and partial writes. New requests start with fresh lanes. Source
+files, finished history in `archive/`, and Codex notification registrations are unchanged.
+`--as` selects the request's author; without it both lanes are reset, regardless of `PAIR_AGENT`.
+Unread approvals and escalations still in a lane are backed up too, so their verdicts will no
+longer be delivered. Preview and reset output show each lane's state, including `closed`, or
+`unparseable` if the requests cannot be read by the protocol.
+
+Backups include `reset.json` with the worktree, time, and selected lanes. They are separate from
+finished review history, so `pair history`, automatic archive retention, and `pair clean` leave
+them alone. Delete a backup manually when you no longer need it. A reset that fails partway names
+the backup holding already-moved requests; the remaining lane is left available for a retry.
+
 ## Upgrading from 0.1.x
 
 Codex no longer keeps a long `pair wait` running. To keep automatic pickup after upgrading, install
@@ -266,6 +299,7 @@ pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet
 pair status
 pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
 pair clean --keep N        # delete all but the N newest finished threads
+pair reset [--as <claude|codex>] [--dry-run]  # back up stale pending lanes (default: both)
 pair init
 pair upgrade               # install the latest pair from npm, then refresh this worktree's instructions
 pair uninit                # undo pair init in this worktree (keeps history; see "Uninstall")

@@ -136,7 +136,16 @@ if (reviewer) {
   });
   const stateDir = () => join(root, "state", "pair", readdirSync(join(root, "state", "pair"))[0]);
   const state = () => JSON.parse(readFileSync(join(stateDir(), "auto.json"), "utf8"));
-  return { root, socketDir, env, fake, launcher, completed, file, read, command, stateDir, state, output: () => output };
+  const call = (request, timeout) => {
+    const previous = process.env.PAIR_AUTO_SOCKET_DIR;
+    process.env.PAIR_AUTO_SOCKET_DIR = socketDir;
+    try { return autoCall(stateDir(), request, timeout); }
+    finally {
+      if (previous === undefined) delete process.env.PAIR_AUTO_SOCKET_DIR;
+      else process.env.PAIR_AUTO_SOCKET_DIR = previous;
+    }
+  };
+  return { root, socketDir, env, fake, launcher, completed, file, read, command, stateDir, state, call, output: () => output };
 }
 
 for (const author of ["claude", "codex"]) {
@@ -299,6 +308,21 @@ test("Ctrl+C stops a running review and its tools", { timeout: 15_000 }, async (
   await until(() => !alive(Number(f.read("worker.pid"))) && !alive(Number(f.read("descendant.pid"))), "interrupt cleanup");
 });
 
+test("reset refuses an active auto review, then clears it after stop", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "hang" });
+  await until(() => existsSync(f.file("worker.pid")), "reviewer started");
+  assert.match((await f.command(["reset", "--dry-run"])).stdout, /would reset/);
+  await assert.rejects(f.command(["stop", "--dry-run"]), /--dry-run is only supported by pair reset/);
+  await assert.rejects(f.command(["reset"]), /Run pair stop first/);
+  assert.ok(alive(Number(f.read("worker.pid"))));
+  assert.match((await f.command(["status"])).stdout, /awaiting-review/);
+  await f.command(["stop"]);
+  assert.match((await f.command(["reset"])).stdout, /saved pending requests:/);
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /claude-to-codex: idle/);
+  assert.match(status, /codex-to-claude: idle/);
+});
+
 test("auto start rejects nested launches from agent shells", () => {
   const result = spawnSync(process.execPath, [CLI, "start", "--as", "claude"], {
     env: { ...process.env, CODEX_THREAD_ID: "11111111-1111-4111-8111-111111111111", PAIR_NO_UPDATE_CHECK: "1" }, encoding: "utf8",
@@ -314,7 +338,7 @@ test("a reviewer spawn failure preserves the pending request", { timeout: 15_000
   writeFileSync(f.file("request.md"), "Review a.ts");
   const sent = (await f.command(["send", "request", "--as", "claude", f.file("request.md")])).stdout.trim().replace("sent: ", "");
   rmSync(f.fake);
-  await assert.rejects(autoCall(f.stateDir(), { action: "review", run: f.state().run, file: sent }, 10_000), /ENOENT/);
+  await assert.rejects(f.call({ action: "review", run: f.state().run, file: sent }, 10_000), /ENOENT/);
   assert.match((await f.command(["status"])).stdout, /awaiting-review/);
   await f.command(["stop"]);
 });
@@ -325,7 +349,7 @@ test("duplicate dispatches share one running reviewer", { timeout: 15_000 }, asy
   const state = f.state();
   const home = join(f.env.PAIR_HOME, readdirSync(f.env.PAIR_HOME)[0], "claude-to-codex");
   const file = join(home, readdirSync(home)[0], "001-request.md");
-  const duplicate = autoCall(f.stateDir(), { action: "review", run: state.run, file }, 10_000).catch((error) => error);
+  const duplicate = f.call({ action: "review", run: state.run, file }, 10_000).catch((error) => error);
   await pause(150);
   assert.equal(JSON.parse(f.read("calls.json")).length, 1);
   await f.command(["stop"]);

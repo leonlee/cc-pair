@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { autoCall, autoSocketPath, autoStatus, runGuardian, startAuto, stopAuto } from "./auto.js";
+import { autoCall, autoSocketPath, autoStatus, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -154,7 +154,7 @@ function currentThreadDir(thread: Thread): string | undefined {
   const legacy = entries.find((entry) => entry.isFile() && MESSAGE_FILE.test(entry.name));
   if (legacy) {
     throw new PairError(
-      `${thread.lane} still uses the old flat layout (${legacy.name}). Move its NNN-*.md files into a new subdirectory of it, or delete them if that thread is finished.`,
+      `${thread.lane} still uses the old flat layout (${legacy.name}). Move its NNN-*.md files into a new subdirectory of it, or stop the agents and run pair reset --as ${thread.author} to back it up and clear the lane.`,
     );
   }
   const latest = entries
@@ -352,7 +352,7 @@ function send(channel: string, me: Agent, type: MessageType, body: string, verdi
   const state = stateOf(messages);
   if (type === "request") {
     if (state.kind === "awaiting-review" || state.kind === "awaiting-response") {
-      throw new PairError(`a review thread to ${thread.reviewer} is already open (${state.kind}); finish it first`);
+      throw new PairError(`a review thread to ${thread.reviewer} is already open (${state.kind}); finish it first, or stop the agents and manually run pair reset --as ${me} to back up and clear this lane`);
     }
     if (state.kind === "closed") {
       archive(channel, state.last);
@@ -1226,6 +1226,49 @@ function clean(channel: string, keepValue: string | undefined): string {
   return `removed ${prune(channel, keep)} finished thread(s), kept up to ${keep}`;
 }
 
+/** Back up whole lanes so reset also repairs legacy, corrupt, and partially written requests. */
+function reset(channel: string, root: string, author: Agent | undefined, dryRun: boolean): string {
+  const lanes = (author ? [author] : AGENTS)
+    .flatMap((agent) => {
+      const lane = threadFor(channel, agent).lane;
+      const stat = lstatSync(lane, { throwIfNoEntry: false });
+      if (!stat || (stat.isDirectory() && readdirSync(lane).length === 0)) return [];
+      let label = `${basename(lane)}: ${stat.isSymbolicLink() ? "symlink" : "unparseable"}`;
+      if (stat.isDirectory()) {
+        try { label = describe(channel, agent); } catch { /* backup must still work for malformed requests */ }
+      }
+      return [{ lane, label }];
+    });
+  if (lanes.length === 0) return `nothing to reset in ${root}`;
+  if (dryRun) return [
+    `would reset in ${root}:`,
+    ...lanes.map(({ label }) => `  ${label}`),
+    `would preserve their contents under ${join(channel, "resets")}; no files changed`,
+  ].join("\n");
+
+  const resetRoot = join(channel, "resets");
+  const stat = lstatSync(resetRoot, { throwIfNoEntry: false });
+  if (stat && !stat.isDirectory()) throw new PairError(`refusing to write reset backups through a non-directory or symlink: ${resetRoot}`);
+  const backup = join(resetRoot, newThreadId());
+  mkdirSync(backup, { recursive: true });
+  const moved: string[] = [];
+  try {
+    writeFileSync(join(backup, "reset.json"), `${JSON.stringify({ resetAt: new Date().toISOString(), worktree: root, plannedLanes: lanes.map(({ lane }) => basename(lane)) }, null, 2)}\n`);
+    for (const { lane } of lanes) {
+      renameSync(lane, join(backup, basename(lane)));
+      moved.push(basename(lane));
+    }
+  } catch (error) {
+    const failure = channelError(channel, error);
+    throw new PairError(`reset failed${moved.length ? ` after moving ${moved.join(", ")}` : ""}; any moved requests are preserved at ${backup}: ${failure instanceof Error ? failure.message : String(failure)}`);
+  }
+  return [
+    ...lanes.map(({ label }) => `reset: ${label}`),
+    `saved pending requests: ${backup}`,
+    "Archived history and source files are unchanged. Restart manual agents before sending a fresh request.",
+  ].join("\n");
+}
+
 function renderPrompt(agent: Agent): string {
   const template = readFileSync(join(PACKAGE_ROOT, "prompts", "pair.md"), "utf8");
   return template.replaceAll("{{AGENT}}", agent).replaceAll("{{PARTNER}}", partnerOf(agent));
@@ -1574,6 +1617,7 @@ const USAGE = `usage:
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
+  pair reset [--as <claude|codex>] [--dry-run]        (back up pending lanes; --as selects their author, default: both)
   pair init
   pair upgrade                                        (install the latest pair from npm, then refresh this worktree)
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
@@ -1585,10 +1629,11 @@ async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "dry-run": { type: "boolean" } },
   });
   const [command, ...rest] = positionals;
   if (values.help || command === "help") { console.log(USAGE); return 0; }
+  if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
   const root = worktreeRoot();
   const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
@@ -1681,6 +1726,15 @@ async function main(argv: string[]): Promise<number> {
       case "clean":
         console.log(channelAccess(channel, () => clean(channel, values.keep)));
         return 0;
+      case "reset": {
+        if (rest.length) throw new PairError("reset accepts no positional arguments; use --as claude|codex to select an author lane");
+        const author = values.as === undefined ? undefined : oneOf(values.as, AGENTS, "--as");
+        const operation = () => channelAccess(channel, () => reset(channel, root, author, values["dry-run"] ?? false));
+        try {
+          console.log(values["dry-run"] ? operation() : await withAutoStopped(stateDir(channel), operation));
+        } catch (error) { throw new PairError(error instanceof Error ? error.message : String(error)); }
+        return 0;
+      }
       case "init":
         console.log([init(channel, root), ...(await updateNotice())].join("\n"));
         return 0;
