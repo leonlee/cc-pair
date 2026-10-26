@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -104,7 +104,11 @@ if (reviewer) {
 }
 `);
   chmodSync(fake, 0o700);
-  const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+  const overrides = [
+    ...(reviewerModel === undefined ? [] : ["--reviewer-model", reviewerModel]),
+    ...(reviewerEffort === undefined ? [] : ["--reviewer-effort", reviewerEffort]),
+  ];
+  const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   launcher.stdout.on("data", (data) => { output += data; });
   launcher.stderr.on("data", (data) => { output += data; });
@@ -144,12 +148,84 @@ for (const author of ["claude", "codex"]) {
     assert.match(f.read("third.out"), /verdict approve/);
     const calls = JSON.parse(f.read("calls.json"));
     assert.equal(calls.length, 3);
+    for (const { args } of calls) {
+      assert.ok(!args.includes("--model"), "omitted model must inherit CLI defaults");
+      assert.ok(!args.includes("--effort") && !args.includes("--config"), "omitted effort must inherit CLI defaults");
+    }
     const resume = author === "claude" ? "resume" : "--resume";
     assert.ok(calls[1].args.includes(resume));
     assert.equal(calls[1].args[calls[1].args.indexOf(resume) + 1], "11111111-1111-4111-8111-000000000001");
     assert.ok(!calls[2].args.includes(resume));
     assert.match((await f.command(["history"])).stdout, /approved/);
     assert.match((await f.command(["status"])).stdout, /auto mode: stopped/);
+  });
+
+  test(`auto ${author}: reviewer overrides persist through resume without changing author arguments`, { timeout: 15_000 }, async (t) => {
+    const reviewerModel = `fixture-${author === "claude" ? "codex" : "claude"}-model`;
+    const f = fixture(t, { author, reviewerModel, reviewerEffort: "high" });
+    assert.equal((await f.completed).code, 0, f.output());
+    const calls = JSON.parse(f.read("calls.json"));
+    assert.equal(calls.length, 3);
+    for (const { args } of calls) {
+      assert.equal(args[args.indexOf("--model") + 1], reviewerModel);
+      if (author === "claude") {
+        assert.equal(args[args.indexOf("--config") + 1], 'model_reasoning_effort="high"');
+        assert.ok(args.indexOf("--model") > args.indexOf("exec"), "Codex model belongs to the exec command");
+        assert.ok(args.indexOf("--config") > args.indexOf("exec"));
+        if (args.includes("resume")) assert.ok(args.indexOf("--model") > args.indexOf("resume"), "resume gets its own explicit model override");
+      } else {
+        assert.equal(args[args.indexOf("--effort") + 1], "high");
+      }
+    }
+    assert.ok(calls[1].args.includes(author === "claude" ? "resume" : "--resume"));
+    const authorArgs = JSON.parse(f.read("author.args.json"));
+    assert.ok(!authorArgs.includes("--model") && !authorArgs.includes("--effort") && !authorArgs.includes("--config"));
+  });
+}
+
+test("status reports requested reviewer overrides and labels inherited settings", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { author: "codex", scenario: "hold", reviewerModel: "opus", reviewerEffort: "high" });
+  await until(() => existsSync(f.file("author.pid")), "author started");
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /reviewer model override: opus/);
+  assert.match(status, /reviewer effort override: high/);
+  assert.equal(f.state().reviewerModel, "opus");
+  assert.equal(f.state().reviewerEffort, "high");
+  await f.command(["stop"]);
+
+  const defaults = fixture(t, { scenario: "hold" });
+  await until(() => existsSync(defaults.file("author.pid")), "default author started");
+  const inherited = (await defaults.command(["status"])).stdout;
+  assert.match(inherited, /reviewer model override: CLI default/);
+  assert.match(inherited, /reviewer effort override: CLI default/);
+  await defaults.command(["stop"]);
+});
+
+for (const overrides of [{ reviewerModel: "fixture-model" }, { reviewerEffort: "xhigh" }]) {
+  test(`reviewer ${Object.keys(overrides)[0]} can be set independently`, { timeout: 15_000 }, async (t) => {
+    const f = fixture(t, { ...overrides, scenario: "retry" });
+    assert.equal((await f.completed).code, 0, f.output());
+    const [{ args }] = JSON.parse(f.read("calls.json"));
+    assert.equal(args.includes("--model"), overrides.reviewerModel !== undefined);
+    assert.equal(args.includes("--config"), overrides.reviewerEffort !== undefined);
+    assert.match(f.read("first.out"), /verdict approve/);
+  });
+}
+
+for (const options of [
+  { reviewerModel: "" },
+  { reviewerModel: " padded-model " },
+  { reviewerModel: "model\nname" },
+  { reviewerEffort: "higgh" },
+  { reviewerEffort: "" },
+  { author: "codex", reviewerEffort: "none" },
+]) {
+  test(`invalid reviewer override fails before agent startup: ${JSON.stringify(options)}`, { timeout: 10_000 }, async (t) => {
+    const f = fixture(t, { scenario: "hold", ...options });
+    assert.equal((await f.completed).code, 1);
+    assert.match(f.output(), /--reviewer-(?:model|effort)/);
+    assert.ok(!existsSync(f.file("author.pid")), "invalid overrides must not launch an author");
+    assert.deepEqual(readdirSync(f.socketDir), [], "invalid overrides must not claim a socket");
   });
 }
 
@@ -280,6 +356,8 @@ test("standard help describes auto mode", () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /pair start --as/);
   assert.match(result.stdout, /pair stop/);
+  assert.match(result.stdout, /--reviewer-model MODEL/);
+  assert.match(result.stdout, /--reviewer-effort LEVEL/);
 });
 
 test("guardian heartbeat ignores forward wall-clock jumps", { timeout: 15_000 }, async (t) => {

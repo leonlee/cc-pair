@@ -168,6 +168,14 @@ The owner validates that the message is pending in its author's lane. Duplicate 
 same running message share the job. A saved session is resumed only within the same review thread;
 no `--last` session lookup is used.
 
+Optional `--reviewer-model` and `--reviewer-effort` overrides are applied on every reviewer launch,
+including resume. Codex receives `--model` and `--config model_reasoning_effort="LEVEL"`; Claude
+receives `--model` and `--effort`. Overrides never enter the interactive author's arguments or
+persist to either CLI's config. The live state reports these requested overrides and labels
+omitted values as `CLI default`, since the launcher does not resolve inherited provider settings.
+Known effort names are checked for the reviewer backend before startup; each CLI/model validates
+whether it supports the selected combination.
+
 The reviewer receives instructions to read one message, send one verdict, and exit. Its CLI role
 and expected message are also checked by `pair send`/`wait`, avoiding an unrelated pending author
 duty in the opposite lane. Reviewer exits are checked against the on-disk verdict, not just the

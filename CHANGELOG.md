@@ -9,6 +9,11 @@ control and diagnostics. A guardian cleans up owned process groups on exit, time
 or launcher failure; cleanup never kills processes from persisted PIDs. Auto mode currently
 supports macOS and Linux.
 
+`pair start` accepts `--reviewer-model` and `--reviewer-effort` to override the automatic reviewer's
+settings on fresh and resumed rounds. Status and process listings show the requested overrides;
+omitted values continue to inherit the CLI defaults. Author settings and CLI config files are
+left alone.
+
 ## 0.4.1 (2026-10-22)
 
 `pair upgrade` asks npm for the latest version first. When you're already on it, it installs

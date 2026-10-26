@@ -192,6 +192,8 @@ round. `pair status` reports the last failure and the bounded log location.
 Optional launch settings:
 
 ```sh
+pair start --as claude --reviewer-model CODEX_MODEL_ID --reviewer-effort high
+pair start --as codex --reviewer-model opus --reviewer-effort high
 pair start --as claude --timeout 900 --grace 2
 pair start --as codex --claude /absolute/path/to/claude --codex /absolute/path/to/codex
 ```
@@ -199,6 +201,20 @@ pair start --as codex --claude /absolute/path/to/claude --codex /absolute/path/t
 `--timeout` limits each reviewer round (default 900 seconds, maximum 86400); `--grace` is the wait
 between termination and forced termination (default 2 seconds, maximum 30). Executables are
 resolved once at startup. The interactive author is not subject to the reviewer timeout.
+
+`--reviewer-model` accepts the partner CLI's model ID or alias. `--reviewer-effort` sets the
+reviewer's reasoning effort. These overrides apply to every review round, including resumed
+sessions, and leave the interactive author's settings alone. Either flag can be omitted; each
+omitted setting inherits the reviewer CLI's normal defaults. No CLI configuration files are edited.
+
+For Codex, effort is passed as `--config model_reasoning_effort="LEVEL"`; recognized levels are
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. For Claude, it is passed as
+`--effort LEVEL`; recognized levels are `low`, `medium`, `high`, `xhigh`, `max`, and `ultracode`.
+The installed CLI and selected model must support the requested combination; an unsupported
+combination fails the review round and keeps the request available for recovery.
+
+`pair status` and `pair ps` display the requested model and effort overrides. An omitted override
+is shown as `CLI default`; pair does not claim to resolve the provider's inherited settings.
 
 ## Upgrading from 0.1.x
 
@@ -243,7 +259,8 @@ The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`,
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-pair start --as <claude|codex> [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+pair start --as <claude|codex> [--reviewer-model MODEL] [--reviewer-effort LEVEL]
+           [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
 pair stop                  # stop this worktree's auto launcher and its managed agents
 pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet" on timeout
 pair status

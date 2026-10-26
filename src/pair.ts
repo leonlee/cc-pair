@@ -1566,7 +1566,8 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 }
 
 const USAGE = `usage:
-  pair start --as <claude|codex> [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+  pair start --as <claude|codex> [--reviewer-model MODEL] [--reviewer-effort LEVEL]
+             [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
@@ -1584,7 +1585,7 @@ async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" } },
   });
   const [command, ...rest] = positionals;
   if (values.help || command === "help") { console.log(USAGE); return 0; }
@@ -1625,6 +1626,7 @@ async function main(argv: string[]): Promise<number> {
           return await startAuto({
             author: me, root, channel, stateDir: stateDir(channel), entry: fileURLToPath(import.meta.url),
             claude: values.claude, codex: values.codex,
+            reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,
             target: () => {
