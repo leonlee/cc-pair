@@ -7,7 +7,7 @@ and they talk through a shared directory that works like a chat channel.
 
 | Topic | Choice |
 |---|---|
-| Topology | Two live sessions. No headless spawning. |
+| Topology | Manual mode uses two live sessions. Opt-in `pair start --as <author>` owns an interactive author and starts a headless reviewer for each round. |
 | Roles | Symmetric. Either agent can author or review. |
 | Interface | One `pair` CLI (Node/TS). The agents learn it from a thin prompt: a Claude skill and an AGENTS.md section for Codex. |
 | Waiting | `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s, printing `no message … yet` and exiting 0 (agent UIs show any non-zero exit as a failure), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex can't do the same, because a finished background command doesn't resume it. Instead, pair's MCP server queues a fixed note into the Codex session when a message is pending (see Notifications), so an idle Codex makes no model calls. Codex never polls, because each check of a running command is a model call: without the MCP server it checks once and the user asks it to check again. Headless runs wait in the foreground. |
@@ -145,6 +145,51 @@ message still starts a turn with no TUI attached. `pair unregister` stops notifi
 A note already accepted by the daemon still runs either way, so the prompt tells Codex to ignore a
 note that arrives after the user said stop. A repeated note costs one short
 turn: `pair wait --timeout 5` prints `no message` and Codex ends its turn.
+
+## Auto sessions
+
+`pair start` runs in the user's terminal outside agent sandboxes. It resolves both CLI executables
+once, binds a private Unix control socket for this worktree/channel/state-directory combination,
+and forks an IPC guardian. A second launcher cannot bind that socket. `pair status` and `pair stop`
+contact the live owner; persisted PIDs are diagnostic only. State and rotating reviewer logs are
+kept beside the existing listener state. The short socket path is under a private
+`/tmp/pair-auto-<uid>/` directory (or `PAIR_AUTO_SOCKET_DIR`) because macOS limits Unix socket path
+length. The path is canonicalized, and a Claude author receives an exact, per-session
+`sandbox.network.allowUnixSockets` entry through `--settings`. No global settings file is edited.
+
+The guardian owns the interactive author and each bounded reviewer in separate Unix process groups.
+The author inherits the terminal streams; the guardian forwards resize signals. Since `setsid`
+removes its controlling terminal, `/dev/tty` consumers and Ctrl+Z job control are unsupported.
+The launcher saves tty state and restores it during cleanup, and the guardian does so if the
+launcher dies. Reviewers stream
+JSON events into the launcher, which records their session IDs. Each request/response from the auto
+author asks the owner to run one review round and waits for its result over the control socket.
+The owner validates that the message is pending in its author's lane. Duplicate requests for the
+same running message share the job. A saved session is resumed only within the same review thread;
+no `--last` session lookup is used.
+
+The reviewer receives instructions to read one message, send one verdict, and exit. Its CLI role
+and expected message are also checked by `pair send`/`wait`, avoiding an unrelated pending author
+duty in the opposite lane. Reviewer exits are checked against the on-disk verdict, not just the
+process exit code. Successful verdicts are returned through the author's original `send`, using
+the existing message formatting and archive behavior. This replaces idle model waits and MCP
+notifications in auto mode. An explicit author `wait` retries a failed pending round. Interactive
+Claude runs these blocking review commands as background Bash tasks and reads their completion
+output, avoiding the foreground tool timeout. Its author instructions are appended to the system
+prompt; generated instructions also tell agents to check their role after clear/compaction.
+
+Every termination path stops accepting jobs, terminates owned groups, escalates to SIGKILL after
+the configured grace period, and observes the CLI exit and stream closure. Even a successful CLI
+exit triggers cleanup of remaining group members. A private IPC disconnect cleans up if the
+launcher dies; a monotonic heartbeat deadline covers a hung launcher without counting wall-clock
+jumps or suspended wall-clock time. The guardian itself exits after its
+jobs are collected. The launcher also tracks live child identities for emergency cleanup if the
+guardian fails. No cleanup loads a PID from disk and signals it, and no command kills by agent name.
+
+This is process-group supervision on macOS/Linux, not OS containment: descendants that create their
+own sessions/groups can escape it, and killing both supervisors can leave a stale control socket.
+Stale sockets are reported for manual inspection, never silently replaced. Windows auto mode is
+not yet supported. Manual mode and its notification lifecycle remain unchanged.
 
 ## Usage
 

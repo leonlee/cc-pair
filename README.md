@@ -18,6 +18,9 @@ terminal A: claude                         terminal B: codex ("be my reviewer")
 
 Roles are symmetric: Codex can ask Claude for a review the same way.
 
+Pair also has an opt-in auto mode: open one interactive agent, and pair starts its partner for
+each review round. The existing two-terminal workflow remains available.
+
 ## Install
 
 ```sh
@@ -114,10 +117,88 @@ pending. The note never contains message text. Codex reads the message itself wi
 
 ### Start the agents
 
+For auto mode, see below. For the manual workflow, start both agents yourself:
+
 After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
 worktree has its own channel, so an agent started in another checkout won't see the messages
 (see [Worktrees](#worktrees)). Restart any sessions that were already open so they load the new
 instructions and sandbox settings.
+
+### Auto mode (macOS and Linux)
+
+Install and sign in to both Claude Code and Codex first. After `pair init`, run either command in
+your own terminal, outside an agent session:
+
+```sh
+pair start --as claude    # interactive Claude, automatic Codex reviewer
+pair start --as codex     # interactive Codex, automatic Claude reviewer
+```
+
+Give the interactive agent a task as usual. When it sends a review request, pair starts the partner
+in non-interactive mode in the same worktree. Each reviewer handles one round and exits. Follow-up
+rounds resume that reviewer's saved session; new threads start fresh sessions. Requests and responses
+return the review inline, so auto mode does not require pair's Codex MCP notification server or a
+second terminal. The author still verifies findings and fixes or rejects them. The existing round
+cap and escalation rules apply.
+
+Auto mode uses a CLI wrapper belonging to this run. Agents receive its absolute path as `PAIR_BIN`,
+so a login shell cannot accidentally use an older pair installation. The launcher passes the role
+instructions at startup; the generated instructions from `pair init` also describe auto mode.
+Claude receives them through `--append-system-prompt` so they survive a clear. Interactive Claude
+runs managed `send` and retry commands in the Bash tool's background mode, then reads their output
+on completion; a review can take longer than the foreground tool timeout.
+
+For a Claude author, the launcher passes `sandbox.network.allowUnixSockets` through `--settings`,
+allowing only this worktree's exact control socket for that session. It prints the path at startup,
+uses the canonical `/private/tmp` path on macOS, and leaves your settings files unchanged. Existing
+allowlist entries merge with this one. If managed policy still denies the connection, the failed
+request names the required setting and stays on disk. See [Claude's sandbox documentation](https://code.claude.com/docs/en/sandboxing).
+
+Use another terminal in this worktree to inspect or stop the session:
+
+```sh
+pair status
+pair ps -v
+pair stop                # stops the author and all managed reviewers/tools
+```
+
+Exiting the author also stops its managed workers. Pair uses separate process groups, a guardian
+with a private parent connection and heartbeat, and termination followed by forced termination
+after a grace period. The guardian cleans up if the launcher is force-killed. Cleanup covers
+ordinary descendants that remain in their process group; deliberately detached descendants or
+simultaneously killing both the launcher and guardian require OS-level supervision for stronger
+guarantees. Pair never signals a process based on a saved PID or its executable name.
+The heartbeat uses monotonic time so clock corrections and suspended wall-clock time do not expire
+the session. Pair saves and restores terminal settings on exit, including after forced author
+termination. Process-group isolation gives the author inherited terminal streams but no controlling
+terminal: programs that require `/dev/tty` (such as some password prompts) and Ctrl+Z job control are
+not supported in this mode. Run those operations from your own terminal.
+
+Only one auto launcher can own a worktree at a time. Stop a manual reviewer before switching to
+auto mode; an existing Codex registration blocks automatic Codex reviewer startup until you run
+`pair unregister`. If all supervising processes are forcibly killed, a stale socket may remain.
+`pair status` names it; inspect it before removing it and restarting. Pair does not automatically
+take over stale sockets or kill the PIDs in old state files.
+
+Reviewers use saved CLI authentication. Codex runs with its workspace-write sandbox and explicit
+channel access. Its worktree is writable, for example for test artifacts; source edits are prohibited
+by its instructions rather than an OS read-only boundary. Claude runs with `dontAsk`, its configured tool permissions, and additional allow
+rules for reading/searching and the pair CLI; commands requiring other permission approval are
+denied. Auto mode does not enable either CLI's permission-bypass flags. Keep the sandbox paths from
+`pair init` configured for the author. A failed launch, missing verdict, or timeout preserves the
+request. The author can run `pair wait --as <author>` inside the same auto session to retry that
+round. `pair status` reports the last failure and the bounded log location.
+
+Optional launch settings:
+
+```sh
+pair start --as claude --timeout 900 --grace 2
+pair start --as codex --claude /absolute/path/to/claude --codex /absolute/path/to/codex
+```
+
+`--timeout` limits each reviewer round (default 900 seconds, maximum 86400); `--grace` is the wait
+between termination and forced termination (default 2 seconds, maximum 30). Executables are
+resolved once at startup. The interactive author is not subject to the reviewer timeout.
 
 ## Upgrading from 0.1.x
 
@@ -162,6 +243,8 @@ The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`,
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
+pair start --as <claude|codex> [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+pair stop                  # stop this worktree's auto launcher and its managed agents
 pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet" on timeout
 pair status
 pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
@@ -171,7 +254,7 @@ pair upgrade               # install the latest pair from npm, then refresh this
 pair uninit                # undo pair init in this worktree (keeps history; see "Uninstall")
 pair register | unregister # run by Codex in its shell: let pair_listen notify this session
 pair mcp                   # stdio MCP server for Codex (see "Let pair wake Codex")
-pair ps [-v]               # running pair mcp and pair wait processes by worktree, with each worktree's Codex registration (-v: full commands)
+pair ps [-v]               # pair processes by worktree, including auto launchers/guardians (-v: full commands)
 ```
 
 `pair status` shows the channel, worktree root, installed package version, and each lane's turn.
@@ -225,6 +308,7 @@ so a cleanup problem doesn't prevent delivering a review or starting the next th
 | `PAIR_MAX_ROUNDS` | `3` | Number of review rounds before escalation |
 | `PAIR_KEEP` | `100` | Finished threads to keep, by finish time. Older ones are deleted whenever a thread finishes. `all` keeps everything, `0` keeps none |
 | `PAIR_NO_UPDATE_CHECK` | (none) | Any value turns off the daily npm version check |
+| `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Optional absolute private directory for auto-mode sockets; keep it short for Unix socket path limits |
 
 ## Uninstall
 

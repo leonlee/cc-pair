@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Opt-in auto mode: `pair start --as claude|codex` opens an interactive author and manages its
+reviewer automatically. Reviewers run one bounded round, resume their saved session for follow-ups,
+and return verdicts inline to the author's `send`. `pair stop`, `status`, and `ps` expose lifecycle
+control and diagnostics. A guardian cleans up owned process groups on exit, timeout, interruption,
+or launcher failure; cleanup never kills processes from persisted PIDs. Auto mode currently
+supports macOS and Linux.
+
 ## 0.4.1 (2026-10-22)
 
 `pair upgrade` asks npm for the latest version first. When you're already on it, it installs

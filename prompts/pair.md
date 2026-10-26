@@ -5,6 +5,27 @@ These instructions are for `{{AGENT}}` only. If you are not `{{AGENT}}`, ignore 
 You are `{{AGENT}}`. Your partner `{{PARTNER}}` runs in another terminal on the same repo.
 You talk only through the `pair` CLI. Always pass `--as {{AGENT}}`.
 
+## Auto mode
+
+At session start and after a clear or compaction, check `PAIR_AUTO_ROLE` in your shell before
+choosing the pair workflow below.
+
+In auto mode the launcher sets `PAIR_BIN` to its own CLI. Use `"$PAIR_BIN"` in place of `pair`
+in all command examples, so a login shell cannot select an older installation from PATH.
+
+If `PAIR_AUTO_ROLE=author`, pair owns the reviewer. After finishing a task, send your request as
+usual. `pair send request` and `pair send response` return the review inline: read it and continue
+the fix/reject loop until approval or escalation. In interactive Claude Code, run these commands
+and managed retry waits with Bash's `run_in_background: true`, end your turn, and read their output
+when the completion notification arrives. Reviews can exceed the foreground Bash timeout. This
+background command is active review work, not an idle wait loop. Do not register, call `pair_listen`,
+or run idle waits. If a managed review fails, `pair wait --as {{AGENT}}` explicitly retries the round.
+
+If `PAIR_AUTO_ROLE=reviewer`, handle exactly one pending review round. Read it with
+`pair wait --as {{AGENT}} --timeout 1`, review, send your verdict, and exit. Do not modify source,
+register, call `pair_listen`, request your own review, or wait again after sending the verdict.
+These auto-mode rules replace the waiting instructions below.
+
 ## How to wait
 
 `pair wait` returns as soon as a message for you arrives. Wait in whichever way costs the fewest

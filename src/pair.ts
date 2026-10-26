@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { autoCall, autoSocketPath, autoStatus, runGuardian, startAuto, stopAuto } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -375,6 +376,9 @@ function sendReview(channel: string, me: Agent, body: string, verdict?: Verdict)
   if (state.kind !== "awaiting-review") {
     throw new PairError(`cannot send review: nothing from ${thread.author} is waiting for review (thread is ${state.kind})`);
   }
+  if (process.env.PAIR_AUTO_ROLE === "reviewer" && state.last.file !== process.env.PAIR_AUTO_MESSAGE) {
+    throw new PairError("managed reviewer cannot reply to a different message");
+  }
   const round = state.last.round;
   const status: ThreadStatus = verdict === "approve" ? "approved" : round >= maxRounds() ? "escalated" : "open";
   const review = { from: me, type: "review" as const, round, verdict, status };
@@ -394,6 +398,13 @@ interface Pending {
 }
 
 function pendingFor(channel: string, me: Agent): Pending | undefined {
+  if (process.env.PAIR_AUTO_ROLE === "reviewer") {
+    const thread = threadFor(channel, partnerOf(me));
+    const messages = listMessages(thread);
+    const state = stateOf(messages);
+    return state.kind === "awaiting-review" && state.last.file === process.env.PAIR_AUTO_MESSAGE
+      ? { thread, state, earlier: messages.slice(0, -1) } : undefined;
+  }
   const asAuthor = threadFor(channel, me);
   const authorMessages = listMessages(asAuthor);
   const authorState = stateOf(authorMessages);
@@ -1265,6 +1276,7 @@ function init(channel: string, root: string): string {
     "",
     sandboxConfig(channel),
     "",
+    ...(process.platform !== "win32" ? [`Auto mode: pair start --as claude adds sandbox.network.allowUnixSockets for ${autoSocketPath(stateDir(channel))} to that Claude session only. No persistent socket setting is needed.`, ""] : []),
     "To let pair wake Codex when a message arrives, instead of Codex polling, register pair's MCP server once:",
     `  ${mcpAddCommand(root)}`,
   ].join("\n");
@@ -1367,7 +1379,7 @@ interface OsProcess {
 
 const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\w{3} \w{3}\s+\d+ [\d:]+ \d{4})\s+(.*)$/; // lstart is always 5 fields
 // node itself runs the script, so a wrapper whose command line mentions it (`zsh -c "… pair.js wait"`) doesn't match
-const PAIR_PROCESS = /^(?:\S*\/)?node(?: -\S+)* \S*\/(?:bin\/pair|dist\/pair\.js) ((?:mcp|wait)\b.*)$/;
+const PAIR_PROCESS = /^(?:\S*\/)?node(?: -\S+)* \S*\/(?:bin\/pair|dist\/pair\.js) ((?:mcp|wait|start|_auto-guardian)\b.*)$/;
 const SHELL = /^(?:\S*\/)?(?:zsh|bash|sh|dash|fish)(?: |$)/;
 
 function listProcesses(): OsProcess[] {
@@ -1472,12 +1484,12 @@ function codexLine(root: string): string | undefined {
 }
 
 interface PairProcess extends OsProcess {
-  kind: "mcp" | "wait";
+  kind: "mcp" | "wait" | "start" | "guardian";
   host: OsProcess | undefined;
 }
 
-/** Every running `pair mcp` and `pair wait` on this machine, grouped by worktree. */
-function ps(verbose: boolean): string {
+/** Pair listeners, waits, auto launchers and guardians on this machine, grouped by worktree. */
+async function ps(verbose: boolean): Promise<string> {
   const all = listProcesses();
   const byPid = new Map(all.map((proc) => [proc.pid, proc]));
   const ours: PairProcess[] = all.flatMap((proc) => {
@@ -1489,10 +1501,12 @@ function ps(verbose: boolean): string {
     while (host && SHELL.test(host.command)) {
       host = byPid.get(host.ppid); // an agent runs pair wait through a shell; show the agent
     }
-    return [{ ...proc, kind: match[1].startsWith("mcp") ? "mcp" : "wait", host }];
+    const command = match[1].split(" ")[0];
+    const kind = command === "_auto-guardian" ? "guardian" : command as PairProcess["kind"];
+    return [{ ...proc, kind, host }];
   });
   if (ours.length === 0) {
-    return "no pair mcp or pair wait is running";
+    return "no pair mcp, wait, start or guardian is running";
   }
   const dirs = workingDirs(ours.map((proc) => proc.pid));
   const groups = new Map<string, { root: string | undefined; procs: PairProcess[] }>();
@@ -1506,13 +1520,16 @@ function ps(verbose: boolean): string {
     groups.set(key, group);
   }
   const blocks = [...groups].sort(([a, x], [b, y]) => Number(!x.root) - Number(!y.root) || a.localeCompare(b));
-  return blocks
-    .map(([path, { root, procs }]) => {
+  return (await Promise.all(blocks
+    .map(async ([path, { root, procs }]) => {
       const name = root ? basename(root) : path !== "?" && !existsSync(path) ? "(deleted)" : "(no worktree)";
       const lines = [`${name}  ${shortPath(path)}`];
       const codex = root ? codexLine(root) : undefined;
       if (codex) {
         lines.push(`  codex   ${codex}`);
+      }
+      if (root && procs.some((proc) => proc.kind === "start" || proc.kind === "guardian")) {
+        lines.push(...(await autoStatus(stateDir(channelDir(root)))).map((line) => `  ${line}`));
       }
       procs.sort((a, b) => a.kind.localeCompare(b.kind) || a.pid - b.pid);
       for (const proc of procs) {
@@ -1523,7 +1540,7 @@ function ps(verbose: boolean): string {
         }
       }
       return lines.join("\n");
-    })
+    })))
     .join("\n\n");
 }
 
@@ -1549,6 +1566,8 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 }
 
 const USAGE = `usage:
+  pair start --as <claude|codex> [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+  pair stop                                           (stop this worktree's auto session and its managed agents)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
   pair status
@@ -1559,34 +1578,91 @@ const USAGE = `usage:
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
   pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
-  pair ps [-v]                                        (running pair mcp and pair wait processes, by worktree; -v: full commands)`;
+  pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)`;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" } },
   });
   const [command, ...rest] = positionals;
+  if (values.help || command === "help") { console.log(USAGE); return 0; }
   const root = worktreeRoot();
   const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
   const refreshNote = REFRESHING_COMMANDS.includes(command) ? refreshInstructions(root) : undefined;
+  const managedReview = async (me: Agent): Promise<boolean> => {
+    if (process.env.PAIR_AUTO_ROLE !== "author" || !process.env.PAIR_AUTO_RUN) return false;
+    const thread = threadFor(channel, me);
+    const state = channelAccess(channel, () => stateOf(listMessages(thread)));
+    if (state.kind !== "awaiting-review") return false;
+    try {
+      await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file }, 24 * 60 * 60 * 1000);
+    } catch (error) {
+      if (hasCode(error, "EPERM") || hasCode(error, "EACCES")) {
+        throw new PairError(`managed review cannot connect to ${autoSocketPath(stateDir(channel))}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
+      }
+      throw new PairError(`managed review failed: ${error instanceof Error ? error.message : String(error)}. The request remains on disk.`);
+    }
+    return true;
+  };
   try {
     switch (command) {
+      case "_auto-guardian":
+        await runGuardian();
+        return 0;
+      case "start": {
+        const me = agent();
+        try {
+          if (process.env.CODEX_THREAD_ID || process.env.CLAUDECODE) throw new PairError("run pair start in your own terminal, outside Claude or Codex");
+          if (me === "claude" && readRegistration(channel)) {
+            throw new PairError("a manual Codex reviewer is registered here; stop it and run pair unregister before starting auto mode");
+          }
+          const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
+          const grace = positiveNumber(values.grace ?? "2", "--grace");
+          if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
+          return await startAuto({
+            author: me, root, channel, stateDir: stateDir(channel), entry: fileURLToPath(import.meta.url),
+            claude: values.claude, codex: values.codex,
+            timeoutMs: timeout * 1000,
+            graceMs: grace * 1000,
+            target: () => {
+              const state = stateOf(listMessages(threadFor(channel, me)));
+              return state.kind === "awaiting-review" ? { file: state.last.file, thread: basename(dirname(state.last.file)) } : undefined;
+            },
+            reviewed: (file) => {
+              const messages = listMessages(threadFor(channel, me));
+              const index = messages.findIndex((message) => message.file === file);
+              return index >= 0 && messages[index + 1]?.type === "review";
+            },
+          });
+        } catch (error) { throw new PairError(error instanceof Error ? error.message : String(error)); }
+      }
+      case "stop":
+        try { console.log(await stopAuto(stateDir(channel))); }
+        catch (error) { throw new PairError(error instanceof Error ? error.message : String(error)); }
+        return 0;
       case "send": {
         autoKeep(); // reject a bad PAIR_KEEP before touching any thread
         const type = oneOf(rest[0], MESSAGE_TYPES, "message type");
         const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
         const me = agent();
+        if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError("auto mode agent identity does not match --as");
+        if (process.env.PAIR_AUTO_ROLE === "reviewer" && (me !== process.env.PAIR_AGENT || type !== "review")) {
+          throw new PairError("a managed reviewer may only send its own review verdict");
+        }
         const body = readBody(rest[1]);
         console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict))}`);
+        if (type !== "review" && await managedReview(me)) await wait(channel, me, 1);
         return 0;
       }
       case "wait": {
         autoKeep(); // reject a bad PAIR_KEEP before touching any thread
         const me = agent();
+        if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError("auto mode agent identity does not match --as");
         const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
+        await managedReview(me); // explicit retry after a failed managed round
         if (!(await wait(channel, me, timeout))) {
           // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
           // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
@@ -1595,7 +1671,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "status":
-        console.log([status(channel, root), ...(await updateNotice())].join("\n"));
+        console.log([status(channel, root), ...(await autoStatus(stateDir(channel))), ...(await updateNotice())].join("\n"));
         return 0;
       case "history":
         console.log(channelAccess(channel, () => history(channel, rest[0])));
@@ -1612,6 +1688,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(uninit(channel, root));
         return 0;
       case "register":
+        if (process.env.PAIR_AUTO_ROLE) throw new PairError("auto mode delivers reviews inline; session registration is unnecessary");
         console.log(channelAccess(channel, () => register(channel, root)));
         return 0;
       case "unregister":
@@ -1621,7 +1698,7 @@ async function main(argv: string[]): Promise<number> {
         await serveMcp();
         return 0;
       case "ps":
-        console.log(ps(values.verbose ?? false));
+        console.log(await ps(values.verbose ?? false));
         return 0;
       default:
         console.error(USAGE);
