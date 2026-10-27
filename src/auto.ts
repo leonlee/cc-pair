@@ -48,6 +48,10 @@ export interface AutoOptions {
   reviewed(file: string): boolean;
 }
 
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function missing(error: unknown, ...codes: string[]): boolean {
   return error instanceof Error && "code" in error && codes.includes(String(error.code));
 }
@@ -138,7 +142,7 @@ export async function autoStatus(stateDir: string): Promise<string[]> {
   } catch (error) {
     if (missing(error, "ENOENT")) return ["auto mode: stopped"];
     if (missing(error, "ECONNREFUSED")) return [`auto mode: owner unavailable; stale socket ${autoSocketPath(stateDir)} (no process was signaled)`];
-    return [`auto mode: unavailable (${error instanceof Error ? error.message : String(error)})`];
+    return [`auto mode: unavailable (${errorMessage(error)})`];
   }
 }
 
@@ -204,12 +208,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   let stopping: Promise<void> | undefined;
   let guardianDone: Promise<void> = Promise.resolve();
   let authorCode = 0;
-  let active: { id: string; file: string; promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
+  let active: { id: string; file: string; thread: string; promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
   const sessions = new Map<string, string>();
   const jobs = new Map<string, { pid: number; group: boolean }>();
   const runDir = join(options.stateDir, `auto-${run}`);
   let logBytes = 0;
-  const reason = (error: unknown) => error instanceof Error ? error.message : String(error);
   // After startup, the log and state file are diagnostics. A failed write is reported in the live
   // status unless a more important error is already there, and must not crash the launcher (which takes the author down) or strand a review.
   const log = (text: string) => {
@@ -220,11 +223,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       }
       appendFileSync(state.log, text, { mode: 0o600 });
       logBytes += Buffer.byteLength(text);
-    } catch (error) { state.error ??= `cannot write ${state.log}: ${reason(error)}`; } // never hide a round's real failure
+    } catch (error) { state.error ??= `cannot write ${state.log}: ${errorMessage(error)}`; } // never hide a round's real failure
   };
   const update = () => {
     try { saveState(options.stateDir, state); }
-    catch (error) { state.error ??= `cannot save auto state in ${options.stateDir}: ${reason(error)}`; }
+    catch (error) { state.error ??= `cannot save auto state in ${options.stateDir}: ${errorMessage(error)}`; }
   };
   const server = createServer({ allowHalfOpen: true });
   // Bind before writing state or spawning anything: a second launcher cannot take ownership.
@@ -241,7 +244,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const forceJobs = () => {
     // Only live handles reported by this guardian, never records loaded from disk.
     for (const { pid, group } of jobs.values()) {
-      try { process.kill(group ? -pid : pid, "SIGKILL"); } catch (error) { if (!missing(error, "ESRCH")) throw error; }
+      try { process.kill(group ? -pid : pid, "SIGKILL"); }
+      catch (error) {
+        // Emergency cleanup runs in event handlers: throwing would crash the launcher and skip the other groups.
+        if (!missing(error, "ESRCH")) console.error(`pair: couldn't kill managed process group ${pid} (${errorMessage(error)}); check it with pair ps`);
+      }
     }
   };
   const shutdown = (): Promise<void> => {
@@ -270,7 +277,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     let resolve!: () => void;
     let reject!: (error: Error) => void;
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
-    active = { id, file, promise, resolve, reject };
+    active = { id, file, thread: target.thread, promise, resolve, reject };
     state.phase = "reviewing";
     delete state.error;
     delete state.workerPid;
@@ -320,7 +327,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             else if (request.action === "stop") { await shutdown(); socket.end('{"ok":true}\n'); }
             else if (request.action === "review") { await review(request.file, request.run); socket.end('{"ok":true}\n'); }
             else socket.end('{"error":"unknown auto action"}\n');
-          } catch (error) { socket.end(`${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n`); }
+          } catch (error) { socket.end(`${JSON.stringify({ error: errorMessage(error) })}\n`); }
         })();
       });
     });
@@ -342,22 +349,21 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         if (active?.id === event.id) { state.workerPid = event.pid; update(); }
       } else if (event.type === "output") {
         log(event.text);
-        if (event.stream !== "stdout" || active?.id !== event.id) return;
+        if (event.stream !== "stdout" || !active || active.id !== event.id) return;
+        const { thread } = active;
         let buffer = (output.get(event.id) ?? "") + event.text;
         const lines = buffer.split("\n");
         buffer = lines.pop()!;
         output.set(event.id, buffer.length < 1024 * 1024 ? buffer : "");
         for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line);
-            const session = parsed.type === "thread.started" ? parsed.thread_id : parsed.type === "system" && parsed.subtype === "init" ? parsed.session_id : undefined;
-            if (typeof session === "string" && /^[0-9a-f-]{36}$/i.test(session)) {
-              const target = options.target();
-              if (target) sessions.set(target.thread, session);
-              state.session = session;
-              update();
-            }
-          } catch { /* Tool output may contain non-JSON diagnostics. */ }
+          let parsed: any;
+          try { parsed = JSON.parse(line); } catch { continue; } // Tool output may contain non-JSON diagnostics.
+          const session = parsed?.type === "thread.started" ? parsed.thread_id : parsed?.type === "system" && parsed.subtype === "init" ? parsed.session_id : undefined;
+          if (typeof session === "string" && /^[0-9a-f-]{36}$/i.test(session)) {
+            sessions.set(thread, session); // the thread recorded when the review started: no lane read that could fail here
+            state.session = session;
+            update();
+          }
         }
       } else if (event.type === "finished") {
         jobs.delete(event.id);
@@ -372,7 +378,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           let success = false;
           let error = event.result.error ?? (event.result.code !== 0 ? `reviewer exited ${event.result.code ?? event.result.signal}` : undefined);
           try { success = options.reviewed(current.file); }
-          catch (readError) { error = `cannot check the verdict: ${reason(readError)}`; } // e.g. a corrupt lane: fail this round only
+          catch (readError) { error = `cannot check the verdict: ${errorMessage(readError)}`; } // e.g. a corrupt lane: fail this round only
           state.phase = success ? "idle" : "failed";
           state.error = error ?? (success ? undefined : "reviewer exited without sending a verdict");
           update();

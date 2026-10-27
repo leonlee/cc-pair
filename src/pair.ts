@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { autoCall, autoSocketPath, autoStatus, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { autoCall, autoSocketPath, errorMessage, autoStatus, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -319,7 +319,7 @@ function archive(channel: string, last: Message): void {
   } catch (error) {
     // Cleanup is housekeeping. It must never block delivering a result or starting a thread.
     const failure = channelError(channel, error);
-    const reason = failure instanceof Error ? failure.message : String(failure);
+    const reason = errorMessage(failure);
     console.error(`pair: warning: automatic cleanup failed: ${reason}\nFix it, then run \`pair clean --keep ${keep}\`.`);
   }
 }
@@ -846,7 +846,7 @@ function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
     }
   } catch (error) {
     watch.retryAt = Date.now() + 60_000;
-    logListen(watch.channel, `poll failed, retrying in 60s: ${error instanceof Error ? error.message : String(error)}`);
+    logListen(watch.channel, `poll failed, retrying in 60s: ${errorMessage(error)}`);
   }
 }
 
@@ -926,7 +926,7 @@ async function serveMcp(): Promise<void> {
       respond(result === undefined ? { id: request.id, error: { code: -32601, message: `method not found: ${request.method}` } } : { id: request.id, result });
     } catch (error) {
       // Report it to Codex instead of dying: a crashed server would silently stop every watch.
-      respond({ id: request.id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
+      respond({ id: request.id, error: { code: -32603, message: errorMessage(error) } });
     }
   }
   clearInterval(timer); // stdin closed: the session is gone, so stop notifying it
@@ -1018,7 +1018,7 @@ function refreshInstructions(root: string): string | undefined {
     return refreshedNote(refreshStale(root));
   } catch (error) {
     // A read-only sandbox: message delivery must still work, so report and go on.
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = errorMessage(error);
     return `pair: couldn't refresh instructions (${reason}); run \`pair init\` in your own terminal`;
   }
 }
@@ -1104,7 +1104,7 @@ function upgrade(root: string): number {
     try {
       note = refreshedNote(refreshStale(root)); // refreshing is all that is left to do, so a failure fails upgrade
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       throw new PairError(`already up to date, but couldn't refresh instructions (${reason})`);
     }
     console.log(`already up to date: ${PACKAGE.name} ${PACKAGE.version}${note ? `\n${note}` : ""}`);
@@ -1262,7 +1262,7 @@ function reset(channel: string, root: string, author: Agent | undefined, dryRun:
     }
   } catch (error) {
     const failure = channelError(channel, error);
-    throw new PairError(`reset failed${moved.length ? ` after moving ${moved.join(", ")}` : ""}; any moved requests are preserved at ${backup}: ${failure instanceof Error ? failure.message : String(failure)}`);
+    throw new PairError(`reset failed${moved.length ? ` after moving ${moved.join(", ")}` : ""}; any moved requests are preserved at ${backup}: ${errorMessage(failure)}`);
   }
   return [
     ...lanes.map(({ label }) => `reset: ${label}`),
@@ -1335,7 +1335,7 @@ function autoModeNote(channel: string): string[] {
   try {
     return [`Auto mode: pair start --as claude adds sandbox.network.allowUnixSockets for ${autoSocketPath(stateDir(channel))} to that Claude session only. No persistent socket setting is needed.`, ""];
   } catch (error) {
-    return [`Auto mode is unavailable until this is fixed: ${error instanceof Error ? error.message : String(error)}`, ""];
+    return [`Auto mode is unavailable until this is fixed: ${errorMessage(error)}`, ""];
   }
 }
 
@@ -1444,7 +1444,7 @@ function listProcesses(): OsProcess[] {
   try {
     out = execFileSync("ps", ["-axo", "pid=,ppid=,lstart=,command="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
   } catch (error) {
-    throw new PairError(`can't list processes (${error instanceof Error ? error.message : String(error)}); agent sandboxes often block ps, so run pair ps in your own terminal`);
+    throw new PairError(`can't list processes (${errorMessage(error)}); agent sandboxes often block ps, so run pair ps in your own terminal`);
   }
   return out.split("\n").flatMap((line) => {
     const match = PS_LINE.exec(line);
@@ -1536,7 +1536,7 @@ function codexLine(root: string): string | undefined {
     const id = registration.thread.slice(0, 8);
     return notified ? `registered ${id} · last note ${age(notified.split(" ")[0])} ago` : `registered ${id}`;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   }
 }
 
@@ -1668,7 +1668,7 @@ async function main(argv: string[]): Promise<number> {
       if (hasCode(error, "EPERM") || hasCode(error, "EACCES")) {
         throw new PairError(`managed review cannot connect to ${autoSocketPath(stateDir(channel))}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
       }
-      throw new PairError(`managed review failed: ${error instanceof Error ? error.message : String(error)}. The request remains on disk.`);
+      throw new PairError(`managed review failed: ${errorMessage(error)}. The request remains on disk.`);
     }
     return true;
   };
@@ -1704,11 +1704,11 @@ async function main(argv: string[]): Promise<number> {
               return index >= 0 && messages[index + 1]?.type === "review";
             },
           });
-        } catch (error) { throw new PairError(error instanceof Error ? error.message : String(error)); }
+        } catch (error) { throw new PairError(errorMessage(error)); }
       }
       case "stop":
         try { console.log(await stopAuto(stateDir(channel))); }
-        catch (error) { throw new PairError(error instanceof Error ? error.message : String(error)); }
+        catch (error) { throw new PairError(errorMessage(error)); }
         return 0;
       case "send": {
         autoKeep(); // reject a bad PAIR_KEEP before touching any thread
@@ -1754,7 +1754,7 @@ async function main(argv: string[]): Promise<number> {
         const operation = () => channelAccess(channel, () => reset(channel, root, author, values["dry-run"] ?? false));
         try {
           console.log(values["dry-run"] ? operation() : await withAutoStopped(stateDir(channel), operation));
-        } catch (error) { throw new PairError(error instanceof Error ? error.message : String(error)); }
+        } catch (error) { throw new PairError(errorMessage(error)); }
         return 0;
       }
       case "init":
