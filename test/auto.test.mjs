@@ -46,8 +46,8 @@ function fixture(t, { author = "claude", scenario = "roundtrip", worker = "norma
   writeFileSync(fake, `#!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 const exec = promisify(execFile);
 const root = process.env.TEST_ROOT;
 const write = (name, value) => writeFileSync(join(root, name), String(value));
@@ -79,6 +79,10 @@ if (reviewer) {
   if (process.env.TEST_WORKER !== 'hang') {
     if (process.env.TEST_WORKER === 'failfirst' && count === 1) process.exit(2);
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
+    if (process.env.TEST_WORKER === 'corrupt') {
+      writeFileSync(join(dirname(process.env.PAIR_AUTO_MESSAGE), '002-review.md'), '---\\nfrom: nobody\\n---\\njunk\\n');
+      process.exit(0);
+    }
     const message = await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']);
     const verdict = count === 1 && process.env.TEST_SCENARIO === 'roundtrip' ? 'changes' : 'approve';
     await call(['send','review','--as',process.env.PAIR_AGENT,'--verdict',verdict,'-'], verdict === 'changes' ? '### F1 [medium] fix this' : 'Approved');
@@ -88,14 +92,19 @@ if (reviewer) {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
   else {
+    const stateBase = join(process.env.XDG_STATE_HOME, 'pair');
+    const lockState = (mode) => { if (process.env.TEST_SCENARIO === 'readonly-state') chmodSync(join(stateBase, readdirSync(stateBase)[0]), mode); };
+    lockState(0o500);
     try {
       const first = await call(['send','request','--as',process.env.PAIR_AGENT,'-'], '## Summary\\nTest change\\n## Files\\na.ts');
+      lockState(0o700);
       write('first.out', first);
       if (process.env.TEST_SCENARIO === 'roundtrip') {
         write('second.out', await call(['send','response','--as',process.env.PAIR_AGENT,'-'], '### F1 fixed'));
         write('third.out', await call(['send','request','--as',process.env.PAIR_AGENT,'-'], 'Another task'));
       }
     } catch (error) {
+      lockState(0o700);
       write('first.error', error.output || error.message);
       if (process.env.TEST_SCENARIO === 'retry') write('retry.out', await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']));
     }
@@ -285,6 +294,41 @@ test("a successful CLI exit without a verdict is a failed round", { timeout: 15_
   assert.match((await f.command(["status"])).stdout, /awaiting-review/);
   await f.command(["stop"]);
 });
+
+test("a corrupt verdict fails the round without taking down the launcher or the author", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "corrupt" });
+  await until(() => existsSync(f.file("first.error")), "failed round delivered");
+  assert.match(f.read("first.error"), /cannot check the verdict: corrupt message/);
+  assert.ok(alive(Number(f.read("author.pid"))), "the author must survive a corrupt lane");
+  // CLI status parses the corrupt lane and fails, so ask the still-running owner directly.
+  const { state } = await f.call({ action: "status" });
+  assert.equal(state.phase, "failed");
+  assert.match(state.error, /cannot check the verdict/);
+  await f.command(["stop"]);
+});
+
+test("an unwritable state directory doesn't strand the review", { timeout: 15_000, skip: process.getuid?.() === 0 }, async (t) => {
+  const f = fixture(t, { scenario: "readonly-state" });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.ok(!existsSync(f.file("first.error")), existsSync(f.file("first.error")) ? f.read("first.error") : "");
+  assert.match(f.read("first.out"), /verdict approve/);
+});
+
+for (const author of ["claude", "codex"]) {
+  test(`auto start --as ${author} refuses while a manual Codex session is registered`, () => {
+    const root = mkdtempSync(join(tmpdir(), "pair-auto-reg-"));
+    const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_NO_UPDATE_CHECK: "1" };
+    const run = (args, extra = {}) => spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
+    try {
+      assert.equal(run(["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
+      const result = run(["start", "--as", author, "--claude", process.execPath, "--codex", process.execPath]);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /a manual Codex session is registered here/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("successful reviewer cleanup also terminates leftover tool processes", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "retry", worker: "leaky" });

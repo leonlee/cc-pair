@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Auto mode hardening. A managed reviewer can only run `pair wait`, `send`, `status` and `history`, so
+review material can't lead it to clean history, uninstall instructions or stop the session, and it
+no longer refreshes instruction files in the worktree. A corrupt or unreadable verdict, or an
+unwritable state directory, now fails only that review round instead of crashing the launcher
+and its author. An existing Codex registration blocks `pair start --as codex` as well as
+`--as claude`, and a managed `send` reports a review that another `pair wait` took. `pair init`
+reports an invalid `PAIR_AUTO_SOCKET_DIR` instead of crashing after writing its files.
+
 ## 0.5.1 (2026-10-26)
 
 Version 0.5.0 was briefly published and then unpublished. This release uses a new version number

@@ -36,6 +36,8 @@ const PACKAGE: { name: string; version: string } = JSON.parse(readFileSync(join(
 const STAMP = /<!-- pair (\S+) -->\n/;
 // Commands that refresh stale instructions. Not status (a read-only diagnosis) or mcp (unsandboxed, so it only reads).
 const REFRESHING_COMMANDS = ["send", "wait", "history", "clean", "register", "unregister"];
+// A managed reviewer handles one round. Cleanup, setup and lifecycle commands stay the user's.
+const REVIEWER_COMMANDS = ["wait", "send", "status", "history"];
 const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
@@ -1319,10 +1321,22 @@ function init(channel: string, root: string): string {
     "",
     sandboxConfig(channel),
     "",
-    ...(process.platform !== "win32" ? [`Auto mode: pair start --as claude adds sandbox.network.allowUnixSockets for ${autoSocketPath(stateDir(channel))} to that Claude session only. No persistent socket setting is needed.`, ""] : []),
+    ...autoModeNote(channel),
     "To let pair wake Codex when a message arrives, instead of Codex polling, register pair's MCP server once:",
     `  ${mcpAddCommand(root)}`,
   ].join("\n");
+}
+
+/** init's job is the instruction files, so a bad socket setting, which only matters to pair start, is reported, not fatal. */
+function autoModeNote(channel: string): string[] {
+  if (process.platform === "win32") {
+    return [];
+  }
+  try {
+    return [`Auto mode: pair start --as claude adds sandbox.network.allowUnixSockets for ${autoSocketPath(stateDir(channel))} to that Claude session only. No persistent socket setting is needed.`, ""];
+  } catch (error) {
+    return [`Auto mode is unavailable until this is fixed: ${error instanceof Error ? error.message : String(error)}`, ""];
+  }
 }
 
 /** Codex starts MCP servers with only HOME, PATH and a few more, so the command carries what `pair mcp` reads. */
@@ -1637,7 +1651,12 @@ async function main(argv: string[]): Promise<number> {
   const root = worktreeRoot();
   const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
-  const refreshNote = REFRESHING_COMMANDS.includes(command) ? refreshInstructions(root) : undefined;
+  const managedReviewer = process.env.PAIR_AUTO_ROLE === "reviewer";
+  if (managedReviewer && !REVIEWER_COMMANDS.includes(command)) {
+    throw new PairError(`a managed reviewer may only run pair ${REVIEWER_COMMANDS.join(", ")}`);
+  }
+  // Refreshing rewrites files in the worktree, which a reviewer must not modify.
+  const refreshNote = REFRESHING_COMMANDS.includes(command) && !managedReviewer ? refreshInstructions(root) : undefined;
   const managedReview = async (me: Agent): Promise<boolean> => {
     if (process.env.PAIR_AUTO_ROLE !== "author" || !process.env.PAIR_AUTO_RUN) return false;
     const thread = threadFor(channel, me);
@@ -1662,8 +1681,9 @@ async function main(argv: string[]): Promise<number> {
         const me = agent();
         try {
           if (process.env.CODEX_THREAD_ID || process.env.CLAUDECODE) throw new PairError("run pair start in your own terminal, outside Claude or Codex");
-          if (me === "claude" && readRegistration(channel)) {
-            throw new PairError("a manual Codex reviewer is registered here; stop it and run pair unregister before starting auto mode");
+          // Its listener would wake that session for either lane, and its pair wait could take the auto author's reviews.
+          if (readRegistration(channel)) {
+            throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
           }
           const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
@@ -1701,7 +1721,9 @@ async function main(argv: string[]): Promise<number> {
         }
         const body = readBody(rest[1]);
         console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict))}`);
-        if (type !== "review" && await managedReview(me)) await wait(channel, me, 1);
+        if (type !== "review" && await managedReview(me) && !(await wait(channel, me, 1))) {
+          throw new PairError("the managed review finished, but another pair wait already took it; run pair history to read it");
+        }
         return 0;
       }
       case "wait": {

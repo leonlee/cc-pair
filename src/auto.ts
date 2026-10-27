@@ -209,15 +209,23 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const jobs = new Map<string, { pid: number; group: boolean }>();
   const runDir = join(options.stateDir, `auto-${run}`);
   let logBytes = 0;
+  const reason = (error: unknown) => error instanceof Error ? error.message : String(error);
+  // After startup, the log and state file are diagnostics. A failed write is reported in the live
+  // status, and must not crash the launcher (which takes the author down) or strand a review.
   const log = (text: string) => {
-    if (logBytes + Buffer.byteLength(text) > 256 * 1024) {
-      if (existsSync(state.log)) renameSync(state.log, `${state.log}.1`);
-      logBytes = 0;
-    }
-    appendFileSync(state.log, text, { mode: 0o600 });
-    logBytes += Buffer.byteLength(text);
+    try {
+      if (logBytes + Buffer.byteLength(text) > 256 * 1024) {
+        if (existsSync(state.log)) renameSync(state.log, `${state.log}.1`);
+        logBytes = 0;
+      }
+      appendFileSync(state.log, text, { mode: 0o600 });
+      logBytes += Buffer.byteLength(text);
+    } catch (error) { state.error = `cannot write ${state.log}: ${reason(error)}`; }
   };
-  const update = () => saveState(options.stateDir, state);
+  const update = () => {
+    try { saveState(options.stateDir, state); }
+    catch (error) { state.error = `cannot save auto state in ${options.stateDir}: ${reason(error)}`; }
+  };
   const server = createServer({ allowHalfOpen: true });
   // Bind before writing state or spawning anything: a second launcher cannot take ownership.
   await new Promise<void>((resolve, reject) => {
@@ -276,7 +284,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       : ["--effort", options.reviewerEffort];
     const args = reviewer === "codex"
       ? ["--sandbox", "workspace-write", "--add-dir", options.channel, "exec", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, "--json", prompt]
-      : [...modelArgs, ...effortArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", `Read,Grep,Glob,Bash(pair *),Bash(${join(runDir, "bin", "pair")} *)`, "--", prompt];
+      : [...modelArgs, ...effortArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", join(runDir, "bin", "pair")].flatMap((bin) => [`Bash(${bin} wait *)`, `Bash(${bin} send review *)`])].join(","), "--", prompt];
     sendGuardian({ type: "launch", job: { id, executable: paths[reviewer], args, cwd: options.root, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: file }, interactive: false, timeoutMs: options.timeoutMs } satisfies Job });
     return promise;
   };
@@ -294,7 +302,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     mkdirSync(join(runDir, "bin"), { recursive: true, mode: 0o700 });
     writeFileSync(join(runDir, "bin", "pair"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(options.entry)} "$@"\n`, { mode: 0o700 });
     chmodSync(path, 0o600);
-    update();
+    saveState(options.stateDir, state); // the guardian's cleanup needs it, so startup fails without it
     server.on("connection", (socket) => {
       sockets.add(socket);
       socket.on("error", () => {});
@@ -361,8 +369,10 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           const current = active;
           active = undefined;
           delete state.workerPid;
-          const success = options.reviewed(current.file);
-          const error = event.result.error ?? (event.result.code !== 0 ? `reviewer exited ${event.result.code ?? event.result.signal}` : undefined);
+          let success = false;
+          let error = event.result.error ?? (event.result.code !== 0 ? `reviewer exited ${event.result.code ?? event.result.signal}` : undefined);
+          try { success = options.reviewed(current.file); }
+          catch (readError) { error = `cannot check the verdict: ${reason(readError)}`; } // e.g. a corrupt lane: fail this round only
           state.phase = success ? "idle" : "failed";
           state.error = error ?? (success ? undefined : "reviewer exited without sending a verdict");
           update();
