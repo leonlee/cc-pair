@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-Auto mode hardening. A managed reviewer can only run `pair wait`, `send`, `status` and `history`, so
-review material can't lead it to clean history, uninstall instructions or stop the session, and it
-no longer refreshes instruction files in the worktree. A corrupt or unreadable verdict, or an
+Auto mode hardening. In a managed reviewer, pair refuses every command except `wait`, `send`,
+`status` and `history`, and the Claude reviewer's tool allowlist permits only `wait` and
+`send review`. This guards against mistakes and casual prompt injection in review material; it is
+not a security boundary, since the Codex reviewer's sandbox can still write the channel and
+worktree. A managed reviewer no longer refreshes instruction files in the worktree. A corrupt or unreadable verdict, or an
 unwritable state directory, now fails only that review round instead of crashing the launcher
 and its author. An existing Codex registration blocks `pair start --as codex` as well as
 `--as claude`, and a managed `send` reports a review that another `pair wait` took. `pair init`

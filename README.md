@@ -184,8 +184,10 @@ Reviewers use saved CLI authentication. Codex runs with its workspace-write sand
 channel access. Its worktree is writable, for example for test artifacts; source edits are prohibited
 by its instructions rather than an OS read-only boundary. Claude runs with `dontAsk`, its configured tool permissions, and additional allow
 rules for reading/searching and the pair CLI's `wait` and `send review`; commands requiring other
-permission approval are denied. A managed reviewer of either CLI can only run `pair wait`, `send`,
-`status` and `history`, and never refreshes instructions in the worktree. Auto mode does not enable either CLI's permission-bypass flags. Keep the sandbox paths from
+permission approval are denied. In either reviewer, pair itself refuses every command except `wait`,
+`send`, `status` and `history` (Claude's allowlist narrows that to `wait` and `send review`), and
+never refreshes instructions in the worktree. This guards against mistakes, not a determined agent:
+the role comes from an environment variable, and Codex's sandbox can write the channel directly. Auto mode does not enable either CLI's permission-bypass flags. Keep the sandbox paths from
 `pair init` configured for the author. A failed launch, missing verdict, or timeout preserves the
 request. The author can run `pair wait --as <author>` inside the same auto session to retry that
 round. `pair status` reports the last failure and the bounded log location.

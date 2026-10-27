@@ -211,7 +211,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   let logBytes = 0;
   const reason = (error: unknown) => error instanceof Error ? error.message : String(error);
   // After startup, the log and state file are diagnostics. A failed write is reported in the live
-  // status, and must not crash the launcher (which takes the author down) or strand a review.
+  // status unless a more important error is already there, and must not crash the launcher (which takes the author down) or strand a review.
   const log = (text: string) => {
     try {
       if (logBytes + Buffer.byteLength(text) > 256 * 1024) {
@@ -220,11 +220,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       }
       appendFileSync(state.log, text, { mode: 0o600 });
       logBytes += Buffer.byteLength(text);
-    } catch (error) { state.error = `cannot write ${state.log}: ${reason(error)}`; }
+    } catch (error) { state.error ??= `cannot write ${state.log}: ${reason(error)}`; } // never hide a round's real failure
   };
   const update = () => {
     try { saveState(options.stateDir, state); }
-    catch (error) { state.error = `cannot save auto state in ${options.stateDir}: ${reason(error)}`; }
+    catch (error) { state.error ??= `cannot save auto state in ${options.stateDir}: ${reason(error)}`; }
   };
   const server = createServer({ allowHalfOpen: true });
   // Bind before writing state or spawning anything: a second launcher cannot take ownership.

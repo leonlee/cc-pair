@@ -1716,7 +1716,7 @@ async function main(argv: string[]): Promise<number> {
         const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
         const me = agent();
         if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError("auto mode agent identity does not match --as");
-        if (process.env.PAIR_AUTO_ROLE === "reviewer" && (me !== process.env.PAIR_AGENT || type !== "review")) {
+        if (managedReviewer && (me !== process.env.PAIR_AGENT || type !== "review")) {
           throw new PairError("a managed reviewer may only send its own review verdict");
         }
         const body = readBody(rest[1]);
