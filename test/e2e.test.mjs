@@ -315,6 +315,40 @@ test("EPERM channel errors are diagnosed without treating installed prompt error
   assert.doesNotMatch(assetError.stderr, /cannot access channel path|sandbox_workspace_write/);
 });
 
+test("a managed reviewer can only wait, send, and read status or history, and never refreshes instructions", () => {
+  const { root, env, ok } = sandbox();
+  ok(["init"]);
+  ok(["send", "request", "--as", "claude", "-"], "req");
+  ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "ok");
+  ok(["wait", "--as", "claude", "--timeout", "1"]);
+  const agentsPath = join(root, "AGENTS.md");
+  const stale = readFileSync(agentsPath, "utf8").replace(/<!-- pair \S+ -->/, "<!-- pair 0.0.1 -->").replace("Your partner", "YOUR PARTNER");
+  writeFileSync(agentsPath, stale);
+  const asReviewer = (args) => {
+    const result = spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, PAIR_AUTO_ROLE: "reviewer", PAIR_AGENT: "codex", PAIR_AUTO_MESSAGE: "none" }, encoding: "utf8" });
+    return { code: result.status, out: result.stdout + result.stderr };
+  };
+  for (const args of [["clean", "--keep", "0"], ["uninit"], ["init"], ["stop"], ["reset"], ["upgrade"], ["register"], ["unregister"], ["ps"]]) {
+    const result = asReviewer(args);
+    assert.equal(result.code, 1, `${args.join(" ")}: ${result.out}`);
+    assert.match(result.out, /a managed reviewer may only run pair wait, send, status, history/);
+  }
+  assert.match(asReviewer(["history"]).out, /approved/);
+  const waited = asReviewer(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.equal(waited.code, 0, waited.out);
+  assert.doesNotMatch(waited.out, /refreshed/);
+  assert.equal(readFileSync(agentsPath, "utf8"), stale, "a reviewer must not rewrite worktree files");
+  assert.ok(existsSync(join(root, ".claude", "skills", "pair", "SKILL.md")));
+});
+
+test("init writes instructions and reports an invalid auto socket directory instead of crashing", { skip: process.platform === "win32" }, () => {
+  const { root, env } = sandbox();
+  const result = spawnSync("node", [CLI, "init"], { cwd: root, env: { ...env, PAIR_AUTO_SOCKET_DIR: "relative" }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Auto mode is unavailable until this is fixed: PAIR_AUTO_SOCKET_DIR must be an absolute path/);
+  assert.ok(existsSync(join(root, "AGENTS.md")));
+});
+
 test("wait checks at least once and rejects a bad timeout", () => {
   const { run, ok } = sandbox();
   ok(["send", "request", "--as", "claude", "-"], "req");

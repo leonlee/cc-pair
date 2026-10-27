@@ -175,7 +175,7 @@ terminal: programs that require `/dev/tty` (such as some password prompts) and C
 not supported in this mode. Run those operations from your own terminal.
 
 Only one auto launcher can own a worktree at a time. Stop a manual reviewer before switching to
-auto mode; an existing Codex registration blocks automatic Codex reviewer startup until you run
+auto mode; an existing Codex registration blocks `pair start` for either author until you run
 `pair unregister`. If all supervising processes are forcibly killed, a stale socket may remain.
 `pair status` names it; inspect it before removing it and restarting. Pair does not automatically
 take over stale sockets or kill the PIDs in old state files.
@@ -183,8 +183,11 @@ take over stale sockets or kill the PIDs in old state files.
 Reviewers use saved CLI authentication. Codex runs with its workspace-write sandbox and explicit
 channel access. Its worktree is writable, for example for test artifacts; source edits are prohibited
 by its instructions rather than an OS read-only boundary. Claude runs with `dontAsk`, its configured tool permissions, and additional allow
-rules for reading/searching and the pair CLI; commands requiring other permission approval are
-denied. Auto mode does not enable either CLI's permission-bypass flags. Keep the sandbox paths from
+rules for reading/searching and the pair CLI's `wait` and `send review`; commands requiring other
+permission approval are denied. In either reviewer, pair itself refuses every command except `wait`,
+`send`, `status` and `history` (Claude's allowlist narrows that to `wait` and `send review`), and
+never refreshes instructions in the worktree. This guards against mistakes, not a determined agent:
+the role comes from an environment variable, and Codex's sandbox can write the channel directly. Auto mode does not enable either CLI's permission-bypass flags. Keep the sandbox paths from
 `pair init` configured for the author. A failed launch, missing verdict, or timeout preserves the
 request. The author can run `pair wait --as <author>` inside the same auto session to retry that
 round. `pair status` reports the last failure and the bounded log location.
