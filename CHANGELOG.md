@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 (2026-10-27)
 
 Auto mode hardening. In a managed reviewer, pair refuses every command except `wait`, `send`,
 `status` and `history`, and the Claude reviewer's tool allowlist permits only `wait` and
