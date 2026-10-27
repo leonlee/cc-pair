@@ -66,6 +66,8 @@ if (reviewer) {
   write('calls.json', JSON.stringify(calls));
   const count = calls.length;
   const session = '11111111-1111-4111-8111-' + String(count).padStart(12, '0');
+  // Corrupt the lane before announcing the session, so recording the session must not read the lane.
+  if (process.env.TEST_WORKER === 'corrupt') writeFileSync(join(dirname(process.env.PAIR_AUTO_MESSAGE), '002-review.md'), '---\\nfrom: nobody\\n---\\njunk\\n');
   console.log(JSON.stringify(process.env.PAIR_AGENT === 'codex' ? {type:'thread.started', thread_id:session} : {type:'system',subtype:'init',session_id:session}));
   if (process.env.TEST_WORKER === 'hang' || process.env.TEST_WORKER === 'leaky') {
     const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], {stdio:'inherit'});
@@ -79,10 +81,7 @@ if (reviewer) {
   if (process.env.TEST_WORKER !== 'hang') {
     if (process.env.TEST_WORKER === 'failfirst' && count === 1) process.exit(2);
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
-    if (process.env.TEST_WORKER === 'corrupt') {
-      writeFileSync(join(dirname(process.env.PAIR_AUTO_MESSAGE), '002-review.md'), '---\\nfrom: nobody\\n---\\njunk\\n');
-      process.exit(0);
-    }
+    if (process.env.TEST_WORKER === 'corrupt') process.exit(0);
     const message = await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']);
     const verdict = count === 1 && process.env.TEST_SCENARIO === 'roundtrip' ? 'changes' : 'approve';
     await call(['send','review','--as',process.env.PAIR_AGENT,'--verdict',verdict,'-'], verdict === 'changes' ? '### F1 [medium] fix this' : 'Approved');
@@ -304,6 +303,7 @@ test("a corrupt verdict fails the round without taking down the launcher or the 
   const { state } = await f.call({ action: "status" });
   assert.equal(state.phase, "failed");
   assert.match(state.error, /cannot check the verdict/);
+  assert.equal(state.session, "11111111-1111-4111-8111-000000000001", "the session is recorded without reading the corrupt lane");
   await f.command(["stop"]);
 });
 
