@@ -303,7 +303,7 @@ test("a corrupt verdict fails the round without taking down the launcher or the 
   const { state } = await f.call({ action: "status" });
   assert.equal(state.phase, "failed");
   assert.match(state.error, /cannot check the verdict/);
-  assert.equal(state.session, "11111111-1111-4111-8111-000000000001", "the session survives a corrupt lane, so a retry can resume it");
+  assert.equal(state.session, "11111111-1111-4111-8111-000000000001", "the session is recorded without reading the corrupt lane");
   await f.command(["stop"]);
 });
 

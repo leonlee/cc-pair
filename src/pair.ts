@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { autoCall, autoSocketPath, errorMessage, autoStatus, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { autoCall, autoSocketPath, errorMessage, autoStatus, hasCode, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -75,10 +75,6 @@ interface Thread {
 }
 
 class PairError extends Error {}
-
-function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
-}
 
 function isMissing(error: unknown): boolean {
   return hasCode(error, "ENOENT");
@@ -1665,7 +1661,7 @@ async function main(argv: string[]): Promise<number> {
     try {
       await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file }, 24 * 60 * 60 * 1000);
     } catch (error) {
-      if (hasCode(error, "EPERM") || hasCode(error, "EACCES")) {
+      if (hasCode(error, "EPERM", "EACCES")) {
         throw new PairError(`managed review cannot connect to ${autoSocketPath(stateDir(channel))}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
       }
       throw new PairError(`managed review failed: ${errorMessage(error)}. The request remains on disk.`);

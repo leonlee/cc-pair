@@ -11,6 +11,9 @@ unwritable state directory, now fails only that review round instead of crashing
 and its author. An existing Codex registration blocks `pair start --as codex` as well as
 `--as claude`, and a managed `send` reports a review that another `pair wait` took. `pair init`
 reports an invalid `PAIR_AUTO_SOCKET_DIR` instead of crashing after writing its files.
+A reviewer's session is recorded for the review it started, even if its lane can't be read or its
+verdict lands first, and a failed kill during emergency cleanup is reported on stderr and in
+`auto.log` instead of crashing the launcher.
 
 ## 0.5.1 (2026-10-26)
 

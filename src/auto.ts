@@ -52,7 +52,17 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function missing(error: unknown, ...codes: string[]): boolean {
+/** The session id in a reviewer's JSON event: Codex `thread.started` or Claude `system`/`init`. */
+function sessionId(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  const { type, subtype, thread_id: threadId, session_id: sessionIdField } = event as Record<string, unknown>;
+  const id = type === "thread.started" ? threadId : type === "system" && subtype === "init" ? sessionIdField : undefined;
+  return typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id) ? id : undefined;
+}
+
+export function hasCode(error: unknown, ...codes: string[]): boolean {
   return error instanceof Error && "code" in error && codes.includes(String(error.code));
 }
 
@@ -62,14 +72,14 @@ export function autoSocketPath(stateDir: string, create = false): string {
   const dir = process.env.PAIR_AUTO_SOCKET_DIR || `/tmp/pair-auto-${process.getuid!()}`;
   if (!isAbsolute(dir)) throw new Error("PAIR_AUTO_SOCKET_DIR must be an absolute path");
   if (create) {
-    try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (!missing(error, "EEXIST")) throw error; }
+    try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (!hasCode(error, "EEXIST")) throw error; }
     const stat = lstatSync(dir);
     if (!stat.isDirectory() || stat.uid !== process.getuid!() || (stat.mode & 0o077)) {
       throw new Error(`auto mode needs a private directory: ${dir}`);
     }
   }
   let canonical = dir;
-  try { canonical = realpathSync(dir); } catch (error) { if (!missing(error, "ENOENT")) throw error; }
+  try { canonical = realpathSync(dir); } catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
   const path = join(canonical, `${createHash("sha256").update(stateDir).digest("hex").slice(0, 24)}.sock`);
   if (Buffer.byteLength(path) > 100) throw new Error("auto socket path is too long; set PAIR_AUTO_SOCKET_DIR to a shorter private directory");
   return path;
@@ -89,7 +99,7 @@ function restoreTerminal(saved: string | undefined): void {
 
 function readState(stateDir: string): RecordState | undefined {
   try { return JSON.parse(readFileSync(join(stateDir, "auto.json"), "utf8")); }
-  catch (error) { if (missing(error, "ENOENT")) return undefined; throw error; }
+  catch (error) { if (hasCode(error, "ENOENT")) return undefined; throw error; }
 }
 
 function saveState(stateDir: string, state: RecordState): void {
@@ -140,8 +150,8 @@ export async function autoStatus(stateDir: string): Promise<string[]> {
       `  log: ${state.log}`,
     ];
   } catch (error) {
-    if (missing(error, "ENOENT")) return ["auto mode: stopped"];
-    if (missing(error, "ECONNREFUSED")) return [`auto mode: owner unavailable; stale socket ${autoSocketPath(stateDir)} (no process was signaled)`];
+    if (hasCode(error, "ENOENT")) return ["auto mode: stopped"];
+    if (hasCode(error, "ECONNREFUSED")) return [`auto mode: owner unavailable; stale socket ${autoSocketPath(stateDir)} (no process was signaled)`];
     return [`auto mode: unavailable (${errorMessage(error)})`];
   }
 }
@@ -149,8 +159,8 @@ export async function autoStatus(stateDir: string): Promise<string[]> {
 export async function stopAuto(stateDir: string): Promise<string> {
   try { await autoCall(stateDir, { action: "stop" }, 40_000); return "auto mode stopped; managed agent cleanup completed"; }
   catch (error) {
-    if (missing(error, "ENOENT")) return "auto mode is not running";
-    if (missing(error, "ECONNREFUSED")) throw new Error(`auto owner is gone; no process was signaled. Inspect and remove stale socket ${autoSocketPath(stateDir)} before restarting.`);
+    if (hasCode(error, "ENOENT")) return "auto mode is not running";
+    if (hasCode(error, "ECONNREFUSED")) throw new Error(`auto owner is gone; no process was signaled. Inspect and remove stale socket ${autoSocketPath(stateDir)} before restarting.`);
     throw error;
   }
 }
@@ -164,10 +174,10 @@ export async function withAutoStopped<T>(stateDir: string, operation: () => T): 
     server.once("error", reject);
     server.listen(path, () => { server.removeListener("error", reject); resolve(); });
   }).catch((error) => {
-    if (missing(error, "EADDRINUSE")) {
+    if (hasCode(error, "EADDRINUSE")) {
       throw new Error(`cannot reset while auto mode or another reset owns this worktree. Run pair stop first for auto mode, or wait for the other reset. If the owner is gone, inspect the stale socket reported by pair status: ${path}`);
     }
-    if (missing(error, "EPERM", "EACCES")) throw new Error(`reset needs the auto-mode lock socket at ${path}; run pair reset in your own terminal, outside agent sandboxes. Socket access was denied (${(error as NodeJS.ErrnoException).code}).`);
+    if (hasCode(error, "EPERM", "EACCES")) throw new Error(`reset needs the auto-mode lock socket at ${path}; run pair reset in your own terminal, outside agent sandboxes. Socket access was denied (${(error as NodeJS.ErrnoException).code}).`);
     throw error;
   });
   try { return await operation(); }
@@ -234,7 +244,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(path, () => { server.removeListener("error", reject); resolve(); });
-  }).catch((error) => { throw new Error(`cannot own auto mode socket ${path}: ${String(error)}. Use pair status / pair stop; a stale socket must be inspected and removed manually.`); });
+  }).catch((error) => { throw new Error(`cannot own auto mode socket ${path}: ${errorMessage(error)}. Use pair status / pair stop; a stale socket must be inspected and removed manually.`); });
   const sockets = new Set<Socket>();
   const sendGuardian = (message: object) => {
     if (guardian?.connected) guardian.send(message, (error) => {
@@ -247,7 +257,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       try { process.kill(group ? -pid : pid, "SIGKILL"); }
       catch (error) {
         // Emergency cleanup runs in event handlers: throwing would crash the launcher and skip the other groups.
-        if (!missing(error, "ESRCH")) console.error(`pair: couldn't kill managed process group ${pid} (${errorMessage(error)}); check it with pair ps`);
+        if (!hasCode(error, "ESRCH")) {
+          const problem = `pair: couldn't kill managed process group ${pid} (${errorMessage(error)}); check it with pair ps`;
+          console.error(problem);
+          log(`${problem}\n`); // auto.log outlives the run; the live state doesn't
+        }
       }
     }
   };
@@ -349,17 +363,19 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         if (active?.id === event.id) { state.workerPid = event.pid; update(); }
       } else if (event.type === "output") {
         log(event.text);
-        if (event.stream !== "stdout" || !active || active.id !== event.id) return;
+        if (event.stream !== "stdout" || !active || active.id !== event.id) {
+          return;
+        }
         const { thread } = active;
         let buffer = (output.get(event.id) ?? "") + event.text;
         const lines = buffer.split("\n");
         buffer = lines.pop()!;
         output.set(event.id, buffer.length < 1024 * 1024 ? buffer : "");
         for (const line of lines) {
-          let parsed: any;
+          let parsed: unknown;
           try { parsed = JSON.parse(line); } catch { continue; } // Tool output may contain non-JSON diagnostics.
-          const session = parsed?.type === "thread.started" ? parsed.thread_id : parsed?.type === "system" && parsed.subtype === "init" ? parsed.session_id : undefined;
-          if (typeof session === "string" && /^[0-9a-f-]{36}$/i.test(session)) {
+          const session = sessionId(parsed);
+          if (session) {
             sessions.set(thread, session); // the thread recorded when the review started: no lane read that could fail here
             state.session = session;
             update();
@@ -468,12 +484,12 @@ export async function runGuardian(): Promise<void> {
     const signal = (name: NodeJS.Signals) => {
       if (!child.pid) return;
       try { process.kill(-child.pid, name); }
-      catch (error) { if (!missing(error, "ESRCH")) reason = String(error); }
+      catch (error) { if (!hasCode(error, "ESRCH")) reason = errorMessage(error); }
     };
     const groupAlive = () => {
       if (!child.pid) return false;
       try { process.kill(-child.pid, 0); return true; }
-      catch (error) { return !missing(error, "ESRCH"); }
+      catch (error) { return !hasCode(error, "ESRCH"); }
     };
     const finish = () => {
       if (finished) return;
