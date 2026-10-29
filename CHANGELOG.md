@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-10-29)
 
 `pair help <command>` and `pair <command> --help` explain each command and its options, and
 `pair --help` also lists the environment variables.
@@ -12,7 +12,13 @@ list excludes print, background, subcommand and directory-switching options; the
 excludes anything that changes its tools, permissions or sandbox.
 
 `pair start --worktree NAME` runs the auto session in the git worktree `../<repo>-NAME` on branch
-`NAME`, creating both on first use and running `pair init` there, and reuses it later.
+`NAME`, creating both on first use and running `pair init` there, and reuses it later while it still
+has `NAME` checked out. A branch that exists only on a remote is tracked (with
+`checkout.defaultRemote` choosing among several), never replaced by a same-name tag. Options,
+executables and the socket directory are checked before anything is created.
+
+The README is rewritten as a shorter, RFC-style reference with numbered sections and a security
+considerations section.
 
 ## 0.5.2 (2026-10-27)
 
