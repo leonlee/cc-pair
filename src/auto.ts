@@ -258,8 +258,10 @@ function checkForwarded(table: OptionTable, args: string[], what: string): void 
   }
 }
 
-/** Run outside an agent sandbox: the launcher owns the interactive author and bounded reviewers. */
-export async function startAuto(options: AutoOptions): Promise<number> {
+export type StartChoices = Pick<AutoOptions, "author" | "claude" | "codex" | "reviewerModel" | "reviewerEffort" | "authorArgs" | "reviewerArgs">;
+
+/** Everything pair start can check before it changes anything, such as creating a worktree. */
+export function checkStart(options: StartChoices): void {
   if (process.platform === "win32") throw new Error("auto mode currently supports macOS and Linux");
   if (process.env.CODEX_THREAD_ID || process.env.CLAUDECODE) throw new Error("run pair start in your own terminal, outside Claude or Codex");
   const reviewer: Agent = options.author === "claude" ? "codex" : "claude";
@@ -274,6 +276,15 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   }
   checkForwarded(FORWARDED.author[options.author], options.authorArgs, `the ${options.author} author`);
   checkForwarded(FORWARDED.reviewer[reviewer], options.reviewerArgs, `the ${reviewer} reviewer`);
+  executable("claude", options.claude);
+  executable("codex", options.codex);
+  autoSocketPath("", true); // the directory and length checks; the file name is a fixed-length hash
+}
+
+/** Run outside an agent sandbox: the launcher owns the interactive author and bounded reviewers. */
+export async function startAuto(options: AutoOptions): Promise<number> {
+  checkStart(options);
+  const reviewer: Agent = options.author === "claude" ? "codex" : "claude";
   const paths = { claude: executable("claude", options.claude), codex: executable("codex", options.codex) };
   const run = randomUUID();
   const path = autoSocketPath(options.stateDir, true);

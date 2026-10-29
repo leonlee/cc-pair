@@ -11,6 +11,9 @@ reviewer round. Each accepts a listed set of options with at most one value each
 list excludes print, background, subcommand and directory-switching options; the reviewer's
 excludes anything that changes its tools, permissions or sandbox.
 
+`pair start --worktree NAME` runs the auto session in the git worktree `../<repo>-NAME` on branch
+`NAME`, creating both on first use and running `pair init` there, and reuses it later.
+
 ## 0.5.2 (2026-10-27)
 
 Auto mode hardening. In a managed reviewer, pair refuses every command except `wait`, `send`,

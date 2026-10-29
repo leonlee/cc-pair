@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -62,7 +62,7 @@ write(reviewer ? 'worker.pid' : 'author.pid', process.pid);
 if (reviewer) {
   let calls = [];
   try { calls = JSON.parse(readFileSync(join(root, 'calls.json'), 'utf8')); } catch {}
-  calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT});
+  calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT, cwd:process.cwd()});
   write('calls.json', JSON.stringify(calls));
   const count = calls.length;
   const session = '11111111-1111-4111-8111-' + String(count).padStart(12, '0');
@@ -89,6 +89,7 @@ if (reviewer) {
   }
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
+  write('author.cwd', process.cwd());
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
   else {
     const stateBase = join(process.env.XDG_STATE_HOME, 'pair');
@@ -116,8 +117,15 @@ if (reviewer) {
     ...(reviewerModel === undefined ? [] : ["--reviewer-model", reviewerModel]),
     ...(reviewerEffort === undefined ? [] : ["--reviewer-effort", reviewerEffort]),
     ...(reviewerArgs === undefined ? [] : [`--reviewer-args=${reviewerArgs}`]),
+    ...(worktree === undefined ? [] : ["--worktree", worktree]),
     ...(authorArgs.length ? ["--", ...authorArgs] : []),
   ];
+  if (worktree !== undefined) {
+    const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
+  }
   const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   launcher.stdout.on("data", (data) => { output += data; });
@@ -142,6 +150,7 @@ if (reviewer) {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(socketDir, { recursive: true, force: true });
+      if (worktree !== undefined) rmSync(`${root}-${worktree.replaceAll("/", "-")}`, { recursive: true, force: true });
     }
   });
   const stateDir = () => join(root, "state", "pair", readdirSync(join(root, "state", "pair"))[0]);
@@ -351,6 +360,66 @@ for (const author of ["claude", "codex"]) {
     }
   });
 }
+
+test("auto start --worktree runs the whole round in a new worktree", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { worktree: "feat/x" });
+  assert.equal((await f.completed).code, 0, f.output());
+  const worktree = realpathSync(`${f.root}-feat-x`);
+  assert.equal(realpathSync(f.read("author.cwd")), worktree);
+  for (const call of JSON.parse(f.read("calls.json"))) assert.equal(realpathSync(call.cwd), worktree, "the reviewer runs in the author's worktree");
+  assert.match(spawnSync("git", ["branch", "--show-current"], { cwd: worktree, encoding: "utf8" }).stdout, /^feat\/x$/m);
+  assert.ok(existsSync(join(worktree, "AGENTS.md")), "pair init ran in the new worktree");
+  assert.match(f.output(), /pair: wrote: .*AGENTS\.md/);
+  assert.match(f.read("first.out"), /verdict changes/, "the review reached the author through the worktree's channel");
+});
+
+test("auto start --worktree checks its input first, and reuses an existing worktree", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "pair-auto-wt-")));
+  const root = join(base, "repo");
+  mkdirSync(root);
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(base, "home"), XDG_STATE_HOME: join(base, "state"), PAIR_NO_UPDATE_CHECK: "1" };
+  const run = (cwd, args, extra = {}) => spawnSync(process.execPath, [CLI, ...args], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
+  const start = (...args) => run(root, ["start", "--as", "claude", "--claude", process.execPath, "--codex", process.execPath, ...args]);
+  try {
+    assert.match(start("--worktree", "feat").stderr, /--worktree needs a git repository/);
+    const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    for (const name of ["-x", "@{-1}", "a..b", "x.lock", "a b"]) {
+      assert.match(start(`--worktree=${name}`).stderr, /is not a usable branch name/, name);
+    }
+    // Bad options, executables and socket settings fail before anything is created.
+    const absent = (what) => {
+      assert.ok(!existsSync(join(base, "repo-feat")), what);
+      assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/feat"], { cwd: root }).status, 1, what);
+    };
+    assert.match(start("--worktree", "feat", "--reviewer-effort", "bogus").stderr, /--reviewer-effort for codex must be one of/);
+    absent("bad effort");
+    assert.match(start("--worktree", "feat", "--claude", join(base, "missing-claude")).stderr, /claude executable not found/);
+    absent("bad executable");
+    assert.match(run(root, ["start", "--as", "claude", "--claude", process.execPath, "--codex", process.execPath, "--worktree", "feat"], { PAIR_AUTO_SOCKET_DIR: "relative" }).stderr, /PAIR_AUTO_SOCKET_DIR must be an absolute path/);
+    absent("bad socket directory");
+    // A reused worktree must be on NAME: fix/one and fix-one share a path, and a worktree can be switched.
+    git("worktree", "add", "-q", "-b", "fix/one", join(base, "repo-fix-one"));
+    assert.match(start("--worktree", "fix-one").stderr, /repo-fix-one has branch fix\/one checked out, not fix-one/);
+    assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/fix-one"], { cwd: root }).status, 1);
+    assert.equal(spawnSync("git", ["checkout", "-q", "--detach"], { cwd: join(base, "repo-fix-one") }).status, 0);
+    assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one has a detached HEAD checked out, not fix\/one/);
+    mkdirSync(join(base, "repo-plain"));
+    assert.match(start("--worktree", "plain").stderr, /repo-plain already exists and isn't a worktree of this repository/);
+    assert.match(run(root, ["status", "--worktree", "feat"]).stderr, /--worktree is only supported by pair start/);
+    // An existing worktree is reused, and start then checks that worktree's channel, not this one's.
+    // A tag with the branch's name must not make pair misread the branch (git's short form is heads/feat).
+    git("worktree", "add", "-q", "-b", "feat", join(base, "repo-feat"));
+    git("tag", "feat");
+    assert.equal(run(join(base, "repo-feat"), ["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
+    const reused = start("--worktree", "feat");
+    assert.equal(reused.status, 1);
+    assert.match(reused.stderr, /pair: using worktree .*repo-feat\n[\s\S]*a manual Codex session is registered here/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
 
 test("auto start refuses agent arguments outside its allowlists", () => {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-args-"));

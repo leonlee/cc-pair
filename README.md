@@ -199,11 +199,21 @@ pair start --as claude --reviewer-model CODEX_MODEL_ID --reviewer-effort high
 pair start --as codex --reviewer-model opus --reviewer-effort high
 pair start --as claude --timeout 900 --grace 2
 pair start --as codex --claude /absolute/path/to/claude --codex /absolute/path/to/codex
+pair start --as claude --worktree feature/login
 pair start --as claude -- --model opus --permission-mode acceptEdits
 pair start --as codex -- --model MODEL -c model_reasoning_effort=high --search
 pair start --as claude --reviewer-args="-c model_verbosity=low"
 pair start --as codex --reviewer-args="--fallback-model sonnet --max-budget-usd 2"
 ```
+
+`--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes) on
+branch `NAME`. The first run creates the branch from `HEAD` if it doesn't exist, so uncommitted
+changes stay in the current checkout, and runs `pair init` there if this checkout has pair set up.
+Later runs reuse the worktree, provided it still has branch `NAME` checked out; pair never switches
+it. Options, executables and the socket directory are checked before anything is created. The channel, author and reviewer all belong to that worktree, and it
+stays after the session ends; remove it with `git worktree remove`. Use this instead of the
+agents' own worktree options, which pair refuses because they would move the author away from its
+channel and reviewer.
 
 Arguments after `--` go to the interactive author's CLI, before pair's own arguments.
 `--reviewer-args` passes a space-separated list to every reviewer round; write it with `=`
@@ -319,7 +329,7 @@ Run `pair help <command>` (or `pair <command> --help`) for a command's options a
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-pair start --as <claude|codex> [--reviewer-model MODEL] [--reviewer-effort LEVEL]
+pair start --as <claude|codex> [--worktree NAME] [--reviewer-model MODEL] [--reviewer-effort LEVEL]
            [--reviewer-args="ARGS"] [--claude /path] [--codex /path] [--timeout seconds]
            [--grace seconds] [-- AUTHOR_ARGS...]
 pair stop                  # stop this worktree's auto launcher and its managed agents
