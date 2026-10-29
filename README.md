@@ -1,7 +1,9 @@
 # cc-pair
 
-Claude Code and Codex review each other's work. Each runs as a live session in its own terminal,
-and they talk through a shared directory on disk.
+**Abstract.** `pair` lets Claude Code and Codex review each other's work. One agent authors a change,
+the other reviews it, and they exchange messages through files in a shared directory. Roles are
+symmetric. Reviews run either between two sessions you start yourself (manual mode) or with pair
+launching the reviewer for each round (auto mode).
 
 ```
 terminal A: claude                         terminal B: codex ("be my reviewer")
@@ -16,41 +18,43 @@ terminal A: claude                         terminal B: codex ("be my reviewer")
   done ✓
 ```
 
-Roles are symmetric: Codex can ask Claude for a review the same way.
+The key words MUST, MUST NOT, SHOULD and MAY are used as described in RFC 2119.
+[DESIGN.md](DESIGN.md) specifies the protocol, storage layout and known limits.
 
-Pair also has an opt-in auto mode: open one interactive agent, and pair starts its partner for
-each review round. The existing two-terminal workflow remains available.
+## 1. Terminology
 
-## Install
+- **Channel**: the directory `~/.pair/<repo>-<hash>/` (under `$PAIR_HOME` if set). Each git
+  worktree has its own channel, derived from its root.
+- **Lane**: one direction within a channel, `claude-to-codex/` or `codex-to-claude/`, named by
+  the author.
+- **Thread**: one review, stored as numbered messages: `request`, then alternating `review` and
+  `response`. It closes when the reviewer approves. If findings remain open after
+  `PAIR_MAX_ROUNDS` rounds (default 3), it is **escalated** and both agents stop and ask the user.
+
+## 2. Installation
 
 ```sh
-npm install -g claude-codex-pair
+npm install -g claude-codex-pair     # Node 22 or later; installs the `pair` command
 ```
 
-Requires Node 22 or later. This installs the `pair` command.
+From source: clone the repository and run `npm install && npm link`. A source install made before
+the package was renamed MUST be removed first with `npm uninstall -g cc-pair`, or the install fails
+with `EEXIST` on `bin/pair`.
 
-To install from source, clone the repo, then run `npm install && npm link` inside it.
+## 3. Setup
 
-If you installed from source before the package was renamed to `claude-codex-pair`, run
-`npm uninstall -g cc-pair` first. Otherwise the install fails with `EEXIST` on `bin/pair`.
-
-## Setup (once per repo)
+Run once in each worktree:
 
 ```sh
-cd your-repo
 pair init
 ```
 
-`init` writes a Claude Code skill (`.claude/skills/pair/SKILL.md`) and a section in `AGENTS.md`
-for Codex. Both explain the protocol to the agent.
+`init` writes the agent instructions: `.claude/skills/pair/SKILL.md` for Claude Code and a marked
+section of `AGENTS.md` for Codex. Claude Code 2.1.277 and later also reads `AGENTS.md`; the section
+tells any agent other than Codex to ignore it.
 
-Claude Code 2.1.277 and later can also read `AGENTS.md`. The pair section there starts by telling
-any agent other than Codex to ignore it, so Claude keeps its own role. If you ran `pair init` with
-an earlier version of this package, run it again to refresh both files.
-
-Both agents' sandboxes must be able to write to `~/.pair`, or `$PAIR_HOME` if set. `pair init`
-prints the configuration snippets with your actual path; add them to the corresponding configs.
-For the default directory, they look like this:
+Both agents' sandboxes MUST be able to write the channel root. `init` prints the snippets with your
+actual path; for the default root they are:
 
 ```toml
 # ~/.codex/config.toml
@@ -63,368 +67,277 @@ writable_roots = ["/Users/you/.pair"]
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
 
-### Let pair wake Codex (needed for automatic pickup)
+Restart agent sessions that were open before setup.
 
-Codex can't wait in the background the way Claude Code does: a finished background command doesn't
-resume it, and keeping a `pair wait` running costs a model call for every check. So Codex doesn't
-poll. Pair's MCP server wakes it when a message arrives. Without the server, Codex checks once, tells
-you it can't be woken, and checks again only when you ask ("check pair"). Register the server once;
-`pair init` prints this command with your actual paths:
+### 3.1. Waking Codex (manual mode)
+
+A finished background command does not resume Codex, and a polling `pair wait` costs a model call
+per check. Codex therefore never polls: pair's MCP server wakes it when a message arrives. Register
+the server once; `init` prints the command with your paths:
 
 ```sh
 codex mcp add --env 'PAIR_CODEX=/opt/homebrew/bin/codex' pair -- '/path/to/node_modules/claude-codex-pair/dist/pair.js' mcp
 ```
 
-Codex then runs `pair register` in its shell and calls the `pair_listen` tool before it waits. The
-MCP server watches the channel and runs `codex queue` with a fixed note when a message for Codex is
-pending. The note never contains message text. Codex reads the message itself with `pair wait`.
+Codex then runs `pair register` and calls the `pair_listen` tool before waiting. When a message for
+it is pending, the server runs `codex queue` with a fixed note that never contains message text.
 
-- Point the command at the installed package, not at a checkout you edit. `PAIR_CODEX` pins the
-  `codex` executable the server runs. The server runs outside Codex's sandbox, so it never looks
-  `codex` up on `PATH`. It only reads the channel and keeps its own writes in a state directory
-  (see below). `pair init` won't pin a
-  `codex` that is in, or links into, the worktree, the channel directory, or a temp directory,
-  because agents can write there.
-- Codex starts MCP servers with only a few variables from your shell, such as `HOME` and `PATH`.
-  If you set `PAIR_HOME` or `XDG_STATE_HOME`, `pair init` adds them to the command. If you change
-  them later, run `codex mcp remove pair` and add the server again.
-- `pair_listen` needs MCP tool approval, so Codex's `never` approval policy is unsupported. With
+- The command SHOULD point at the installed package, not at a checkout you edit.
+- `PAIR_CODEX` pins the `codex` executable, since the server runs outside Codex's sandbox and does
+  not search `PATH`. `init` refuses to pin a `codex` in, or linked into, the worktree, the channel or
+  a temp directory.
+- Codex passes MCP servers only a few environment variables. `init` adds `PAIR_HOME` and
+  `XDG_STATE_HOME` to the command when set; after changing them, run `codex mcp remove pair` and add
+  the server again.
+- `pair_listen` needs MCP tool approval: the `never` approval policy is unsupported. With
   `on-request`, approve the first call.
-- Notifications stop when Codex runs `pair unregister` ("stop as reviewer"), or when Codex's
-  background service unloads the session, which happened 1–2 minutes after the last window on it
-  closed. A message that arrives in that gap still starts a turn with no window attached, and so does
-  a note that pair already queued. Say "stop as reviewer" before closing Codex if that matters.
-- Verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session
-  that ended its turn was woken by the note about 1s after Claude's request, and it reviewed and
-  replied in one turn. These also behaved as described:
-  - a message that arrived while Codex was closed was delivered right after resume;
-  - `pair unregister` stopped notifications;
-  - a forked session took over the registration;
-  - two windows on one session got one note;
-  - two worktrees each woke only their own Codex;
-  - with Codex as the author, a `changes` review and the final approval each woke it once, and its
-    `pair wait` archived the approved thread;
-  - the `never` approval policy failed;
-  - with Codex CLI 0.163.0, a session idle for about 2 hours was still woken 0.9s after the request
-    and replied 9s after it.
+- Notifications stop after `pair unregister` ("stop as reviewer"), or when Codex's background service
+  unloads the session, about 1–2 minutes after its last window closes. A message in that gap still
+  starts a turn with no window attached.
+- Without the server, Codex checks once, says it cannot be woken, and checks again only when asked
+  ("check pair").
+- The server writes only to `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under
+  `$XDG_STATE_HOME` if absolute), rotated at 256 KB. `pair status` shows the registration and the
+  last listener event.
 
-  Codex in the ChatGPT desktop app works too: the app starts its own `pair mcp`, and in daily use
-  with Codex as the author, each review woke it and it replied. IDE sessions are untested.
-- `pair status` shows the registered session and the listener's last event. The full log is
-  `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under `$XDG_STATE_HOME` if it is absolute).
-  The server writes only there, never in the channel, which agents can write. At 256 KB it becomes
-  `codex.listen.log.1`, replacing the previous one.
+Verified with Codex CLI 0.162.1 and 0.163.0 and the ChatGPT desktop app; IDE sessions are untested.
+See DESIGN.md.
 
-### Start the agents
+## 4. Manual mode
 
-For auto mode, see below. For the manual workflow, start both agents yourself:
+Start Claude Code and Codex in separate terminals in the same worktree.
 
-After setup, start Claude Code and Codex in separate terminals in the same worktree of this repo. Each
-worktree has its own channel, so an agent started in another checkout won't see the messages
-(see [Worktrees](#worktrees)). Restart any sessions that were already open so they load the new
-instructions and sandbox settings.
+1. In the reviewer's terminal, say **"be my reviewer"**. Claude waits on `pair wait` in a background
+   command; Codex registers and ends its turn until woken.
+2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
+3. The author verifies each finding, then fixes it or rejects it with a reason, and replies.
+4. The thread ends on approval or escalation.
 
-### Auto mode (macOS and Linux)
+## 5. Auto mode
 
-Install and sign in to both Claude Code and Codex first. After `pair init`, run either command in
-your own terminal, outside an agent session:
+Supported on macOS and Linux. Both CLIs MUST be installed and signed in, and `pair init` MUST have
+run. `pair start` MUST be run in your own terminal, outside an agent session:
 
 ```sh
 pair start --as claude    # interactive Claude, automatic Codex reviewer
 pair start --as codex     # interactive Codex, automatic Claude reviewer
 ```
 
-Give the interactive agent a task as usual. When it sends a review request, pair starts the partner
-in non-interactive mode in the same worktree. Each reviewer handles one round and exits. Follow-up
-rounds resume that reviewer's saved session; new threads start fresh sessions. Requests and responses
-return the review inline, so auto mode does not require pair's Codex MCP notification server or a
-second terminal. The author still verifies findings and fixes or rejects them. The existing round
-cap and escalation rules apply.
+Give the author a task as usual. Each request or response it sends starts the partner as a
+non-interactive reviewer for one round, and the review is returned inline to the author's
+`pair send`. Follow-up rounds resume the reviewer's saved session; new threads start fresh ones.
+Round limits and escalation are as in manual mode. Auto mode needs neither the MCP server nor a
+second terminal.
 
-Auto mode uses a CLI wrapper belonging to this run. Agents receive its absolute path as `PAIR_BIN`,
-so a login shell cannot accidentally use an older pair installation. The launcher passes the role
-instructions at startup; the generated instructions from `pair init` also describe auto mode.
-Claude receives them through `--append-system-prompt` so they survive a clear. Interactive Claude
-runs managed `send` and retry commands in the Bash tool's background mode, then reads their output
-on completion; a review can take longer than the foreground tool timeout.
+### 5.1. Options
 
-For a Claude author, the launcher passes `sandbox.network.allowUnixSockets` through `--settings`,
-allowing only this worktree's exact control socket for that session. It prints the path at startup,
-uses the canonical `/private/tmp` path on macOS, and leaves your settings files unchanged. Existing
-allowlist entries merge with this one. If managed policy still denies the connection, the failed
-request names the required setting and stays on disk. See [Claude's sandbox documentation](https://code.claude.com/docs/en/sandboxing).
-
-Use another terminal in this worktree to inspect or stop the session:
+| Option | Default | Meaning |
+|---|---|---|
+| `--worktree NAME` | current worktree | Run in a dedicated worktree (§5.2) |
+| `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias |
+| `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
+| `--reviewer-args="ARGS"` | none | More reviewer options, space-separated (§5.3) |
+| `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
+| `--timeout SECONDS` | 900 (max 86400) | Limit per review round; the author has none |
+| `--grace SECONDS` | 2 (max 30) | Wait between termination and forced termination |
+| `-- ARGS...` | none | Options for the interactive author (§5.3) |
 
 ```sh
-pair status
-pair ps -v
-pair stop                # stops the author and all managed reviewers/tools
+pair start --as claude --worktree feature/login --reviewer-effort high -- --model opus
+pair start --as codex --reviewer-model opus --reviewer-args="--max-budget-usd 2"
 ```
 
-Exiting the author also stops its managed workers. Pair uses separate process groups, a guardian
-with a private parent connection and heartbeat, and termination followed by forced termination
-after a grace period. The guardian cleans up if the launcher is force-killed. Cleanup covers
-ordinary descendants that remain in their process group; deliberately detached descendants or
-simultaneously killing both the launcher and guardian require OS-level supervision for stronger
-guarantees. Pair never signals a process based on a saved PID or its executable name.
-The heartbeat uses monotonic time so clock corrections and suspended wall-clock time do not expire
-the session. Pair saves and restores terminal settings on exit, including after forced author
-termination. Process-group isolation gives the author inherited terminal streams but no controlling
-terminal: programs that require `/dev/tty` (such as some password prompts) and Ctrl+Z job control are
-not supported in this mode. Run those operations from your own terminal.
+Reviewer overrides apply to every round, including resumed ones. Pair edits no CLI configuration.
+`pair status` and `pair ps` show the requested overrides, with `CLI default` for omitted ones. An
+unsupported model/effort combination fails the round and keeps the request.
 
-Only one auto launcher can own a worktree at a time. Stop a manual reviewer before switching to
-auto mode; an existing Codex registration blocks `pair start` for either author until you run
-`pair unregister`. If all supervising processes are forcibly killed, a stale socket may remain.
-`pair status` names it; inspect it before removing it and restarting. Pair does not automatically
-take over stale sockets or kill the PIDs in old state files.
-
-Reviewers use saved CLI authentication. Codex runs with its workspace-write sandbox and explicit
-channel access. Its worktree is writable, for example for test artifacts; source edits are prohibited
-by its instructions rather than an OS read-only boundary. Claude runs with `dontAsk`, its configured tool permissions, and additional allow
-rules for reading/searching and the pair CLI's `wait` and `send review`; commands requiring other
-permission approval are denied. In either reviewer, pair itself refuses every command except `wait`,
-`send`, `status` and `history` (Claude's allowlist narrows that to `wait` and `send review`), and
-never refreshes instructions in the worktree. This guards against mistakes, not a determined agent:
-the role comes from an environment variable, and Codex's sandbox can write the channel directly. Auto mode does not enable either CLI's permission-bypass flags. Keep the sandbox paths from
-`pair init` configured for the author. A failed launch, missing verdict, or timeout preserves the
-request. The author can run `pair wait --as <author>` inside the same auto session to retry that
-round. `pair status` reports the last failure and the bounded log location.
-
-Optional launch settings:
-
-```sh
-pair start --as claude --reviewer-model CODEX_MODEL_ID --reviewer-effort high
-pair start --as codex --reviewer-model opus --reviewer-effort high
-pair start --as claude --timeout 900 --grace 2
-pair start --as codex --claude /absolute/path/to/claude --codex /absolute/path/to/codex
-pair start --as claude --worktree feature/login
-pair start --as claude -- --model opus --permission-mode acceptEdits
-pair start --as codex -- --model MODEL -c model_reasoning_effort=high --search
-pair start --as claude --reviewer-args="-c model_verbosity=low"
-pair start --as codex --reviewer-args="--fallback-model sonnet --max-budget-usd 2"
-```
+### 5.2. Worktrees
 
 `--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes) on
-branch `NAME`. The first run creates the branch from `HEAD` if it doesn't exist, so uncommitted
-changes stay in the current checkout, and runs `pair init` there if this checkout has pair set up.
-A branch that exists only on one remote is checked out to track it. Later runs reuse the worktree,
-provided it still has branch `NAME` checked out; pair never switches it. Run `pair status` and
-`pair stop` from that worktree, since the session belongs to its channel. Options, executables and the socket directory are checked before anything is created. The channel, author and reviewer all belong to that worktree, and it
-stays after the session ends; remove it with `git worktree remove`. Use this instead of the
-agents' own worktree options, which pair refuses because they would move the author away from its
-channel and reviewer.
+branch `NAME`:
 
-Arguments after `--` go to the interactive author's CLI, before pair's own arguments.
-`--reviewer-args` passes a space-separated list to every reviewer round; write it with `=`
-because the value starts with a dash. Both accept only listed options, each with at most one value
-(repeat an option for more), and refuse anything else with the supported list. Options are listed
-rather than excluded because unlisted ones can turn the author into a print or background session
-(`-p`, `--bg`), select a Codex subcommand, move it to another directory or worktree where it can't
-reach this channel (`--cd`, `--worktree`), or replace the settings pair passes.
+- If the path does not exist, pair runs `git worktree add`. An existing branch is checked out; a
+  branch found only on one remote is checked out to track it; otherwise a new branch starts at
+  `HEAD`, so uncommitted changes stay in the current checkout.
+- If the path exists, it MUST be a worktree of this repository with `refs/heads/NAME` checked out.
+  Pair never switches it.
+- If the current checkout has pair set up, pair runs `pair init` in the worktree.
+- The channel, author and reviewer all belong to the worktree. `pair status` and `pair stop` MUST be
+  run there. The worktree remains after the session; remove it with `git worktree remove`.
+
+All other options are validated before anything is created. The agents' own directory and worktree
+options are refused (§5.3); use `--worktree` instead.
+
+### 5.3. Forwarded arguments
+
+Arguments after `--` are passed to the author before pair's own arguments; `--reviewer-args` are
+passed to every reviewer round. `--reviewer-args` MUST be written with `=`, because its value starts
+with a dash. Each list accepts only the options below, each with at most one value; repeat an
+option for more. Anything else is refused with the supported list.
 
 | | Author (`-- ARGS`) | Reviewer (`--reviewer-args`) |
 |---|---|---|
 | Claude | `--model`, `--effort`, `--permission-mode`, `--add-dir`, `--allowedTools`, `--disallowedTools`, `--mcp-config`, `--strict-mcp-config`, `--agent`, `--plugin-dir`, `-r`/`--resume`, `-c`/`--continue`, `--fork-session`, `-n`/`--name`, `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--verbose`, `--ide`, `--chrome`, `--no-chrome` | `--fallback-model`, `--max-budget-usd`, `--strict-mcp-config` |
-| Codex | `-m`/`--model`, `-c`/`--config`, `-p`/`--profile`, `-s`/`--sandbox`, `-a`/`--ask-for-approval`, `--add-dir`, `-i`/`--image`, `--enable`, `--disable`, `--local-provider`, `--search`, `--oss`, `--no-alt-screen`, `--dangerously-bypass-approvals-and-sandbox` | `-c`/`--config` with a `model_*` key other than `model_reasoning_effort` (use `--reviewer-effort`) |
+| Codex | `-m`/`--model`, `-c`/`--config`, `-p`/`--profile`, `-s`/`--sandbox`, `-a`/`--ask-for-approval`, `--add-dir`, `-i`/`--image`, `--enable`, `--disable`, `--local-provider`, `--search`, `--oss`, `--no-alt-screen`, `--dangerously-bypass-approvals-and-sandbox` | `-c`/`--config` with a `model_*` key other than `model_reasoning_effort` |
 
-The reviewer list leaves out everything that changes its tools, permissions or sandbox, so a
-reviewer stays as restricted as pair launches it. That includes `--mcp-config`: MCP servers start
-outside the tool permissions, and a config in the checkout under review could launch anything.
-Model and effort have their own flags, `--reviewer-model` and `--reviewer-effort`. Codex reviewer options must also work after
-`exec resume`, which has no `--profile` or `--search`.
+The lists are allowlists because unlisted options can turn the author into a print or background
+session (`-p`, `--bg`), select a Codex subcommand, move the author away from its channel (`--cd`,
+`--worktree`), or replace settings pair passes. The reviewer list excludes everything that changes
+its tools, permissions or sandbox (§10). Codex reviewer options must also work with `exec resume`.
 
-`--timeout` limits each reviewer round (default 900 seconds, maximum 86400); `--grace` is the wait
-between termination and forced termination (default 2 seconds, maximum 30). Executables are
-resolved once at startup. The interactive author is not subject to the reviewer timeout.
+### 5.4. Control and recovery
 
-`--reviewer-model` accepts the partner CLI's model ID or alias. `--reviewer-effort` sets the
-reviewer's reasoning effort. These overrides apply to every review round, including resumed
-sessions, and leave the interactive author's settings alone. Either flag can be omitted; each
-omitted setting inherits the reviewer CLI's normal defaults. No CLI configuration files are edited.
-
-For Codex, effort is passed as `--config model_reasoning_effort="LEVEL"`; recognized levels are
-`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. For Claude, it is passed as
-`--effort LEVEL`; recognized levels are `low`, `medium`, `high`, `xhigh`, `max`, and `ultracode`.
-The installed CLI and selected model must support the requested combination; an unsupported
-combination fails the review round and keeps the request available for recovery.
-
-`pair status` and `pair ps` display the requested model and effort overrides. An omitted override
-is shown as `CLI default`; pair does not claim to resolve the provider's inherited settings.
-
-## Reset stale requests
-
-Run `pair reset` manually from the affected worktree to clear outdated pending requests:
+From another terminal in the session's worktree:
 
 ```sh
-pair reset --dry-run          # preview the affected lanes without changing files
-pair reset                    # reset both directions in this worktree
-pair reset --as claude        # only requests authored by Claude (claude-to-codex)
-pair reset --as codex         # only requests authored by Codex (codex-to-claude)
+pair status    # lanes, auto session state, last failure, log location
+pair ps -v     # pair processes by worktree, with full commands
+pair stop      # stop the author, its reviewers and their tools
 ```
 
-`--dry-run` is only supported by `reset`; other commands reject it before making changes.
+- At most one launcher owns a worktree. A registered manual Codex session blocks `pair start`
+  until `pair unregister`.
+- A failed launch, missing verdict or timeout keeps the request. The author retries the round with
+  `pair wait --as <author>` in the same session.
+- Exiting the author stops its managed processes. If every supervising process is force-killed, a
+  stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
+- The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,
+  and Ctrl+Z, do not work in auto mode.
+- Agents receive this run's CLI as `PAIR_BIN`. An interactive Claude author runs managed commands
+  in the background, since a review can outlast the foreground tool timeout.
 
-Stop manual author/reviewer sessions first. If an auto session owns the worktree, reset refuses
-to change it; run `pair stop` before resetting. Preview remains available while auto mode runs.
-Reset also holds the auto-mode ownership socket while moving requests, so another auto launcher
-cannot start during the operation. If a stale socket is left after all supervising processes were
-killed, inspect the path reported by `pair status` before removing that socket and retrying.
+Process supervision is specified in DESIGN.md.
 
-Reset moves each selected lane into `~/.pair/<repo>-<hash>/resets/<reset-id>/` (under `PAIR_HOME`
-when configured) and prints the backup path. It preserves every file, including malformed requests,
-legacy layouts, older threads, and partial writes. New requests start with fresh lanes. Source
-files, finished history in `archive/`, and Codex notification registrations are unchanged.
-`--as` selects the request's author; without it both lanes are reset, regardless of `PAIR_AGENT`.
-Unread approvals and escalations still in a lane are backed up too, so their verdicts will no
-longer be delivered. Preview and reset output show each lane's state, including `closed`, or
-`unparseable` if the requests cannot be read by the protocol.
+## 6. Worktrees in manual mode
 
-Backups include `reset.json` with the worktree, time, and selected lanes. They are separate from
-finished review history, so `pair history`, automatic archive retention, and `pair clean` leave
-them alone. Delete a backup manually when you no longer need it. A reset that fails partway names
-the backup holding already-moved requests; the remaining lane is left available for a retry.
-
-## Upgrading from 0.1.x
-
-Codex no longer keeps a long `pair wait` running. To keep automatic pickup after upgrading, install
-the new package with `npm install -g claude-codex-pair`, run `pair init` in each worktree, run the
-printed `codex mcp add` command once, and restart Codex with an approval policy that permits MCP
-tools (`-a on-request` worked in the live test). Without the MCP server, Codex checks once and then
-checks again only when you ask it to "check pair", whether it is the author or reviewer.
-
-## Use
-
-1. In the reviewer's terminal, say **"be my reviewer"**. Claude waits on `pair wait` in a background
-   command. Codex registers with pair's MCP server and ends its turn until a message wakes it.
-2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
-3. Watch them go back and forth. The author verifies each finding before fixing it, and can reject
-   one with a reason.
-4. The thread ends when the reviewer approves. If findings are still open after 3 rounds, the thread
-   is **escalated** and both agents stop and ask you.
-
-## Worktrees
-
-The channel comes from the worktree root, so each git worktree gets its own. You can run one pair
-per worktree in parallel without them seeing each other's messages.
+Each worktree has its own channel, so pairs in different worktrees run in parallel without seeing
+each other's messages. Both agents MUST start in the same worktree:
 
 ```sh
 git worktree add ../your-repo-feature -b feature/x
 cd ../your-repo-feature
-pair init     # needed unless AGENTS.md and .claude/skills/pair/ are committed on this branch
-pair status   # worktree: /Users/you/your-repo-feature
+pair init     # unless AGENTS.md and .claude/skills/pair/ are committed on this branch
 ```
 
-Then start Claude Code and Codex in `../your-repo-feature`, not in the main checkout. If one agent
-never receives the other's messages, ask each agent to run `pair status` and compare the `channel:`
-lines. Pair needs no extra sandbox config, because every channel lives under `~/.pair` (or `$PAIR_HOME`).
+If messages do not arrive, compare the `channel:` line of `pair status` in each agent. Removing a
+worktree leaves its channel; delete the directory that `pair status` reports.
 
-`git worktree remove` leaves the worktree's channel in `~/.pair`. To delete it too, run
-`pair status` in the worktree first to get its `channel:` path, then remove that directory.
+## 7. Commands
 
-## Commands
-
-The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`, `history`, `clean` and `upgrade`.
-Run `pair help <command>` (or `pair <command> --help`) for a command's options and details.
+Agents run `send` and `wait`; users mostly run `init`, `start`, `status`, `history`, `clean` and
+`upgrade`. `pair help <command>` describes each command and its options.
 
 ```
+pair init | uninit | upgrade
+pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]     # §5
+pair stop
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-pair start --as <claude|codex> [--worktree NAME] [--reviewer-model MODEL] [--reviewer-effort LEVEL]
-           [--reviewer-args="ARGS"] [--claude /path] [--codex /path] [--timeout seconds]
-           [--grace seconds] [-- AUTHOR_ARGS...]
-pair stop                  # stop this worktree's auto launcher and its managed agents
-pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet" on timeout
+pair wait --as <claude|codex> [--timeout seconds]   # default 540; prints "no message … yet"
 pair status
-pair history [thread-id]   # list finished threads (latest first), or print one (any unique part of its id)
-pair clean --keep N        # delete all but the N newest finished threads
-pair reset [--as <claude|codex>] [--dry-run]  # back up stale pending lanes (default: both)
-pair init
-pair upgrade               # install the latest pair from npm, then refresh this worktree's instructions
-pair uninit                # undo pair init in this worktree (keeps history; see "Uninstall")
-pair register | unregister # run by Codex in its shell: let pair_listen notify this session
-pair mcp                   # stdio MCP server for Codex (see "Let pair wake Codex")
-pair ps [-v]               # pair processes by worktree, including auto launchers/guardians (-v: full commands)
+pair history [thread-id]     # finished threads, newest first, or one thread by any unique part of its id
+pair clean --keep N          # delete all but the N newest finished threads
+pair reset [--as <claude|codex>] [--dry-run]                     # §8.1
+pair register | unregister   # run by Codex: let pair_listen notify this session
+pair mcp                     # MCP server for Codex (§3.1)
+pair ps [-v]
 ```
 
-`pair status` shows the channel, worktree root, installed package version, and each lane's turn.
-It also checks the generated instructions on disk:
+`pair status` reports the channel, worktree, version, each lane's state, and the instruction files
+on disk:
 
 ```
 channel: /Users/you/.pair/your-repo-12345678
 worktree: /Users/you/your-repo
-version: claude-codex-pair 0.2.0
+version: claude-codex-pair 0.5.2
 claude-to-codex: idle
 codex-to-claude: idle
 instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
   .claude/skills/pair/SKILL.md: current
 codex notifications: session 01a13922-c08f-79e3-a41f-6780876fd9c5, registered 2026-10-14T08:00:00.000Z
-  last listener event: 2026-10-14T08:05:12.345Z notified 01a13922-… about /Users/you/.pair/…/001-request.md
 ```
 
-Instruction states are `current`, `stale`, `newer`, `missing`, or `unreadable`. The check compares only
-the marked pair section in `AGENTS.md`, so your other instructions don't affect it. Status
-doesn't change files. Run `pair init` to refresh missing or stale instructions, then reload
-agent sessions; fix access to unreadable files first. Current files on disk don't guarantee
-that a running agent has loaded them. `newer` means a newer pair wrote them: run `pair upgrade`.
+Instruction states are `current`, `stale`, `missing`, `unreadable`, or `newer` (written by a newer
+pair; run `pair upgrade`). Run `pair init` for `missing` or `stale`, then reload the agents. `status`
+and `init` also report a newer npm release, checked at most daily.
 
-`pair status` and `pair init` also print a line when npm has a newer version. They check at most
-once a day and cache the answer in `~/.local/state/pair/latest.json`. The check stays quiet when
-offline or sandboxed.
+A channel access failure (`EACCES`, `EPERM`) names the path and prints the sandbox snippets for it.
 
-## Upgrading
+## 8. Maintenance
 
-Run `pair upgrade` in your own terminal, not through an agent: agent sandboxes block the network and
-global installs. If npm has a newer version, it runs `npm install -g claude-codex-pair@latest`, then
-the new `pair init` in the current worktree if pair is set up there, and prints only the files that
-`init` wrote or kept. Already on the latest version, it installs nothing and only refreshes this
-worktree's stale instructions. Other worktrees refresh their instructions on the next
-`pair send`, `wait`, `history` or `clean`. pair owns these files, so edits inside them are
-overwritten. pair, including `pair init`, never rewrites instructions that a newer pair wrote, so
-worktrees shared by different versions don't flip back and forth. To downgrade, delete them first. Restart Claude Code and Codex afterwards. Running
-sessions keep the instructions they loaded at start, and Codex keeps its old `pair mcp` until
-it restarts.
+### 8.1. Reset
 
-If a channel read or write fails with `EACCES` or `EPERM`, the command names the path and prints
-sandbox configuration snippets using your actual channel directory. Check ordinary filesystem
-permissions as well as sandbox settings. Automatic archive cleanup failures remain warnings,
-so a cleanup problem doesn't prevent delivering a review or starting the next thread.
-
-| Env var | Default | Meaning |
-|---|---|---|
-| `PAIR_HOME` | `~/.pair` | Root directory for channels. A relative path resolves against the worktree root; empty means the default |
-| `PAIR_AGENT` | (none) | Default for `--as` |
-| `PAIR_MAX_ROUNDS` | `3` | Number of review rounds before escalation |
-| `PAIR_KEEP` | `100` | Finished threads to keep, by finish time. Older ones are deleted whenever a thread finishes. `all` keeps everything, `0` keeps none |
-| `PAIR_NO_UPDATE_CHECK` | (none) | Any value turns off the daily npm version check |
-| `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Optional absolute private directory for auto-mode sockets; keep it short for Unix socket path limits |
-
-## Uninstall
-
-In each worktree where you ran `pair init`:
+`pair reset` clears stale pending requests by moving whole lanes to
+`<channel>/resets/<reset-id>/` and printing the path.
 
 ```sh
-pair uninit
+pair reset --dry-run      # preview
+pair reset                # both lanes
+pair reset --as claude    # only requests Claude authored
 ```
 
-This removes three things: `.claude/skills/pair/SKILL.md`, the pair section of `AGENTS.md` (or the
-whole file, if it held nothing else), and the Codex session registration. It also cleans up files
-written by older versions, and it leaves your own content alone: text outside the pair section stays
-as it was, and a `SKILL.md` you edited is kept and reported. Message history stays in
-`~/.pair/<repo>-<hash>/` and `~/.local/state/pair/<repo>-<hash>/`; `pair uninit` prints the
-`rm -rf` command to delete it. Once no repo uses pair, also run:
+Manual sessions SHOULD be stopped first. Reset refuses while an auto session owns the worktree
+(`--dry-run` still works).
+Backups keep every file, including malformed or partial ones, plus `reset.json`; unread verdicts
+in a reset lane are no longer delivered. Source files, history and registrations are unchanged.
+`history` and `clean` ignore backups; delete them by hand. A partial failure names the backup
+already written.
+
+### 8.2. Upgrade
+
+Run `pair upgrade` in your own terminal; agent sandboxes block the network and global installs. It
+installs the latest release and refreshes this worktree's instructions. Other worktrees refresh
+on their next `send`, `wait`, `history` or `clean`. Instruction files are owned by pair and
+overwritten, except files a newer pair wrote. Restart Claude Code and Codex afterwards.
+
+From 0.1.x, also run `pair init` in each worktree, register the MCP server (§3.1), and restart
+Codex with an approval policy that permits MCP tools.
+
+### 8.3. Uninstall
+
+Run `pair uninit` in each worktree. It removes the skill (unless edited), the pair section of
+`AGENTS.md` (or the file, if nothing else remains) and the Codex registration, and prints the
+command to delete message history. Then:
 
 ```sh
 codex mcp remove pair
 npm uninstall -g claude-codex-pair
 ```
 
-Then remove `~/.pair` from the sandbox settings you added during setup.
+and remove `~/.pair` from the sandbox settings.
 
-## Example review
+## 9. Environment
 
-These are messages from a real run, shortened. The bug in round 1 was planted on purpose.
+| Variable | Default | Meaning |
+|---|---|---|
+| `PAIR_HOME` | `~/.pair` | Channel root. Relative paths resolve against the worktree root |
+| `PAIR_AGENT` | none | Default for `--as` |
+| `PAIR_MAX_ROUNDS` | `3` | Rounds before escalation |
+| `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
+| `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
+| `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |
+
+## 10. Security considerations
+
+- **Managed reviewers.** Codex runs with its `workspace-write` sandbox plus channel access; source
+  edits are forbidden by its instructions, not by the OS. Claude runs with `dontAsk`, so beyond your
+  configured permissions it may only read, search, and run `pair wait` and `pair send review`. Pair itself refuses every reviewer command
+  except `wait`, `send`, `status` and `history`, and a reviewer never refreshes instruction files.
+  These guard against mistakes and casual prompt injection, not a determined agent: the role comes
+  from an environment variable, and the Codex sandbox can write the channel.
+- **No loosening.** Auto mode passes neither CLI's permission-bypass flags to reviewers, and
+  `--reviewer-args` cannot change their tools, permissions or sandbox. `--mcp-config` is excluded
+  because MCP servers start outside tool permissions.
+- **Claude author socket.** Pair grants a Claude author only this session's control socket, through
+  `--settings`; your settings files are unchanged. If managed policy denies it, the request fails
+  with the required setting named and stays on disk.
+- **MCP server.** `pair mcp` runs outside Codex's sandbox, so it only reads the channel, writes only
+  its state directory, and never forwards message text.
+- **Processes.** Pair never signals a process by a saved PID or by executable name.
+
+## Appendix A. Example review
+
+Messages from a real run, shortened. The round-1 bug was planted.
 
 ```
 == pair: review from codex · claude-to-codex · round 1 · verdict changes ==
@@ -436,5 +349,3 @@ These are messages from a real run, shortened. The bug in round 1 was planted on
 == pair: review from codex · claude-to-codex · round 2 · verdict approve ==
 F1 and F2 are fixed. I re-read src/paginate.js and ran 41 assertions ... All passed.
 ```
-
-See [DESIGN.md](DESIGN.md) for the protocol, storage layout, and known limits.
