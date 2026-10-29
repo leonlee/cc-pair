@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { autoCall, autoSocketPath, errorMessage, autoStatus, hasCode, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { autoCall, autoSocketPath, checkStart, errorMessage, autoStatus, hasCode, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -188,6 +188,73 @@ function worktreeRoot(): string {
 function pairHome(root: string): string {
   const configured = process.env.PAIR_HOME;
   return configured ? resolve(root, configured) : join(homedir(), ".pair"); // empty means unset
+}
+
+/** pair start --worktree NAME: ../<repo>-NAME on branch NAME, created from HEAD on first use and reused after. */
+function startWorktree(root: string, name: string): string {
+  if (!gitPath("--show-toplevel")) {
+    throw new PairError("--worktree needs a git repository");
+  }
+  const git = (args: string[], cwd = root) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.error) {
+      throw new PairError(`couldn't run git: ${result.error.message}`);
+    }
+    return result;
+  };
+  // The regex keeps the name usable as a path and out of git's option and @{-N} syntax; git checks the rest.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name) || git(["check-ref-format", "--branch", name]).status !== 0) {
+    throw new PairError(`--worktree ${JSON.stringify(name)} is not a usable branch name`);
+  }
+  const path = join(dirname(root), `${basename(root)}-${name.replaceAll("/", "-")}`);
+  // feature/x and feature-x share a path, a reused worktree may have been switched, and a tag named NAME
+  // can win over a branch. The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME.
+  const checkBranch = (what: string) => {
+    const head = git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
+    if (head !== `refs/heads/${name}`) {
+      const actual = head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
+      throw new PairError(`${path} ${what} ${actual} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
+    }
+  };
+  if (existsSync(path)) {
+    const top = gitPath("--show-toplevel", path);
+    if (!top || realpathSync(top) !== realpathSync(path) || gitPath("--git-common-dir", path) !== gitPath("--git-common-dir", root)) {
+      throw new PairError(`${path} already exists and isn't a worktree of this repository`);
+    }
+    checkBranch("has");
+  } else {
+    const ok = (ref: string) => git(["rev-parse", "--verify", "--quiet", ref]).status === 0;
+    let source: string[];
+    if (ok(`refs/heads/${name}`)) {
+      source = [path, name];
+    } else {
+      // Name the remote ref outright: given a bare NAME, git prefers a tag of that name over tracking a remote branch.
+      const remotes = git(["remote"]).stdout.split("\n").filter((remote) => remote && ok(`refs/remotes/${remote}/${name}`));
+      const preferred = git(["config", "checkout.defaultRemote"]).stdout.trim();
+      const remote = remotes.length === 1 ? remotes[0] : remotes.find((candidate) => candidate === preferred);
+      if (remotes.length > 1 && !remote) {
+        throw new PairError(`branch ${name} exists on several remotes (${remotes.join(", ")}); set checkout.defaultRemote, or create the local branch yourself`);
+      }
+      source = remote ? ["--track", "-b", name, path, `refs/remotes/${remote}/${name}`] : ["-b", name, path];
+    }
+    const add = spawnSync("git", ["worktree", "add", ...source], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
+    if (add.error || add.status !== 0) {
+      throw new PairError(`git worktree add ${path} failed`);
+    }
+    checkBranch("was created with");
+  }
+  const worktree = realpathSync(path);
+  // Instruction files that aren't committed on the branch only exist in the checkout pair init ran in.
+  // Checked on reuse too, in case an earlier run stopped before init.
+  const setUp = [instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()), instructionState(join(root, "AGENTS.md"), codexSection(), true)];
+  if (setUp.some((state) => state !== "missing")) {
+    const wrote = init(channelDir(worktree), worktree).split("\n").filter((line) => line.startsWith("wrote: "));
+    if (wrote.length) {
+      console.error(wrote.map((line) => `pair: ${line}`).join("\n"));
+    }
+  }
+  console.error(`pair: this session runs in worktree ${worktree}; run pair status and pair stop there`);
+  return worktree;
 }
 
 function channelDir(root: string): string {
@@ -1619,8 +1686,9 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 }
 
 const USAGE = `usage:
-  pair start --as <claude|codex> [--reviewer-model MODEL] [--reviewer-effort LEVEL]
-             [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+  pair start --as <claude|codex> [--worktree NAME] [--reviewer-model MODEL] [--reviewer-effort LEVEL]
+             [--reviewer-args="ARGS"] [--claude /path] [--codex /path] [--timeout seconds]
+             [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
@@ -1635,15 +1703,162 @@ const USAGE = `usage:
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
   pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)`;
 
+const HELP = `${USAGE}
+
+Run pair help <command> (or pair <command> --help) for its options and details.
+
+environment:
+  PAIR_HOME              root directory for channels (default ~/.pair)
+  PAIR_AGENT             default for --as
+  PAIR_MAX_ROUNDS        review rounds before a thread is escalated (default 3)
+  PAIR_KEEP              finished threads to keep: a number, or all (default 100)
+  PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
+  PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
+
+const AS_OPTION = "  --as <claude|codex>          who is running the command (default: $PAIR_AGENT)";
+
+const REGISTER_HELP = `usage: pair register | pair unregister
+
+Run by Codex in its own shell. register records this Codex session so the pair_listen tool from
+pair mcp wakes it when a message arrives. unregister stops the notifications; run it before
+pair start in this worktree.`;
+
+const COMMAND_HELP: Record<string, string> = {
+  start: `usage: pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]
+
+Auto mode (macOS and Linux). Opens the --as agent interactively as the author. Each review request
+starts the other agent as a non-interactive reviewer for one round, and the review comes back
+inline to the author's pair send. Run it in your own terminal, outside Claude or Codex, after
+pair init. A Codex session registered with pair register blocks it; run pair unregister first.
+
+options:
+  --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
+  --worktree NAME              run everything in the git worktree ../<repo>-NAME on branch NAME.
+                               The first run creates them (a new branch from HEAD, so uncommitted
+                               changes stay here, or one tracking a remote branch NAME) and runs
+                               pair init there. Later runs reuse it
+                               while it still has branch NAME checked out.
+  --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
+  --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
+                               codex: none, minimal, low, medium, high, xhigh, max, ultra
+                               claude: low, medium, high, xhigh, max, ultracode
+  --reviewer-args="ARGS"       more reviewer options, split on spaces. A claude reviewer accepts
+                               --fallback-model, --max-budget-usd and --strict-mcp-config; a codex
+                               reviewer -c/--config model_*=VALUE (effort: --reviewer-effort).
+                               Nothing that changes its tools or sandbox. Use = since the value
+                               starts with a dash.
+  --claude /ABSOLUTE/PATH      claude executable (default: first claude on PATH)
+  --codex /ABSOLUTE/PATH       codex executable (default: first codex on PATH)
+  --timeout SECONDS            limit for each review round (default 900, max 86400)
+  --grace SECONDS              wait between terminating and killing a process (default 2, max 30)
+  -- AUTHOR_ARGS...            pass the rest to the interactive claude or codex. Only options that
+                               keep it an interactive session in this worktree are accepted, each
+                               with at most one value; others are refused with the supported list.
+
+  pair start --as claude --reviewer-effort high -- --model opus --permission-mode acceptEdits
+  pair start --as codex --worktree feature/login
+  pair start --as claude --reviewer-args="-c model_verbosity=low" -- --model opus
+  pair start --as codex --reviewer-args="--fallback-model sonnet" -- --model MODEL --search
+
+Inspect it from another terminal in the same worktree (with --worktree, the new one) with
+pair status or pair ps -v; stop it with pair stop.`,
+  stop: `usage: pair stop
+
+Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.`,
+  send: `usage: pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <FILE|->
+
+Send a message on this worktree's channel. The body is read from FILE, or from stdin with -.
+  request    as the author, open a review thread (fails while your previous thread is still open)
+  review     as the reviewer, reply to the waiting request or response; needs --verdict
+  response   as the author, answer a review: what you fixed, rejected or deferred, and why
+
+options:
+${AS_OPTION}
+  --verdict <approve|changes>  required for review; approve closes the thread
+
+A thread is escalated when changes are still requested after PAIR_MAX_ROUNDS rounds (default 3).
+In auto mode, request and response wait for the managed review and print it.`,
+  wait: `usage: pair wait --as <claude|codex> [--timeout SECONDS]
+
+Wait until a message for --as arrives, print it with what to do next, and exit. On timeout it prints
+"pair: no message for <agent> yet." and exits 0. In auto mode, the author's wait retries a failed
+review round.
+
+options:
+${AS_OPTION}
+  --timeout SECONDS            give up after this long (default ${DEFAULT_WAIT_SECONDS})`,
+  status: `usage: pair status
+
+Show this worktree's channel, the installed version, each lane's state, whether the instruction
+files on disk are current, the Codex notification registration, and auto mode. It doesn't modify
+the worktree or the channel.`,
+  history: `usage: pair history [THREAD]
+
+With no argument, list finished threads, newest first. With THREAD (any unique part of a thread
+id), print that thread's messages.`,
+  clean: `usage: pair clean --keep N
+
+Delete all but the N newest finished threads. Pair also does this whenever a thread finishes,
+keeping PAIR_KEEP threads (default 100).`,
+  reset: `usage: pair reset [--as <claude|codex>] [--dry-run]
+
+Clear stale pending requests by moving whole lanes into a timestamped backup under the channel's
+resets/ directory, and print its path. Source files and finished history are left alone. Stop
+manual agent sessions first; it refuses while auto mode owns the worktree (run pair stop).
+
+options:
+  --as <claude|codex>          reset only the lane of requests this agent authored (default: both)
+  --dry-run                    show the lanes it would reset without changing anything`,
+  init: `usage: pair init
+
+Set up this worktree: create its channel and write the agent instructions (the pair section of
+AGENTS.md and .claude/skills/pair/SKILL.md), then print the sandbox and codex mcp add setup.
+Rerun it to refresh stale instructions; it keeps files that a newer pair wrote.`,
+  upgrade: `usage: pair upgrade
+
+Run in your own terminal. If npm has a newer version, install it globally, then refresh this
+worktree's instructions. Restart Claude Code and Codex afterwards.`,
+  uninit: `usage: pair uninit
+
+Undo pair init in this worktree: remove the pair section of AGENTS.md, the pair skill (unless you
+changed it), and the Codex session registration. Message history is kept.`,
+  help: HELP,
+  register: REGISTER_HELP,
+  unregister: REGISTER_HELP,
+  mcp: `usage: pair mcp
+
+The stdio MCP server that gives Codex the pair_listen tool. Codex starts it; add it with the
+codex mcp add command that pair init prints.`,
+  ps: `usage: pair ps [-v]
+
+List running pair processes by worktree, including auto launchers and guardians.
+
+options:
+  -v, --verbose                show full command lines`,
+};
+
 async function main(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals, tokens } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "dry-run": { type: "boolean" } },
+    tokens: true,
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, "dry-run": { type: "boolean" } },
   });
   const [command, ...rest] = positionals;
-  if (values.help || command === "help") { console.log(USAGE); return 0; }
+  const terminator = tokens.find((token) => token.kind === "option-terminator");
+  const passthrough = terminator ? argv.slice(terminator.index + 1) : [];
+  if (values.help || command === "help") {
+    const topic = command === "help" ? rest[0] : command;
+    if (topic && !Object.hasOwn(COMMAND_HELP, topic)) {
+      throw new PairError(`unknown command "${topic}"; run pair help for the list`);
+    }
+    console.log(topic ? COMMAND_HELP[topic] : HELP);
+    return 0;
+  }
   if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
+  if (values.worktree !== undefined && command !== "start") {
+    throw new PairError("--worktree is only supported by pair start");
+  }
   const root = worktreeRoot();
   const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
@@ -1676,26 +1891,33 @@ async function main(argv: string[]): Promise<number> {
       case "start": {
         const me = agent();
         try {
-          if (process.env.CODEX_THREAD_ID || process.env.CLAUDECODE) throw new PairError("run pair start in your own terminal, outside Claude or Codex");
-          // Its listener would wake that session for either lane, and its pair wait could take the auto author's reviews.
-          if (readRegistration(channel)) {
-            throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
+          if (rest.length !== passthrough.length) {
+            throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
           }
           const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
           if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
+          const choices = {
+            author: me, claude: values.claude, codex: values.codex, reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
+            authorArgs: passthrough, reviewerArgs: values["reviewer-args"]?.split(/\s+/).filter(Boolean) ?? [],
+          };
+          checkStart(choices);
+          const startRoot = values.worktree === undefined ? root : startWorktree(root, values.worktree);
+          const startChannel = channelDir(startRoot);
+          // Its listener would wake that session for either lane, and its pair wait could take the auto author's reviews.
+          if (readRegistration(startChannel)) {
+            throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
+          }
           return await startAuto({
-            author: me, root, channel, stateDir: stateDir(channel), entry: fileURLToPath(import.meta.url),
-            claude: values.claude, codex: values.codex,
-            reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
+            ...choices, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url),
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,
             target: () => {
-              const state = stateOf(listMessages(threadFor(channel, me)));
+              const state = stateOf(listMessages(threadFor(startChannel, me)));
               return state.kind === "awaiting-review" ? { file: state.last.file, thread: basename(dirname(state.last.file)) } : undefined;
             },
             reviewed: (file) => {
-              const messages = listMessages(threadFor(channel, me));
+              const messages = listMessages(threadFor(startChannel, me));
               const index = messages.findIndex((message) => message.file === file);
               return index >= 0 && messages[index + 1]?.type === "review";
             },

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -62,7 +62,7 @@ write(reviewer ? 'worker.pid' : 'author.pid', process.pid);
 if (reviewer) {
   let calls = [];
   try { calls = JSON.parse(readFileSync(join(root, 'calls.json'), 'utf8')); } catch {}
-  calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT});
+  calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT, cwd:process.cwd()});
   write('calls.json', JSON.stringify(calls));
   const count = calls.length;
   const session = '11111111-1111-4111-8111-' + String(count).padStart(12, '0');
@@ -89,6 +89,7 @@ if (reviewer) {
   }
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
+  write('author.cwd', process.cwd());
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
   else {
     const stateBase = join(process.env.XDG_STATE_HOME, 'pair');
@@ -115,7 +116,26 @@ if (reviewer) {
   const overrides = [
     ...(reviewerModel === undefined ? [] : ["--reviewer-model", reviewerModel]),
     ...(reviewerEffort === undefined ? [] : ["--reviewer-effort", reviewerEffort]),
+    ...(reviewerArgs === undefined ? [] : [`--reviewer-args=${reviewerArgs}`]),
+    ...(worktree === undefined ? [] : ["--worktree", worktree]),
+    ...(authorArgs.length ? ["--", ...authorArgs] : []),
   ];
+  if (worktree !== undefined) {
+    const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    if (remoteBranch) {
+      // The branch exists only on origin, one commit ahead of HEAD.
+      git("clone", "-q", "--bare", ".", "origin.git");
+      git("remote", "add", "origin", join(root, "origin.git"));
+      git("commit", "-q", "--allow-empty", "-m", "remote work");
+      git("push", "-q", "origin", `HEAD:refs/heads/${worktree}`);
+      git("fetch", "-q", "origin");
+      git("reset", "-q", "--hard", "HEAD~1");
+      git("tag", worktree); // a same-name tag at the old commit must not be checked out instead
+    }
+    assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
+  }
   const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   launcher.stdout.on("data", (data) => { output += data; });
@@ -140,6 +160,7 @@ if (reviewer) {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(socketDir, { recursive: true, force: true });
+      if (worktree !== undefined) rmSync(`${root}-${worktree.replaceAll("/", "-")}`, { recursive: true, force: true });
     }
   });
   const stateDir = () => join(root, "state", "pair", readdirSync(join(root, "state", "pair"))[0]);
@@ -197,6 +218,26 @@ for (const author of ["claude", "codex"]) {
     assert.ok(calls[1].args.includes(author === "claude" ? "resume" : "--resume"));
     const authorArgs = JSON.parse(f.read("author.args.json"));
     assert.ok(!authorArgs.includes("--model") && !authorArgs.includes("--effort") && !authorArgs.includes("--config"));
+  });
+
+  test(`auto ${author}: author arguments after -- and --reviewer-args each reach only their agent`, { timeout: 15_000 }, async (t) => {
+    const passed = ["--model", "fixture-author-model", "--add-dir", "../shared"];
+    const reviewerArgs = author === "claude" ? ["-c", "model_verbosity=low"] : ["--fallback-model", "fixture-fallback"];
+    const f = fixture(t, { author, authorArgs: passed, reviewerArgs: reviewerArgs.join(" ") });
+    assert.equal((await f.completed).code, 0, f.output());
+    const args = JSON.parse(f.read("author.args.json"));
+    assert.deepEqual(args.slice(0, passed.length), passed);
+    assert.ok(!args.includes(reviewerArgs[1]), "the author doesn't get reviewer arguments");
+    if (author === "codex") assert.equal(args.at(-2), "--", "the prompt follows -- so a multi-value option can't take it");
+    const calls = JSON.parse(f.read("calls.json"));
+    assert.ok(calls.some(({ args }) => args.includes(author === "claude" ? "resume" : "--resume")), "a resumed round is covered");
+    for (const call of calls) {
+      assert.ok(!call.args.includes("fixture-author-model"), "the reviewer doesn't get author arguments");
+      const at = call.args.indexOf(reviewerArgs[0]);
+      assert.deepEqual(call.args.slice(at, at + 2), reviewerArgs);
+      assert.ok(at < call.args.indexOf(author === "claude" ? "--json" : "-p"));
+      if (author === "claude") assert.ok(at > call.args.indexOf(call.args.includes("resume") ? "resume" : "exec"), "codex options follow exec (resume)");
+    }
   });
 }
 
@@ -329,6 +370,119 @@ for (const author of ["claude", "codex"]) {
     }
   });
 }
+
+for (const remoteBranch of [false, true]) test(`auto start --worktree runs the whole round in a new worktree${remoteBranch ? ", tracking a remote-only branch" : ""}`, { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { worktree: "feat/x", remoteBranch });
+  assert.equal((await f.completed).code, 0, f.output());
+  const worktree = realpathSync(`${f.root}-feat-x`);
+  const upstream = spawnSync("git", ["rev-parse", "--abbrev-ref", "feat/x@{upstream}"], { cwd: worktree, encoding: "utf8" });
+  assert.equal(upstream.stdout.trim(), remoteBranch ? "origin/feat/x" : "", "a remote-only branch is tracked, not recreated from HEAD");
+  if (remoteBranch) {
+    const commit = (cwd, ref) => spawnSync("git", ["rev-parse", ref], { cwd, encoding: "utf8" }).stdout.trim();
+    assert.equal(commit(worktree, "HEAD"), commit(f.root, "refs/remotes/origin/feat/x"), "the worktree has the remote's commit, not the tag's");
+  }
+  assert.match(f.output(), /this session runs in worktree .*-feat-x; run pair status and pair stop there/);
+  assert.equal(realpathSync(f.read("author.cwd")), worktree);
+  for (const call of JSON.parse(f.read("calls.json"))) assert.equal(realpathSync(call.cwd), worktree, "the reviewer runs in the author's worktree");
+  assert.match(spawnSync("git", ["branch", "--show-current"], { cwd: worktree, encoding: "utf8" }).stdout, /^feat\/x$/m);
+  assert.ok(existsSync(join(worktree, "AGENTS.md")), "pair init ran in the new worktree");
+  assert.match(f.output(), /pair: wrote: .*AGENTS\.md/);
+  assert.match(f.read("first.out"), /verdict changes/, "the review reached the author through the worktree's channel");
+});
+
+test("auto start --worktree checks its input first, and reuses an existing worktree", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "pair-auto-wt-")));
+  const root = join(base, "repo");
+  mkdirSync(root);
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(base, "home"), XDG_STATE_HOME: join(base, "state"), PAIR_NO_UPDATE_CHECK: "1" };
+  const run = (cwd, args, extra = {}) => spawnSync(process.execPath, [CLI, ...args], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
+  const start = (...args) => run(root, ["start", "--as", "claude", "--claude", process.execPath, "--codex", process.execPath, ...args]);
+  try {
+    assert.match(start("--worktree", "feat").stderr, /--worktree needs a git repository/);
+    const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    for (const name of ["-x", "@{-1}", "a..b", "x.lock", "a b"]) {
+      assert.match(start(`--worktree=${name}`).stderr, /is not a usable branch name/, name);
+    }
+    // Bad options, executables and socket settings fail before anything is created.
+    const absent = (what) => {
+      assert.ok(!existsSync(join(base, "repo-feat")), what);
+      assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/feat"], { cwd: root }).status, 1, what);
+    };
+    assert.match(start("--worktree", "feat", "--reviewer-effort", "bogus").stderr, /--reviewer-effort for codex must be one of/);
+    absent("bad effort");
+    assert.match(start("--worktree", "feat", "--claude", join(base, "missing-claude")).stderr, /claude executable not found/);
+    absent("bad executable");
+    assert.match(run(root, ["start", "--as", "claude", "--claude", process.execPath, "--codex", process.execPath, "--worktree", "feat"], { PAIR_AUTO_SOCKET_DIR: "relative" }).stderr, /PAIR_AUTO_SOCKET_DIR must be an absolute path/);
+    absent("bad socket directory");
+    // A reused worktree must be on NAME: fix/one and fix-one share a path, and a worktree can be switched.
+    git("worktree", "add", "-q", "-b", "fix/one", join(base, "repo-fix-one"));
+    assert.match(start("--worktree", "fix-one").stderr, /repo-fix-one has branch fix\/one checked out, not fix-one/);
+    assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/fix-one"], { cwd: root }).status, 1);
+    assert.equal(spawnSync("git", ["checkout", "-q", "--detach"], { cwd: join(base, "repo-fix-one") }).status, 0);
+    assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one has a detached HEAD checked out, not fix\/one/);
+    // A branch on several remotes needs checkout.defaultRemote; nothing is created without it.
+    for (const remote of ["r1", "r2"]) {
+      assert.equal(spawnSync("git", ["init", "-q", "--bare", join(base, `${remote}.git`)]).status, 0);
+      git("remote", "add", remote, join(base, `${remote}.git`));
+      git("push", "-q", remote, "HEAD:refs/heads/dup");
+    }
+    git("fetch", "-q", "--all");
+    assert.match(start("--worktree", "dup").stderr, /branch dup exists on several remotes \(r1, r2\); set checkout\.defaultRemote/);
+    assert.ok(!existsSync(join(base, "repo-dup")));
+    mkdirSync(join(base, "repo-plain"));
+    assert.match(start("--worktree", "plain").stderr, /repo-plain already exists and isn't a worktree of this repository/);
+    assert.match(run(root, ["status", "--worktree", "feat"]).stderr, /--worktree is only supported by pair start/);
+    // An existing worktree is reused, and start then checks that worktree's channel, not this one's.
+    // A tag with the branch's name must not make pair misread the branch (git's short form is heads/feat).
+    git("worktree", "add", "-q", "-b", "feat", join(base, "repo-feat"));
+    git("tag", "feat");
+    assert.equal(run(root, ["init"]).status, 0); // so the reused worktree, created by plain git, gets pair init too
+    assert.equal(run(join(base, "repo-feat"), ["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
+    const reused = start("--worktree", "feat");
+    assert.equal(reused.status, 1);
+    assert.match(reused.stderr, /pair: wrote: .*repo-feat\/AGENTS\.md[\s\S]*this session runs in worktree .*repo-feat; run pair status and pair stop there\n[\s\S]*a manual Codex session is registered here/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("auto start refuses agent arguments outside its allowlists", () => {
+  const root = mkdtempSync(join(tmpdir(), "pair-auto-args-"));
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_NO_UPDATE_CHECK: "1" };
+  const start = (...args) => spawnSync(process.execPath, [CLI, "start", "--claude", process.execPath, "--codex", process.execPath, ...args], { cwd: root, env, encoding: "utf8" });
+  try {
+    const refused = (name, agent) => new RegExp(`can't pass "${name}" to the ${agent}`);
+    for (const [args, message] of [
+      [["--as", "claude", "stray"], /takes no arguments of its own/],
+      // Print and background modes, settings that replace pair's, directory switches, and a second terminator.
+      ...["-p", "--print", "--output-format", "--settings=x.json", "--bg", "--background", "--desktop", "-w", "--worktree", "--"]
+        .map((arg) => [["--as", "claude", "--", "--model", "opus", arg], refused(arg.split("=")[0], "claude author")]),
+      // Subcommands even after an option's value, prompts, and directory switches.
+      [["--as", "codex", "--", "exec"], /can't pass "exec" to the codex author: only options/],
+      [["--as", "codex", "--", "--model", "m", "exec", "--help"], /can't pass "exec" to the codex author: only options/],
+      [["--as", "codex", "--", "--search", "fix the bug"], /can't pass "fix the bug"/],
+      ...["-C", "--cd", "--worktree", "--remote"].map((arg) => [["--as", "codex", "--", arg, "/elsewhere"], refused(arg, "codex author")]),
+      [["--as", "claude", "--", "--add-dir", "a", "b"], /can't pass "b"/],
+      [["--as", "codex", "--", "--model"], /--model for the codex author needs a value/],
+      [["--as", "claude", "--", "--model="], /--model for the claude author needs a value/],
+      [["--as", "codex", "--", "--search=yes"], /--search for the codex author takes no value/],
+      // A reviewer gets nothing that changes its tools, permissions or sandbox.
+      [["--as", "claude", "--reviewer-args=-c sandbox_mode=danger-full-access"], /-c for the codex reviewer must match/],
+      [["--as", "claude", "--reviewer-args=--dangerously-bypass-approvals-and-sandbox"], refused("--dangerously-bypass-approvals-and-sandbox", "codex reviewer")],
+      [["--as", "claude", "--reviewer-args=-c model_reasoning_effort=high"], /-c for the codex reviewer must match/],
+      ...["--dangerously-skip-permissions", "--permission-mode", "--allowedTools", "--settings", "--plugin-dir", "--mcp-config"]
+        .map((arg) => [["--as", "codex", `--reviewer-args=${arg} x`], refused(arg, "claude reviewer")]),
+    ]) {
+      const result = start(...args);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, message);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("successful reviewer cleanup also terminates leftover tool processes", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "retry", worker: "leaky" });
