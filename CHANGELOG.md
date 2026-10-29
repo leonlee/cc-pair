@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 (2026-10-29)
+
+`pair` with no arguments now lists `pair help [command]` in its usage, so per-command help is
+discoverable without knowing about `--help`.
+
 ## 0.6.0 (2026-10-29)
 
 `pair help <command>` and `pair <command> --help` explain each command and its options, and
