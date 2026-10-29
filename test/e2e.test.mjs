@@ -149,6 +149,7 @@ test("help explains each command and its options", () => {
   const { run, ok } = sandbox();
   assert.match(ok(["--help"]), /pair help <command>[\s\S]*PAIR_KEEP/);
   assert.equal(ok(["help", "start"]), ok(["start", "--help"]));
+  assert.equal(ok(["help", "help"]), ok(["--help"]));
   assert.match(ok(["start", "-h"]), /--reviewer-effort LEVEL[\s\S]*--grace SECONDS/);
   assert.match(ok(["help", "send"]), /--verdict <approve\|changes>/);
   assert.match(ok(["help", "unregister"]), /usage: pair register \| pair unregister/);

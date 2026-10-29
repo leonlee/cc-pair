@@ -209,8 +209,9 @@ pair start --as codex --reviewer-args="--fallback-model sonnet --max-budget-usd 
 `--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes) on
 branch `NAME`. The first run creates the branch from `HEAD` if it doesn't exist, so uncommitted
 changes stay in the current checkout, and runs `pair init` there if this checkout has pair set up.
-Later runs reuse the worktree, provided it still has branch `NAME` checked out; pair never switches
-it. Options, executables and the socket directory are checked before anything is created. The channel, author and reviewer all belong to that worktree, and it
+A branch that exists only on one remote is checked out to track it. Later runs reuse the worktree,
+provided it still has branch `NAME` checked out; pair never switches it. Run `pair status` and
+`pair stop` from that worktree, since the session belongs to its channel. Options, executables and the socket directory are checked before anything is created. The channel, author and reviewer all belong to that worktree, and it
 stays after the session ends; remove it with `git worktree remove`. Use this instead of the
 agents' own worktree options, which pair refuses because they would move the author away from its
 channel and reviewer.

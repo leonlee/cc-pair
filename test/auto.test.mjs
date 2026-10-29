@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -124,6 +124,15 @@ if (reviewer) {
     const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
     git("init", "-q");
     git("commit", "-q", "--allow-empty", "-m", "base");
+    if (remoteBranch) {
+      // The branch exists only on origin, one commit ahead of HEAD.
+      git("clone", "-q", "--bare", ".", "origin.git");
+      git("remote", "add", "origin", join(root, "origin.git"));
+      git("commit", "-q", "--allow-empty", "-m", "remote work");
+      git("push", "-q", "origin", `HEAD:refs/heads/${worktree}`);
+      git("fetch", "-q", "origin");
+      git("reset", "-q", "--hard", "HEAD~1");
+    }
     assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
   }
   const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -361,10 +370,13 @@ for (const author of ["claude", "codex"]) {
   });
 }
 
-test("auto start --worktree runs the whole round in a new worktree", { timeout: 15_000 }, async (t) => {
-  const f = fixture(t, { worktree: "feat/x" });
+for (const remoteBranch of [false, true]) test(`auto start --worktree runs the whole round in a new worktree${remoteBranch ? ", tracking a remote-only branch" : ""}`, { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { worktree: "feat/x", remoteBranch });
   assert.equal((await f.completed).code, 0, f.output());
   const worktree = realpathSync(`${f.root}-feat-x`);
+  const upstream = spawnSync("git", ["rev-parse", "--abbrev-ref", "feat/x@{upstream}"], { cwd: worktree, encoding: "utf8" });
+  assert.equal(upstream.stdout.trim(), remoteBranch ? "origin/feat/x" : "", "a remote-only branch is tracked, not recreated from HEAD");
+  assert.match(f.output(), /this session runs in worktree .*-feat-x; run pair status and pair stop there/);
   assert.equal(realpathSync(f.read("author.cwd")), worktree);
   for (const call of JSON.parse(f.read("calls.json"))) assert.equal(realpathSync(call.cwd), worktree, "the reviewer runs in the author's worktree");
   assert.match(spawnSync("git", ["branch", "--show-current"], { cwd: worktree, encoding: "utf8" }).stdout, /^feat\/x$/m);
@@ -412,10 +424,11 @@ test("auto start --worktree checks its input first, and reuses an existing workt
     // A tag with the branch's name must not make pair misread the branch (git's short form is heads/feat).
     git("worktree", "add", "-q", "-b", "feat", join(base, "repo-feat"));
     git("tag", "feat");
+    assert.equal(run(root, ["init"]).status, 0); // so the reused worktree, created by plain git, gets pair init too
     assert.equal(run(join(base, "repo-feat"), ["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
     const reused = start("--worktree", "feat");
     assert.equal(reused.status, 1);
-    assert.match(reused.stderr, /pair: using worktree .*repo-feat\n[\s\S]*a manual Codex session is registered here/);
+    assert.match(reused.stderr, /pair: wrote: .*repo-feat\/AGENTS\.md[\s\S]*this session runs in worktree .*repo-feat; run pair status and pair stop there\n[\s\S]*a manual Codex session is registered here/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -439,6 +452,7 @@ test("auto start refuses agent arguments outside its allowlists", () => {
       ...["-C", "--cd", "--worktree", "--remote"].map((arg) => [["--as", "codex", "--", arg, "/elsewhere"], refused(arg, "codex author")]),
       [["--as", "claude", "--", "--add-dir", "a", "b"], /can't pass "b"/],
       [["--as", "codex", "--", "--model"], /--model for the codex author needs a value/],
+      [["--as", "claude", "--", "--model="], /--model for the claude author needs a value/],
       [["--as", "codex", "--", "--search=yes"], /--search for the codex author takes no value/],
       // A reviewer gets nothing that changes its tools, permissions or sandbox.
       [["--as", "claude", "--reviewer-args=-c sandbox_mode=danger-full-access"], /-c for the codex reviewer must match/],

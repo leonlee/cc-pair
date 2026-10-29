@@ -249,7 +249,7 @@ function checkForwarded(table: OptionTable, args: string[], what: string): void 
       continue;
     }
     const value = inline > 0 ? arg.slice(inline + 1) : args[++index];
-    if (value === undefined || (inline < 0 && value.startsWith("-"))) {
+    if (!value || (inline < 0 && value.startsWith("-"))) {
       throw new Error(`${name} for ${what} needs a value`);
     }
     if (kind instanceof RegExp && !kind.test(value)) {
@@ -283,7 +283,7 @@ export function checkStart(options: StartChoices): void {
 
 /** Run outside an agent sandbox: the launcher owns the interactive author and bounded reviewers. */
 export async function startAuto(options: AutoOptions): Promise<number> {
-  checkStart(options);
+  // pair start ran checkStart before resolving the worktree.
   const reviewer: Agent = options.author === "claude" ? "codex" : "claude";
   const paths = { claude: executable("claude", options.claude), codex: executable("codex", options.codex) };
   const run = randomUUID();

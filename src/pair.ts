@@ -195,7 +195,13 @@ function startWorktree(root: string, name: string): string {
   if (!gitPath("--show-toplevel")) {
     throw new PairError("--worktree needs a git repository");
   }
-  const git = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  const git = (args: string[], cwd = root) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.error) {
+      throw new PairError(`couldn't run git: ${result.error.message}`);
+    }
+    return result;
+  };
   // The regex keeps the name usable as a path and out of git's option and @{-N} syntax; git checks the rest.
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name) || git(["check-ref-format", "--branch", name]).status !== 0) {
     throw new PairError(`--worktree ${JSON.stringify(name)} is not a usable branch name`);
@@ -208,29 +214,33 @@ function startWorktree(root: string, name: string): string {
     }
     // feature/x and feature-x share a path, and a reused worktree may have been switched since. The
     // full ref, since --short abbreviates a branch to heads/NAME when a tag is also called NAME.
-    const head = spawnSync("git", ["symbolic-ref", "--quiet", "HEAD"], { cwd: path, encoding: "utf8" }).stdout.trim();
+    const head = git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
     if (head !== `refs/heads/${name}`) {
       const actual = head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
       throw new PairError(`${path} has ${actual} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
     }
-    console.error(`pair: using worktree ${path}`);
-    return realpathSync(path);
+  } else {
+    // An existing branch, local or on one remote, is checked out (git tracks the remote one); a new one starts at HEAD.
+    const remotes = git(["remote"]).stdout.split("\n").filter(Boolean);
+    const known = [`refs/heads/${name}`, ...remotes.map((remote) => `refs/remotes/${remote}/${name}`)]
+      .some((ref) => git(["rev-parse", "--verify", "--quiet", ref]).status === 0);
+    const add = spawnSync("git", ["worktree", "add", ...(known ? [path, name] : ["-b", name, path])], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
+    if (add.error || add.status !== 0) {
+      throw new PairError(`git worktree add ${path} failed`);
+    }
   }
-  const exists = git(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]).status === 0;
-  const add = spawnSync("git", ["worktree", "add", ...(exists ? [path, name] : ["-b", name, path])], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
-  if (add.error || add.status !== 0) {
-    throw new PairError(`git worktree add ${path} failed`);
-  }
+  const worktree = realpathSync(path);
   // Instruction files that aren't committed on the branch only exist in the checkout pair init ran in.
+  // Checked on reuse too, in case an earlier run stopped before init.
   const setUp = [instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()), instructionState(join(root, "AGENTS.md"), codexSection(), true)];
-  const created = realpathSync(path);
   if (setUp.some((state) => state !== "missing")) {
-    const wrote = init(channelDir(created), created).split("\n").filter((line) => line.startsWith("wrote: "));
+    const wrote = init(channelDir(worktree), worktree).split("\n").filter((line) => line.startsWith("wrote: "));
     if (wrote.length) {
       console.error(wrote.map((line) => `pair: ${line}`).join("\n"));
     }
   }
-  return created;
+  console.error(`pair: this session runs in worktree ${worktree}; run pair status and pair stop there`);
+  return worktree;
 }
 
 function channelDir(root: string): string {
@@ -1735,7 +1745,8 @@ options:
   pair start --as claude --reviewer-args="-c model_verbosity=low" -- --model opus
   pair start --as codex --reviewer-args="--fallback-model sonnet" -- --model MODEL --search
 
-Inspect it from another terminal with pair status or pair ps -v; stop it with pair stop.`,
+Inspect it from another terminal in the same worktree (with --worktree, the new one) with
+pair status or pair ps -v; stop it with pair stop.`,
   stop: `usage: pair stop
 
 Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.`,
@@ -1796,6 +1807,7 @@ worktree's instructions. Restart Claude Code and Codex afterwards.`,
 
 Undo pair init in this worktree: remove the pair section of AGENTS.md, the pair skill (unless you
 changed it), and the Codex session registration. Message history is kept.`,
+  help: HELP,
   register: REGISTER_HELP,
   unregister: REGISTER_HELP,
   mcp: `usage: pair mcp
@@ -1829,7 +1841,9 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
-  if (values.worktree !== undefined && command !== "start") throw new PairError("--worktree is only supported by pair start");
+  if (values.worktree !== undefined && command !== "start") {
+    throw new PairError("--worktree is only supported by pair start");
+  }
   const root = worktreeRoot();
   const channel = channelDir(root);
   const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
@@ -1862,7 +1876,9 @@ async function main(argv: string[]): Promise<number> {
       case "start": {
         const me = agent();
         try {
-          if (rest.length !== passthrough.length) throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
+          if (rest.length !== passthrough.length) {
+            throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
+          }
           const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
           if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
