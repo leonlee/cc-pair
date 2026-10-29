@@ -207,27 +207,41 @@ function startWorktree(root: string, name: string): string {
     throw new PairError(`--worktree ${JSON.stringify(name)} is not a usable branch name`);
   }
   const path = join(dirname(root), `${basename(root)}-${name.replaceAll("/", "-")}`);
+  // feature/x and feature-x share a path, a reused worktree may have been switched, and a tag named NAME
+  // can win over a branch. The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME.
+  const checkBranch = (what: string) => {
+    const head = git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
+    if (head !== `refs/heads/${name}`) {
+      const actual = head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
+      throw new PairError(`${path} ${what} ${actual} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
+    }
+  };
   if (existsSync(path)) {
     const top = gitPath("--show-toplevel", path);
     if (!top || realpathSync(top) !== realpathSync(path) || gitPath("--git-common-dir", path) !== gitPath("--git-common-dir", root)) {
       throw new PairError(`${path} already exists and isn't a worktree of this repository`);
     }
-    // feature/x and feature-x share a path, and a reused worktree may have been switched since. The
-    // full ref, since --short abbreviates a branch to heads/NAME when a tag is also called NAME.
-    const head = git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
-    if (head !== `refs/heads/${name}`) {
-      const actual = head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
-      throw new PairError(`${path} has ${actual} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
-    }
+    checkBranch("has");
   } else {
-    // An existing branch, local or on one remote, is checked out (git tracks the remote one); a new one starts at HEAD.
-    const remotes = git(["remote"]).stdout.split("\n").filter(Boolean);
-    const known = [`refs/heads/${name}`, ...remotes.map((remote) => `refs/remotes/${remote}/${name}`)]
-      .some((ref) => git(["rev-parse", "--verify", "--quiet", ref]).status === 0);
-    const add = spawnSync("git", ["worktree", "add", ...(known ? [path, name] : ["-b", name, path])], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
+    const ok = (ref: string) => git(["rev-parse", "--verify", "--quiet", ref]).status === 0;
+    let source: string[];
+    if (ok(`refs/heads/${name}`)) {
+      source = [path, name];
+    } else {
+      // Name the remote ref outright: given a bare NAME, git prefers a tag of that name over tracking a remote branch.
+      const remotes = git(["remote"]).stdout.split("\n").filter((remote) => remote && ok(`refs/remotes/${remote}/${name}`));
+      const preferred = git(["config", "checkout.defaultRemote"]).stdout.trim();
+      const remote = remotes.length === 1 ? remotes[0] : remotes.find((candidate) => candidate === preferred);
+      if (remotes.length > 1 && !remote) {
+        throw new PairError(`branch ${name} exists on several remotes (${remotes.join(", ")}); set checkout.defaultRemote, or create the local branch yourself`);
+      }
+      source = remote ? ["--track", "-b", name, path, `refs/remotes/${remote}/${name}`] : ["-b", name, path];
+    }
+    const add = spawnSync("git", ["worktree", "add", ...source], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
     if (add.error || add.status !== 0) {
       throw new PairError(`git worktree add ${path} failed`);
     }
+    checkBranch("was created with");
   }
   const worktree = realpathSync(path);
   // Instruction files that aren't committed on the branch only exist in the checkout pair init ran in.
@@ -1720,8 +1734,9 @@ pair init. A Codex session registered with pair register blocks it; run pair unr
 options:
   --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
   --worktree NAME              run everything in the git worktree ../<repo>-NAME on branch NAME.
-                               The first run creates them (the branch from HEAD, so uncommitted
-                               changes stay here) and runs pair init there. Later runs reuse it
+                               The first run creates them (a new branch from HEAD, so uncommitted
+                               changes stay here, or one tracking a remote branch NAME) and runs
+                               pair init there. Later runs reuse it
                                while it still has branch NAME checked out.
   --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)

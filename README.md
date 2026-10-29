@@ -156,9 +156,11 @@ unsupported model/effort combination fails the round and keeps the request.
 `--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes) on
 branch `NAME`:
 
-- If the path does not exist, pair runs `git worktree add`. An existing branch is checked out; a
-  branch found only on one remote is checked out to track it; otherwise a new branch starts at
-  `HEAD`, so uncommitted changes stay in the current checkout.
+- If the path does not exist, pair runs `git worktree add`. An existing local branch is checked
+  out. A branch found only on remotes is created to track it: on one remote, that remote; on
+  several, the one named by `checkout.defaultRemote`, and pair refuses if none is. Otherwise a new
+  branch starts at `HEAD`, so uncommitted changes stay in the current checkout. A tag named `NAME`
+  is never checked out instead.
 - If the path exists, it MUST be a worktree of this repository with `refs/heads/NAME` checked out.
   Pair never switches it.
 - If the current checkout has pair set up, pair runs `pair init` in the worktree.

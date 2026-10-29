@@ -132,6 +132,7 @@ if (reviewer) {
       git("push", "-q", "origin", `HEAD:refs/heads/${worktree}`);
       git("fetch", "-q", "origin");
       git("reset", "-q", "--hard", "HEAD~1");
+      git("tag", worktree); // a same-name tag at the old commit must not be checked out instead
     }
     assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
   }
@@ -376,6 +377,10 @@ for (const remoteBranch of [false, true]) test(`auto start --worktree runs the w
   const worktree = realpathSync(`${f.root}-feat-x`);
   const upstream = spawnSync("git", ["rev-parse", "--abbrev-ref", "feat/x@{upstream}"], { cwd: worktree, encoding: "utf8" });
   assert.equal(upstream.stdout.trim(), remoteBranch ? "origin/feat/x" : "", "a remote-only branch is tracked, not recreated from HEAD");
+  if (remoteBranch) {
+    const commit = (cwd, ref) => spawnSync("git", ["rev-parse", ref], { cwd, encoding: "utf8" }).stdout.trim();
+    assert.equal(commit(worktree, "HEAD"), commit(f.root, "refs/remotes/origin/feat/x"), "the worktree has the remote's commit, not the tag's");
+  }
   assert.match(f.output(), /this session runs in worktree .*-feat-x; run pair status and pair stop there/);
   assert.equal(realpathSync(f.read("author.cwd")), worktree);
   for (const call of JSON.parse(f.read("calls.json"))) assert.equal(realpathSync(call.cwd), worktree, "the reviewer runs in the author's worktree");
@@ -417,6 +422,15 @@ test("auto start --worktree checks its input first, and reuses an existing workt
     assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/fix-one"], { cwd: root }).status, 1);
     assert.equal(spawnSync("git", ["checkout", "-q", "--detach"], { cwd: join(base, "repo-fix-one") }).status, 0);
     assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one has a detached HEAD checked out, not fix\/one/);
+    // A branch on several remotes needs checkout.defaultRemote; nothing is created without it.
+    for (const remote of ["r1", "r2"]) {
+      assert.equal(spawnSync("git", ["init", "-q", "--bare", join(base, `${remote}.git`)]).status, 0);
+      git("remote", "add", remote, join(base, `${remote}.git`));
+      git("push", "-q", remote, "HEAD:refs/heads/dup");
+    }
+    git("fetch", "-q", "--all");
+    assert.match(start("--worktree", "dup").stderr, /branch dup exists on several remotes \(r1, r2\); set checkout\.defaultRemote/);
+    assert.ok(!existsSync(join(base, "repo-dup")));
     mkdirSync(join(base, "repo-plain"));
     assert.match(start("--worktree", "plain").stderr, /repo-plain already exists and isn't a worktree of this repository/);
     assert.match(run(root, ["status", "--worktree", "feat"]).stderr, /--worktree is only supported by pair start/);
