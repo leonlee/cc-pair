@@ -42,6 +42,8 @@ export interface AutoOptions {
   codex?: string;
   reviewerModel?: string;
   reviewerEffort?: string;
+  authorArgs: string[];
+  reviewerArgs: string[];
   timeoutMs: number;
   graceMs: number;
   target(): ReviewTarget | undefined;
@@ -195,6 +197,67 @@ function executable(name: Agent, override?: string): string {
 
 function quote(text: string): string { return `'${text.replaceAll("'", "'\\''")}'`; }
 
+/** For each option pair start forwards: "flag" takes no value, "value" one, and a RegExp one that must match. */
+type OptionTable = Record<string, "flag" | "value" | RegExp>;
+
+const aliases = (names: string[], kind: "flag" | "value" | RegExp): OptionTable => Object.fromEntries(names.map((name) => [name, kind]));
+
+// Allowlists, not denylists: a refused flag can still hand the session off (claude --bg), switch the
+// working directory away from the channel (codex --cd), select a subcommand, or loosen a reviewer.
+// Values are single: commander's variadic options take one value per occurrence when repeated.
+const FORWARDED: Record<"author" | "reviewer", Record<Agent, OptionTable>> = {
+  author: {
+    claude: {
+      ...aliases(["--model", "--effort", "--permission-mode", "--add-dir", "--mcp-config", "--agent", "--plugin-dir"], "value"),
+      ...aliases(["--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools"], "value"),
+      ...aliases(["-r", "--resume", "-n", "--name"], "value"),
+      ...aliases(["-c", "--continue", "--fork-session", "--strict-mcp-config", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--verbose", "--ide", "--chrome", "--no-chrome"], "flag"),
+    },
+    codex: {
+      ...aliases(["-m", "--model", "-c", "--config", "-p", "--profile", "-s", "--sandbox", "-a", "--ask-for-approval", "--add-dir", "-i", "--image", "--enable", "--disable", "--local-provider"], "value"),
+      ...aliases(["--search", "--oss", "--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"], "flag"),
+    },
+  },
+  // Nothing that changes tools, permissions or the sandbox: MCP servers start outside the tool
+  // permissions, so no --mcp-config. Codex options must also work after exec resume; its effort
+  // has --reviewer-effort, which pair checks and shows in status.
+  reviewer: {
+    claude: {
+      ...aliases(["--fallback-model", "--max-budget-usd"], "value"),
+      "--strict-mcp-config": "flag",
+    },
+    codex: aliases(["-c", "--config"], /^model_(?!reasoning_effort=)[a-z_]+=/),
+  },
+};
+
+function checkForwarded(table: OptionTable, args: string[], what: string): void {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    const inline = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const name = inline > 0 ? arg.slice(0, inline) : arg;
+    if (!name.startsWith("-")) {
+      throw new Error(`pair start can't pass ${JSON.stringify(name)} to ${what}: only options are accepted, each with at most one value`);
+    }
+    if (!Object.hasOwn(table, name)) {
+      throw new Error(`pair start can't pass ${JSON.stringify(name)} to ${what}; supported: ${Object.keys(table).join(", ")}`);
+    }
+    const kind = table[name];
+    if (kind === "flag") {
+      if (inline > 0) {
+        throw new Error(`${name} for ${what} takes no value`);
+      }
+      continue;
+    }
+    const value = inline > 0 ? arg.slice(inline + 1) : args[++index];
+    if (value === undefined || (inline < 0 && value.startsWith("-"))) {
+      throw new Error(`${name} for ${what} needs a value`);
+    }
+    if (kind instanceof RegExp && !kind.test(value)) {
+      throw new Error(`${name} for ${what} must match ${kind}`);
+    }
+  }
+}
+
 /** Run outside an agent sandbox: the launcher owns the interactive author and bounded reviewers. */
 export async function startAuto(options: AutoOptions): Promise<number> {
   if (process.platform === "win32") throw new Error("auto mode currently supports macOS and Linux");
@@ -209,6 +272,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   if (options.reviewerEffort !== undefined && !efforts.includes(options.reviewerEffort)) {
     throw new Error(`--reviewer-effort for ${reviewer} must be one of: ${efforts.join(", ")}. Availability also depends on the installed CLI and selected model.`);
   }
+  checkForwarded(FORWARDED.author[options.author], options.authorArgs, `the ${options.author} author`);
+  checkForwarded(FORWARDED.reviewer[reviewer], options.reviewerArgs, `the ${reviewer} reviewer`);
   const paths = { claude: executable("claude", options.claude), codex: executable("codex", options.codex) };
   const run = randomUUID();
   const path = autoSocketPath(options.stateDir, true);
@@ -304,8 +369,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       ? ["--config", `model_reasoning_effort=${JSON.stringify(options.reviewerEffort)}`]
       : ["--effort", options.reviewerEffort];
     const args = reviewer === "codex"
-      ? ["--sandbox", "workspace-write", "--add-dir", options.channel, "exec", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, "--json", prompt]
-      : [...modelArgs, ...effortArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", join(runDir, "bin", "pair")].flatMap((bin) => [`Bash(${bin} wait *)`, `Bash(${bin} send review *)`])].join(","), "--", prompt];
+      ? ["--sandbox", "workspace-write", "--add-dir", options.channel, "exec", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, ...options.reviewerArgs, "--json", prompt]
+      : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", join(runDir, "bin", "pair")].flatMap((bin) => [`Bash(${bin} wait *)`, `Bash(${bin} send review *)`])].join(","), "--", prompt];
     sendGuardian({ type: "launch", job: { id, executable: paths[reviewer], args, cwd: options.root, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: file }, interactive: false, timeoutMs: options.timeoutMs } satisfies Job });
     return promise;
   };
@@ -407,9 +472,10 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     heartbeat = setInterval(() => sendGuardian({ type: "heartbeat" }), 1000);
     for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(name, signal);
     const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewer} as your automatically managed reviewer. The pair CLI is ${quote(join(runDir, "bin", "pair"))}; use this absolute command in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${options.author} -. Follow-up replies use pair send response --as ${options.author} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. Do not register, call pair_listen, or start idle waits in auto mode. If a managed review fails, pair wait --as ${options.author} retries the pending round. For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
+    // The user's options go first; codex gets -- before the prompt so a multi-value option like --image can't take it.
     const authorArgs = options.author === "claude"
-      ? ["--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] } } }), "--append-system-prompt", authorPrompt, "Act as the pair author described in your system instructions and wait for the user's task."]
-      : [authorPrompt];
+      ? [...options.authorArgs, "--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] } } }), "--append-system-prompt", authorPrompt, "Act as the pair author described in your system instructions and wait for the user's task."]
+      : [...options.authorArgs, ...(options.authorArgs.length ? ["--"] : []), authorPrompt];
     if (options.author === "claude") console.error(`pair: Claude sandbox.network.allowUnixSockets includes ${path} for this session only`);
     sendGuardian({ type: "launch", job: { id: "author", executable: paths[options.author], args: authorArgs, cwd: options.root, env: childEnv("author"), interactive: true, timeoutMs: 0 } satisfies Job });
     state.phase = "idle";

@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -115,6 +115,8 @@ if (reviewer) {
   const overrides = [
     ...(reviewerModel === undefined ? [] : ["--reviewer-model", reviewerModel]),
     ...(reviewerEffort === undefined ? [] : ["--reviewer-effort", reviewerEffort]),
+    ...(reviewerArgs === undefined ? [] : [`--reviewer-args=${reviewerArgs}`]),
+    ...(authorArgs.length ? ["--", ...authorArgs] : []),
   ];
   const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -197,6 +199,26 @@ for (const author of ["claude", "codex"]) {
     assert.ok(calls[1].args.includes(author === "claude" ? "resume" : "--resume"));
     const authorArgs = JSON.parse(f.read("author.args.json"));
     assert.ok(!authorArgs.includes("--model") && !authorArgs.includes("--effort") && !authorArgs.includes("--config"));
+  });
+
+  test(`auto ${author}: author arguments after -- and --reviewer-args each reach only their agent`, { timeout: 15_000 }, async (t) => {
+    const passed = ["--model", "fixture-author-model", "--add-dir", "../shared"];
+    const reviewerArgs = author === "claude" ? ["-c", "model_verbosity=low"] : ["--fallback-model", "fixture-fallback"];
+    const f = fixture(t, { author, authorArgs: passed, reviewerArgs: reviewerArgs.join(" ") });
+    assert.equal((await f.completed).code, 0, f.output());
+    const args = JSON.parse(f.read("author.args.json"));
+    assert.deepEqual(args.slice(0, passed.length), passed);
+    assert.ok(!args.includes(reviewerArgs[1]), "the author doesn't get reviewer arguments");
+    if (author === "codex") assert.equal(args.at(-2), "--", "the prompt follows -- so a multi-value option can't take it");
+    const calls = JSON.parse(f.read("calls.json"));
+    assert.ok(calls.some(({ args }) => args.includes(author === "claude" ? "resume" : "--resume")), "a resumed round is covered");
+    for (const call of calls) {
+      assert.ok(!call.args.includes("fixture-author-model"), "the reviewer doesn't get author arguments");
+      const at = call.args.indexOf(reviewerArgs[0]);
+      assert.deepEqual(call.args.slice(at, at + 2), reviewerArgs);
+      assert.ok(at < call.args.indexOf(author === "claude" ? "--json" : "-p"));
+      if (author === "claude") assert.ok(at > call.args.indexOf(call.args.includes("resume") ? "resume" : "exec"), "codex options follow exec (resume)");
+    }
   });
 }
 
@@ -329,6 +351,41 @@ for (const author of ["claude", "codex"]) {
     }
   });
 }
+
+test("auto start refuses agent arguments outside its allowlists", () => {
+  const root = mkdtempSync(join(tmpdir(), "pair-auto-args-"));
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_NO_UPDATE_CHECK: "1" };
+  const start = (...args) => spawnSync(process.execPath, [CLI, "start", "--claude", process.execPath, "--codex", process.execPath, ...args], { cwd: root, env, encoding: "utf8" });
+  try {
+    const refused = (name, agent) => new RegExp(`can't pass "${name}" to the ${agent}`);
+    for (const [args, message] of [
+      [["--as", "claude", "stray"], /takes no arguments of its own/],
+      // Print and background modes, settings that replace pair's, directory switches, and a second terminator.
+      ...["-p", "--print", "--output-format", "--settings=x.json", "--bg", "--background", "--desktop", "-w", "--worktree", "--"]
+        .map((arg) => [["--as", "claude", "--", "--model", "opus", arg], refused(arg.split("=")[0], "claude author")]),
+      // Subcommands even after an option's value, prompts, and directory switches.
+      [["--as", "codex", "--", "exec"], /can't pass "exec" to the codex author: only options/],
+      [["--as", "codex", "--", "--model", "m", "exec", "--help"], /can't pass "exec" to the codex author: only options/],
+      [["--as", "codex", "--", "--search", "fix the bug"], /can't pass "fix the bug"/],
+      ...["-C", "--cd", "--worktree", "--remote"].map((arg) => [["--as", "codex", "--", arg, "/elsewhere"], refused(arg, "codex author")]),
+      [["--as", "claude", "--", "--add-dir", "a", "b"], /can't pass "b"/],
+      [["--as", "codex", "--", "--model"], /--model for the codex author needs a value/],
+      [["--as", "codex", "--", "--search=yes"], /--search for the codex author takes no value/],
+      // A reviewer gets nothing that changes its tools, permissions or sandbox.
+      [["--as", "claude", "--reviewer-args=-c sandbox_mode=danger-full-access"], /-c for the codex reviewer must match/],
+      [["--as", "claude", "--reviewer-args=--dangerously-bypass-approvals-and-sandbox"], refused("--dangerously-bypass-approvals-and-sandbox", "codex reviewer")],
+      [["--as", "claude", "--reviewer-args=-c model_reasoning_effort=high"], /-c for the codex reviewer must match/],
+      ...["--dangerously-skip-permissions", "--permission-mode", "--allowedTools", "--settings", "--plugin-dir", "--mcp-config"]
+        .map((arg) => [["--as", "codex", `--reviewer-args=${arg} x`], refused(arg, "claude reviewer")]),
+    ]) {
+      const result = start(...args);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, message);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("successful reviewer cleanup also terminates leftover tool processes", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "retry", worker: "leaky" });

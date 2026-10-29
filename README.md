@@ -199,7 +199,30 @@ pair start --as claude --reviewer-model CODEX_MODEL_ID --reviewer-effort high
 pair start --as codex --reviewer-model opus --reviewer-effort high
 pair start --as claude --timeout 900 --grace 2
 pair start --as codex --claude /absolute/path/to/claude --codex /absolute/path/to/codex
+pair start --as claude -- --model opus --permission-mode acceptEdits
+pair start --as codex -- --model MODEL -c model_reasoning_effort=high --search
+pair start --as claude --reviewer-args="-c model_verbosity=low"
+pair start --as codex --reviewer-args="--fallback-model sonnet --max-budget-usd 2"
 ```
+
+Arguments after `--` go to the interactive author's CLI, before pair's own arguments.
+`--reviewer-args` passes a space-separated list to every reviewer round; write it with `=`
+because the value starts with a dash. Both accept only listed options, each with at most one value
+(repeat an option for more), and refuse anything else with the supported list. Options are listed
+rather than excluded because unlisted ones can turn the author into a print or background session
+(`-p`, `--bg`), select a Codex subcommand, move it to another directory or worktree where it can't
+reach this channel (`--cd`, `--worktree`), or replace the settings pair passes.
+
+| | Author (`-- ARGS`) | Reviewer (`--reviewer-args`) |
+|---|---|---|
+| Claude | `--model`, `--effort`, `--permission-mode`, `--add-dir`, `--allowedTools`, `--disallowedTools`, `--mcp-config`, `--strict-mcp-config`, `--agent`, `--plugin-dir`, `-r`/`--resume`, `-c`/`--continue`, `--fork-session`, `-n`/`--name`, `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--verbose`, `--ide`, `--chrome`, `--no-chrome` | `--fallback-model`, `--max-budget-usd`, `--strict-mcp-config` |
+| Codex | `-m`/`--model`, `-c`/`--config`, `-p`/`--profile`, `-s`/`--sandbox`, `-a`/`--ask-for-approval`, `--add-dir`, `-i`/`--image`, `--enable`, `--disable`, `--local-provider`, `--search`, `--oss`, `--no-alt-screen`, `--dangerously-bypass-approvals-and-sandbox` | `-c`/`--config` with a `model_*` key other than `model_reasoning_effort` (use `--reviewer-effort`) |
+
+The reviewer list leaves out everything that changes its tools, permissions or sandbox, so a
+reviewer stays as restricted as pair launches it. That includes `--mcp-config`: MCP servers start
+outside the tool permissions, and a config in the checkout under review could launch anything.
+Model and effort have their own flags, `--reviewer-model` and `--reviewer-effort`. Codex reviewer options must also work after
+`exec resume`, which has no `--profile` or `--search`.
 
 `--timeout` limits each reviewer round (default 900 seconds, maximum 86400); `--grace` is the wait
 between termination and forced termination (default 2 seconds, maximum 30). Executables are
@@ -292,11 +315,13 @@ lines. Pair needs no extra sandbox config, because every channel lives under `~/
 ## Commands
 
 The agents run `send` and `wait` themselves. You'll mostly use `init`, `status`, `history`, `clean` and `upgrade`.
+Run `pair help <command>` (or `pair <command> --help`) for a command's options and details.
 
 ```
 pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
 pair start --as <claude|codex> [--reviewer-model MODEL] [--reviewer-effort LEVEL]
-           [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+           [--reviewer-args="ARGS"] [--claude /path] [--codex /path] [--timeout seconds]
+           [--grace seconds] [-- AUTHOR_ARGS...]
 pair stop                  # stop this worktree's auto launcher and its managed agents
 pair wait --as <claude|codex> [--timeout seconds]   # prints "no message … yet" on timeout
 pair status

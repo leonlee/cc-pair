@@ -1620,7 +1620,8 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 
 const USAGE = `usage:
   pair start --as <claude|codex> [--reviewer-model MODEL] [--reviewer-effort LEVEL]
-             [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds]
+             [--reviewer-args="ARGS"] [--claude /path] [--codex /path] [--timeout seconds]
+             [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
@@ -1635,14 +1636,150 @@ const USAGE = `usage:
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
   pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)`;
 
+const HELP = `${USAGE}
+
+Run pair help <command> (or pair <command> --help) for its options and details.
+
+environment:
+  PAIR_HOME              root directory for channels (default ~/.pair)
+  PAIR_AGENT             default for --as
+  PAIR_MAX_ROUNDS        review rounds before a thread is escalated (default 3)
+  PAIR_KEEP              finished threads to keep: a number, or all (default 100)
+  PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
+  PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
+
+const AS_OPTION = "  --as <claude|codex>          who is running the command (default: $PAIR_AGENT)";
+
+const REGISTER_HELP = `usage: pair register | pair unregister
+
+Run by Codex in its own shell. register records this Codex session so the pair_listen tool from
+pair mcp wakes it when a message arrives. unregister stops the notifications; run it before
+pair start in this worktree.`;
+
+const COMMAND_HELP: Record<string, string> = {
+  start: `usage: pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]
+
+Auto mode (macOS and Linux). Opens the --as agent interactively as the author. Each review request
+starts the other agent as a non-interactive reviewer for one round, and the review comes back
+inline to the author's pair send. Run it in your own terminal, outside Claude or Codex, after
+pair init. A Codex session registered with pair register blocks it; run pair unregister first.
+
+options:
+  --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
+  --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
+  --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
+                               codex: none, minimal, low, medium, high, xhigh, max, ultra
+                               claude: low, medium, high, xhigh, max, ultracode
+  --reviewer-args="ARGS"       more reviewer options, split on spaces. A claude reviewer accepts
+                               --fallback-model, --max-budget-usd and --strict-mcp-config; a codex
+                               reviewer -c/--config model_*=VALUE (effort: --reviewer-effort).
+                               Nothing that changes its tools or sandbox. Use = since the value
+                               starts with a dash.
+  --claude /ABSOLUTE/PATH      claude executable (default: first claude on PATH)
+  --codex /ABSOLUTE/PATH       codex executable (default: first codex on PATH)
+  --timeout SECONDS            limit for each review round (default 900, max 86400)
+  --grace SECONDS              wait between terminating and killing a process (default 2, max 30)
+  -- AUTHOR_ARGS...            pass the rest to the interactive claude or codex. Only options that
+                               keep it an interactive session in this worktree are accepted, each
+                               with at most one value; others are refused with the supported list.
+
+  pair start --as claude --reviewer-effort high -- --model opus --permission-mode acceptEdits
+  pair start --as claude --reviewer-args="-c model_verbosity=low" -- --model opus
+  pair start --as codex --reviewer-args="--fallback-model sonnet" -- --model MODEL --search
+
+Inspect it from another terminal with pair status or pair ps -v; stop it with pair stop.`,
+  stop: `usage: pair stop
+
+Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.`,
+  send: `usage: pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <FILE|->
+
+Send a message on this worktree's channel. The body is read from FILE, or from stdin with -.
+  request    as the author, open a review thread (fails while your previous thread is still open)
+  review     as the reviewer, reply to the waiting request or response; needs --verdict
+  response   as the author, answer a review: what you fixed, rejected or deferred, and why
+
+options:
+${AS_OPTION}
+  --verdict <approve|changes>  required for review; approve closes the thread
+
+A thread is escalated when changes are still requested after PAIR_MAX_ROUNDS rounds (default 3).
+In auto mode, request and response wait for the managed review and print it.`,
+  wait: `usage: pair wait --as <claude|codex> [--timeout SECONDS]
+
+Wait until a message for --as arrives, print it with what to do next, and exit. On timeout it prints
+"pair: no message for <agent> yet." and exits 0. In auto mode, the author's wait retries a failed
+review round.
+
+options:
+${AS_OPTION}
+  --timeout SECONDS            give up after this long (default ${DEFAULT_WAIT_SECONDS})`,
+  status: `usage: pair status
+
+Show this worktree's channel, the installed version, each lane's state, whether the instruction
+files on disk are current, the Codex notification registration, and auto mode. It doesn't modify
+the worktree or the channel.`,
+  history: `usage: pair history [THREAD]
+
+With no argument, list finished threads, newest first. With THREAD (any unique part of a thread
+id), print that thread's messages.`,
+  clean: `usage: pair clean --keep N
+
+Delete all but the N newest finished threads. Pair also does this whenever a thread finishes,
+keeping PAIR_KEEP threads (default 100).`,
+  reset: `usage: pair reset [--as <claude|codex>] [--dry-run]
+
+Clear stale pending requests by moving whole lanes into a timestamped backup under the channel's
+resets/ directory, and print its path. Source files and finished history are left alone. Stop
+manual agent sessions first; it refuses while auto mode owns the worktree (run pair stop).
+
+options:
+  --as <claude|codex>          reset only the lane of requests this agent authored (default: both)
+  --dry-run                    show the lanes it would reset without changing anything`,
+  init: `usage: pair init
+
+Set up this worktree: create its channel and write the agent instructions (the pair section of
+AGENTS.md and .claude/skills/pair/SKILL.md), then print the sandbox and codex mcp add setup.
+Rerun it to refresh stale instructions; it keeps files that a newer pair wrote.`,
+  upgrade: `usage: pair upgrade
+
+Run in your own terminal. If npm has a newer version, install it globally, then refresh this
+worktree's instructions. Restart Claude Code and Codex afterwards.`,
+  uninit: `usage: pair uninit
+
+Undo pair init in this worktree: remove the pair section of AGENTS.md, the pair skill (unless you
+changed it), and the Codex session registration. Message history is kept.`,
+  register: REGISTER_HELP,
+  unregister: REGISTER_HELP,
+  mcp: `usage: pair mcp
+
+The stdio MCP server that gives Codex the pair_listen tool. Codex starts it; add it with the
+codex mcp add command that pair init prints.`,
+  ps: `usage: pair ps [-v]
+
+List running pair processes by worktree, including auto launchers and guardians.
+
+options:
+  -v, --verbose                show full command lines`,
+};
+
 async function main(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals, tokens } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "dry-run": { type: "boolean" } },
+    tokens: true,
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, "dry-run": { type: "boolean" } },
   });
   const [command, ...rest] = positionals;
-  if (values.help || command === "help") { console.log(USAGE); return 0; }
+  const terminator = tokens.find((token) => token.kind === "option-terminator");
+  const passthrough = terminator ? argv.slice(terminator.index + 1) : [];
+  if (values.help || command === "help") {
+    const topic = command === "help" ? rest[0] : command;
+    if (topic && !Object.hasOwn(COMMAND_HELP, topic)) {
+      throw new PairError(`unknown command "${topic}"; run pair help for the list`);
+    }
+    console.log(topic ? COMMAND_HELP[topic] : HELP);
+    return 0;
+  }
   if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
   const root = worktreeRoot();
   const channel = channelDir(root);
@@ -1681,6 +1818,7 @@ async function main(argv: string[]): Promise<number> {
           if (readRegistration(channel)) {
             throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
           }
+          if (rest.length !== passthrough.length) throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
           const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
           if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
@@ -1688,6 +1826,8 @@ async function main(argv: string[]): Promise<number> {
             author: me, root, channel, stateDir: stateDir(channel), entry: fileURLToPath(import.meta.url),
             claude: values.claude, codex: values.codex,
             reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
+            authorArgs: passthrough,
+            reviewerArgs: values["reviewer-args"]?.split(/\s+/).filter(Boolean) ?? [],
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,
             target: () => {

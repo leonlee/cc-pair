@@ -145,6 +145,18 @@ test("rejects bad input", () => {
   assert.match(run(["send", "nope", "--as", "claude", "-"], "x").out, /message type must be one of/);
 });
 
+test("help explains each command and its options", () => {
+  const { run, ok } = sandbox();
+  assert.match(ok(["--help"]), /pair help <command>[\s\S]*PAIR_KEEP/);
+  assert.equal(ok(["help", "start"]), ok(["start", "--help"]));
+  assert.match(ok(["start", "-h"]), /--reviewer-effort LEVEL[\s\S]*--grace SECONDS/);
+  assert.match(ok(["help", "send"]), /--verdict <approve\|changes>/);
+  assert.match(ok(["help", "unregister"]), /usage: pair register \| pair unregister/);
+  const unknown = run(["help", "nope"]);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.out, /unknown command "nope"/);
+});
+
 test("a symlinked path to the same repo shares one channel", () => {
   const { root, env } = sandbox();
   spawnSync("git", ["init", "-q"], { cwd: root });

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+`pair help <command>` and `pair <command> --help` explain each command and its options, and
+`pair --help` also lists the environment variables.
+
+`pair start --as claude|codex -- ARGS...` passes the arguments after `--` to the interactive
+author, for example `-- --model opus`, and `--reviewer-args="ARGS"` passes options to every
+reviewer round. Each accepts a listed set of options with at most one value each. The author's
+list excludes print, background, subcommand and directory-switching options; the reviewer's
+excludes anything that changes its tools, permissions or sandbox.
+
 ## 0.5.2 (2026-10-27)
 
 Auto mode hardening. In a managed reviewer, pair refuses every command except `wait`, `send`,
