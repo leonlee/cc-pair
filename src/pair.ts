@@ -1701,11 +1701,10 @@ const USAGE = `usage:
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
   pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
-  pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)`;
+  pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)
+  pair help [command]                                 (this list, or one command's options; same as pair <command> --help)`;
 
 const HELP = `${USAGE}
-
-Run pair help <command> (or pair <command> --help) for its options and details.
 
 environment:
   PAIR_HOME              root directory for channels (default ~/.pair)

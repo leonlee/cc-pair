@@ -242,6 +242,7 @@ pair reset [--as <claude|codex>] [--dry-run]                     # §8.1
 pair register | unregister   # run by Codex: let pair_listen notify this session
 pair mcp                     # MCP server for Codex (§3.1)
 pair ps [-v]
+pair help [command]          # same as pair <command> --help
 ```
 
 `pair status` reports the channel, worktree, version, each lane's state, and the instruction files
