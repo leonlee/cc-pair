@@ -1,7 +1,8 @@
 # cc-pair design
 
-Claude Code and Codex review each other's work. Each runs as a live session in its own terminal,
-and they talk through a shared directory that works like a chat channel.
+Claude Code and Codex review each other's work, talking through a shared directory that works like
+a chat channel. In manual mode, each runs as a live session in its own terminal. In auto mode,
+`pair start` runs the author interactively and starts the reviewer for each round.
 
 ## Decisions
 
@@ -10,8 +11,8 @@ and they talk through a shared directory that works like a chat channel.
 | Topology | Manual mode uses two live sessions. Opt-in `pair start --as <author>` owns an interactive author and starts a headless reviewer for each round. |
 | Roles | Symmetric. Either agent can author or review. |
 | Interface | One `pair` CLI (Node/TS). The agents learn it from a thin prompt: a Claude skill and an AGENTS.md section for Codex. |
-| Waiting | `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s, printing `no message … yet` and exiting 0 (agent UIs show any non-zero exit as a failure), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex can't do the same, because a finished background command doesn't resume it. Instead, pair's MCP server queues a fixed note into the Codex session when a message is pending (see Notifications), so an idle Codex makes no model calls. Codex never polls, because each check of a running command is a model call: without the MCP server it checks once and the user asks it to check again. Headless runs wait in the foreground. |
-| Pickup | The reviewer waits in a loop ("be my reviewer"): Claude on a background `pair wait`, Codex woken by `pair mcp`. |
+| Waiting | Manual mode. `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s, printing `no message … yet` and exiting 0 (agent UIs show any non-zero exit as a failure), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex can't do the same, because a finished background command doesn't resume it. Instead, pair's MCP server queues a fixed note into the Codex session when a message is pending (see Notifications), so an idle Codex makes no model calls. Codex never polls, because each check of a running command is a model call: without the MCP server it checks once and the user asks it to check again. Headless runs wait in the foreground. |
+| Pickup | Manual mode: the reviewer waits in a loop ("be my reviewer"), Claude on a background `pair wait`, Codex woken by `pair mcp`. Auto mode: the launcher starts a reviewer for each round. |
 | Request | The author's summary plus a list of files. The reviewer reads the files from the shared repo. |
 | Review | Numbered findings with severity, and a verdict of `approve` or `changes`. Multiple rounds. |
 | Disputes | Cap of 3 rounds (`PAIR_MAX_ROUNDS`). A review that still says `changes` at the cap marks the thread `escalated`, and both agents stop to ask the user. |
@@ -33,9 +34,13 @@ and they talk through a shared directory that works like a chat channel.
   archive/<iso-ts>-<rand>-<lane>-<approved|escalated>/
   codex.session                       # Codex session that pair_listen may notify (pair register)
 
-${XDG_STATE_HOME:-~/.local/state}/pair/<repo>-<hash>/   # written only by pair mcp, outside agent sandboxes
+${XDG_STATE_HOME:-~/.local/state}/pair/<repo>-<hash>/   # written by pair mcp and pair start, outside agent sandboxes
   codex.listen.log                    # what the MCP listener did, newest last; .1 holds the previous 256 KB
   claims/<thread>.<message file>.<session id>
+  auto.json                           # the live auto session's state; removed when it ends
+  auto.log                            # reviewer output, rotated at 256 KB
+  author.json                         # the author's last known conversation; survives pair stop
+  auto-<run>/bin/pair                 # the run's CLI wrapper ($PAIR_BIN); removed when it ends
 ```
 
 Each message has this frontmatter, written by the CLI: `from`, `type`, `round`, `verdict` (reviews only), and `status` (`open`/`approved`/`escalated`).
@@ -65,6 +70,9 @@ finished" means by when the thread's last message landed, not when it started, s
 finished always survives when `PAIR_KEEP` is at least 1. An invalid `PAIR_KEEP` makes `send` and `wait`
 fail before they touch any thread. If automatic cleanup itself fails (for example, an undeletable
 directory), `pair` prints a warning and still delivers the result or writes the request.
+Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read
+counts as closed, and a stale archive can only target its own, already-archived directory, so it
+never touches a newer thread.
 `pair history` lists finished threads, most recently finished first, and
 `pair history <id>` prints one transcript. `pair clean --keep N` deletes all but the N newest right
 away. The flag is required, so a bare `clean` deletes nothing. Neither kind of cleanup touches
@@ -148,93 +156,103 @@ turn: `pair wait --timeout 5` prints `no message` and Codex ends its turn.
 
 ## Auto sessions
 
-`pair start` runs in the user's terminal outside agent sandboxes. It resolves both CLI executables
-once, binds a private Unix control socket for this worktree/channel/state-directory combination,
-and forks an IPC guardian. A second launcher cannot bind that socket. `pair status` and `pair stop`
-contact the live owner; persisted PIDs are diagnostic only. State and rotating reviewer logs are
-kept beside the existing listener state. The short socket path is under a private
-`/tmp/pair-auto-<uid>/` directory (or `PAIR_AUTO_SOCKET_DIR`) because macOS limits Unix socket path
-length. The path is canonicalized, and a Claude author receives an exact, per-session
-`sandbox.network.allowUnixSockets` entry through `--settings`. No global settings file is edited.
+`pair start` runs in the user's terminal outside agent sandboxes. The launcher owns a private Unix
+control socket for the worktree and forks an IPC guardian, which owns the interactive author and
+each bounded reviewer.
 
-The guardian owns the interactive author and each bounded reviewer in separate Unix process groups.
-The author inherits the terminal streams; the guardian forwards resize signals. Since `setsid`
-removes its controlling terminal, `/dev/tty` consumers and Ctrl+Z job control are unsupported.
-The launcher saves tty state and restores it during cleanup, and the guardian does so if the
-launcher dies. Reviewers stream
-JSON events into the launcher, which records their session IDs. Each request/response from the auto
-author asks the owner to run one review round and waits for its result over the control socket.
-The owner validates that the message is pending in its author's lane. Duplicate requests for the
-same running message share the job. A saved session is resumed only within the same review thread;
-no `--last` session lookup is used.
+### Startup
 
-Optional `--reviewer-model` and `--reviewer-effort` overrides are applied on every reviewer launch,
-including resume. Codex receives `--model` and `--config model_reasoning_effort="LEVEL"`; Claude
-receives `--model` and `--effort`. Overrides never enter the interactive author's arguments or
-persist to either CLI's config. The live state reports these requested overrides and labels
-omitted values as `CLI default`, since the launcher does not resolve inherited provider settings.
-Known effort names are checked for the reviewer backend before startup; each CLI/model validates
-whether it supports the selected combination.
+Everything that can be checked without changing anything runs first: options, the forwarded
+argument allowlists, both executables (resolved once), the socket directory, the `--worktree` name
+and target, and the `--resume` record. Pair then prints the plan: the worktree, the author's
+conversation and the reviewer's settings. With a terminal on stdin and stdout and no `--yes`, it
+waits for Enter; readline releases stdin before the guardian launches the author.
 
-The reviewer receives instructions to read one message, send one verdict, and exit. Its CLI role
-and expected message are also checked by `pair send`/`wait`, avoiding an unrelated pending author
-duty in the opposite lane. Reviewer exits are checked against the on-disk verdict, not just the
-process exit code. Successful verdicts are returned through the author's original `send`, using
-the existing message formatting and archive behavior. This replaces idle model waits and MCP
-notifications in auto mode. An explicit author `wait` retries a failed pending round. Interactive
-Claude runs these blocking review commands as background Bash tasks and reads their completion
-output, avoiding the foreground tool timeout. Its author instructions are appended to the system
-prompt; generated instructions also tell agents to check their role after clear/compaction.
+A new `--worktree` is created on branch `NAME`, and pair verifies `refs/heads/NAME` afterwards, so
+a tag named `NAME` can't win. A reused one only has to belong to the repository (same top level and
+`--git-common-dir`); its HEAD, the full ref or the commit when detached, is shown in the summary and
+compared again after Enter, so pair never starts on a target other than the one confirmed. The
+agents follow pair's instructions for findings, severity and verdicts, so pair runs `pair init` in
+the session's checkout when either instruction file is missing there. The launcher then changes to
+that checkout, so `pair ps` groups it there, and binds the socket. A second launcher can't bind it;
+`pair status` and `pair stop` contact the live owner, and persisted PIDs are diagnostic only.
 
-A failed round's error includes the last error string the reviewer reported in its JSON stream
-(Codex `error` or `turn.failed`, Claude `result` with `is_error`). It is capped at 4000 characters,
-control characters are escaped, and it is labeled as reviewer output; the verdict on disk still
-decides whether the round succeeded. When a model or effort override was set, the error names it
-and says that `pair wait` retries with it, since only a new `pair start` can change it.
+The socket lives under a private `/tmp/pair-auto-<uid>/` (or `PAIR_AUTO_SOCKET_DIR`) because macOS
+limits Unix socket path length. The path is canonicalized, and a Claude author receives an exact,
+per-session `sandbox.network.allowUnixSockets` entry through `--settings`; no settings file is
+edited. A Codex author always gets `--cd <worktree>`, because a resumed Codex session otherwise uses,
+or offers, the directory it was recorded in. If the author can't be spawned at all, pair says why.
 
-The agents follow pair's instructions for findings, severity and verdicts, so `pair start` runs
-`pair init` in the session's checkout when either instruction file is missing there, whether or not
-the checkout it was started from has them. A Codex author always gets `--cd <worktree>`, because a
-resumed Codex session otherwise uses, or offers, the directory it was recorded in.
+### Review rounds
 
-Before it creates anything (a worktree, instruction files, the author record, the socket),
-`pair start` prints the plan: the worktree, the author's conversation and the reviewer's settings.
-With a terminal on stdin and stdout and no `--yes`, it then waits for Enter; readline releases
-stdin before the guardian launches the author. The launcher then changes to the session's worktree,
-so `pair ps` groups it there.
+Each request or response from the author asks the owner, over the socket, to run one review round,
+and waits for its result. The owner checks that the message is pending in its author's lane;
+duplicate requests for the same running message share the job. The reviewer is told to read one
+message, send one verdict and exit, and `pair send`/`wait` also check its role and expected message,
+so an unrelated author duty in the opposite lane can't be picked up. The verdict on disk decides
+success, not the exit code. A successful verdict returns through the author's original `send`, with
+the usual formatting and archiving; this replaces idle waits and MCP notifications. Interactive
+Claude runs these blocking commands as background Bash tasks, avoiding the foreground tool timeout.
 
-The author's conversation ID comes from pair before launch when it can: pair passes `--session-id`
-to a new Claude conversation, and keeps the ID of Claude's `--resume <uuid>` or Codex's
-`resume <uuid>`. Codex is resumed only by ID, since a name, a search or `--last` could pick another
-directory's conversation. In every other case (a new Codex conversation, `--continue`,
-`--fork-session`, a `--resume` name or search term), the author's review request carries the ID
-that its CLI sets for the commands it runs (`CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`). The
-owner accepts it only as a UUID with this run's ID, and the launcher removes both variables from
-the author's inherited environment so a stale value can't be reported. Pair refuses `--continue`
-together with `--resume`. `author.json` in the state directory (written atomically, mode 0600) keeps
-the last known ID and a restart command that starts with `cd` to the worktree. It survives
-`pair stop`, and it is presented as recovery data, never as proof that the conversation still
-exists. `pair start --resume` is the explicit way to use it: it adds the recorded ID as the
-author's selector only when the record is valid, is for the same CLI and has a known ID, and it
-refuses author arguments that already select a conversation. A plain `pair start`, or one with
-`--continue`, never resumes the record by itself. Claude records a conversation's system prompt on its first request and reuses it on resume,
-so the author prompt names `"$PAIR_BIN"` rather than the run directory. Every launch also sends a
-first user message that names `"$PAIR_BIN"`, for conversations whose instructions were recorded by
-an older pair. The Claude reviewer keeps the absolute wrapper path, because its `--allowedTools`
-rules match the literal command, and its sessions are resumed only within one run.
+Reviewers stream JSON events into the launcher, which records their session IDs. A saved session is
+resumed only within the same review thread; no `--last` lookup is used. `--reviewer-model` and
+`--reviewer-effort` apply to every launch, including resume: Codex receives `--model` and
+`--config model_reasoning_effort="LEVEL"`, Claude `--model` and `--effort`. They never reach the
+author or either CLI's config. Status shows the requested values, with `CLI default` for omitted
+ones, since the launcher does not resolve inherited settings. Effort names are checked per backend
+before startup; each CLI decides whether it supports the combination.
 
-Every termination path stops accepting jobs, terminates owned groups, escalates to SIGKILL after
-the configured grace period, and observes the CLI exit and stream closure. Even a successful CLI
-exit triggers cleanup of remaining group members. A private IPC disconnect cleans up if the
-launcher dies; a monotonic heartbeat deadline covers a hung launcher without counting wall-clock
-jumps or suspended wall-clock time. The guardian itself exits after its
-jobs are collected. The launcher also tracks live child identities for emergency cleanup if the
-guardian fails. No cleanup loads a PID from disk and signals it, and no command kills by agent name.
+A failed round keeps the request, and an explicit author `wait` retries it. Its error includes the
+last error the reviewer reported in its JSON stream (Codex `error` or `turn.failed`; Claude's failed
+`result`, from `errors[]` and `result`), capped at 4000 characters, with control characters escaped
+and labeled as reviewer output. When a model or effort override is set, the error names it and says
+that a retry keeps it, since only a new `pair start` can change it.
 
-This is process-group supervision on macOS/Linux, not OS containment: descendants that create their
-own sessions/groups can escape it, and killing both supervisors can leave a stale control socket.
-Stale sockets are reported for manual inspection, never silently replaced. Windows auto mode is
-not yet supported. Manual mode and its notification lifecycle remain unchanged.
+### Author conversations
+
+Pair records the author's conversation so a restart can resume it. The ID is known before launch
+when pair can set or read it: pair passes `--session-id` to a new Claude conversation, and keeps the
+ID of Claude's `--resume <uuid>` or Codex's `resume <uuid>`. Codex is resumed only by ID, since a
+name, a search or `--last` could pick another directory's conversation. In every other case (a new
+Codex conversation, `--continue`, `--fork-session`, a `--resume` name or search term), the author's
+review request carries the ID its CLI sets for the commands it runs, `CLAUDE_CODE_SESSION_ID` or
+`CODEX_THREAD_ID`. The owner accepts it only as a UUID with this run's ID, and the launcher removes
+both variables from the author's inherited environment so a stale value can't be reported. This
+also follows the author through a `/clear`. `--continue` together with `--resume` is refused.
+
+`author.json` (written atomically, mode 0600, validated on read) keeps the last known ID, how it was
+learned, and a restart command that starts with `cd` to the worktree and drops `--worktree`. It
+survives `pair stop` and is presented as recovery data, never as proof that the conversation still
+exists. `pair start --resume` is the explicit way to use it: it adds the recorded ID as the author's
+selector only when the record is valid, is for the same CLI and has a known ID, and it refuses
+author arguments that already select a conversation. A plain `pair start`, or one with
+`--continue`, never resumes the record by itself.
+
+Claude records a conversation's system prompt on its first request and reuses it on resume, so the
+author prompt names `"$PAIR_BIN"` rather than the run directory. Every launch also sends a first
+user message naming `"$PAIR_BIN"`, for conversations whose instructions an older pair recorded. The
+Claude reviewer keeps the absolute wrapper path, because its `--allowedTools` rules match the literal
+command, and its sessions are resumed only within one run.
+
+### Supervision
+
+The guardian runs the author and each reviewer in separate Unix process groups. The author inherits
+the terminal streams, and the guardian forwards resize signals. Since `setsid` removes its
+controlling terminal, `/dev/tty` consumers and Ctrl+Z job control are unsupported. The launcher saves
+the tty state and restores it during cleanup, and the guardian does so if the launcher dies.
+
+Every termination path stops accepting jobs, terminates owned groups, escalates to SIGKILL after the
+grace period, and observes the CLI exit and stream closure. Even a successful CLI exit triggers
+cleanup of the rest of its group. A private IPC disconnect cleans up if the launcher dies; a
+monotonic heartbeat deadline covers a hung launcher without counting wall-clock jumps or suspended
+time. The guardian exits after its jobs are collected, and the launcher tracks live child identities
+for emergency cleanup if the guardian fails. No cleanup loads a PID from disk and signals it, and no
+command kills by agent name.
+
+This is process-group supervision on macOS and Linux, not OS containment: descendants that create
+their own sessions or groups can escape it, and killing both supervisors can leave a stale control
+socket. Stale sockets are reported for manual inspection, never silently replaced. Windows auto mode
+is not supported.
 
 ## Manual reset
 
@@ -253,42 +271,11 @@ before reset. On macOS/Linux, reset exclusively binds the auto-mode control sock
 so it refuses live or stale ownership and serializes with `pair start`. `--dry-run` only inspects
 the pending lanes and creates neither backups nor an ownership socket, even while auto mode runs.
 
-## Usage
-
-```
-npm install && npm link                       # npm install builds via prepare; npm link provides `pair`
-cd <repo> && pair init                        # installs the skill and AGENTS.md section, prints sandbox config
-```
-
-Then add the printed paths to both sandboxes: Codex `writable_roots`, Claude
-`sandbox.filesystem.allowWrite`. In the reviewer terminal say "be my reviewer". In the author
-terminal, finish a task and say "ask for review".
-
-```
-pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
-pair wait --as <agent> [--timeout s]
-pair status
-pair history [thread-id]
-pair clean --keep N
-pair reset [--as <agent>] [--dry-run]
-pair init
-pair uninit
-pair register | unregister
-pair mcp
-```
-
 ## Known limits
 
 - A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a recovery hint; `pair reset` can back up and clear it without parsing the old files.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
-- Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read counts as closed. A stale archive can only target its own, already-archived directory, so it never touches a newer thread.
-- Notifications are verified end to end with Codex CLI 0.162.1 on the shared app-server daemon. A registered session that had ended its turn was woken about 1s after Claude's request, then reviewed and replied in one turn. Other cases also verified:
-  - A message sent while Codex was closed was queued about 1s after `pair_listen` on resume.
-  - `pair unregister` stopped the watch.
-  - A fork's `register` stopped the original session's watch within 40ms.
-  - Two TUIs on one session share one MCP process and got one note.
-  - Two worktrees each woke only their own session.
-  - With Codex as the author, a `changes` review and the final approval each woke it once, and its `pair wait` archived the approved thread.
-  - Approval policy `never` makes `pair_listen` fail, and Codex reports it and stops without polling.
-- The MCP server is a child of the app-server daemon, not of the TUI. After the last TUI on a session quit, it ran 1–2 more minutes, until the daemon unloaded the session. A message in that gap still wakes the session with no TUI attached. The ChatGPT desktop app runs its own app-server, which starts its own `pair mcp`; waking its sessions worked, with `PAIR_CODEX` pointing at the separately installed CLI. IDE sessions, `--no-daemon`, and `--remote` are untested.
-- Completion-driven waiting is verified only for interactive Claude Code sessions, with waits of up to a few minutes. A full hour is untested. Headless `claude -p` ends background commands after its final result, so the prompt falls back to a foreground wait. Codex was tried with one long `pair wait` that it kept checking. Its built-in instructions cap each check at about 60 seconds, so an idle Codex made a model call every minute, enough to run a workspace out of credits. A finished background command doesn't resume Codex (measured with CLI 0.162.1), which is why Codex uses `pair mcp` instead.
+- Notifications were verified end to end with Codex CLI 0.162.1 and 0.163.0 on the shared app-server daemon, and with the ChatGPT desktop app, which runs its own app-server and starts its own `pair mcp` (with `PAIR_CODEX` pointing at the separately installed CLI). IDE sessions, `--no-daemon` and `--remote` are untested.
+- Approval policy `never` makes `pair_listen` fail; Codex reports it and stops without polling.
+- The MCP server is a child of the app-server daemon, not of the TUI, so notifications continue for 1–2 minutes after the last TUI on a session quits, until the daemon unloads it. A message in that gap starts a turn with no TUI attached.
+- Completion-driven waiting is verified only for interactive Claude Code sessions. Headless `claude -p` ends background commands after its final result, so the prompt falls back to a foreground wait. A finished background command doesn't resume Codex, and a long `pair wait` that Codex keeps checking costs a model call per check, which is why Codex uses `pair mcp`.
