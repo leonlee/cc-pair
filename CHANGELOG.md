@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2 (2026-10-30)
+
+`pair start --resume` resumes the author conversation pair last recorded for the checkout the
+session runs in, so a restart no longer means copying the ID that `pair stop` prints:
+`pair start --as claude --worktree at-1810 --resume`. It uses the record only when it's for the
+same CLI and has a known ID. It refuses a worktree that doesn't exist yet, and author arguments
+that already select a conversation. The summary names the conversation and when it was recorded.
+Only the conversation is reused; the other options come from the command line. A plain
+`pair start` still starts a new conversation.
+
 ## 0.7.1 (2026-10-30)
 
 `pair start` runs `pair init` wherever the session runs if pair's instructions are missing there,
