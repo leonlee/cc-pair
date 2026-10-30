@@ -115,8 +115,9 @@ Start Claude Code and Codex in separate terminals in the same worktree.
 
 ## 5. Auto mode
 
-Supported on macOS and Linux. Both CLIs MUST be installed and signed in, and `pair init` MUST have
-run. `pair start` MUST be run in your own terminal, outside an agent session:
+Supported on macOS and Linux. Both CLIs MUST be installed and signed in. `pair start` MUST be run
+in your own terminal, outside an agent session. If the session's checkout lacks pair's instructions,
+`pair start` runs `pair init` there first:
 
 ```sh
 pair start --as claude    # interactive Claude, automatic Codex reviewer
@@ -158,17 +159,19 @@ unsupported model/effort combination fails the round and keeps the request.
 
 ### 5.2. Worktrees
 
-`--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes) on
-branch `NAME`:
+`--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes):
 
-- If the path does not exist, pair runs `git worktree add`. An existing local branch is checked
-  out. A branch found only on remotes is created to track it: on one remote, that remote; on
-  several, the one named by `checkout.defaultRemote`, and pair refuses if none is. Otherwise a new
-  branch starts at `HEAD`, so uncommitted changes stay in the current checkout. A tag named `NAME`
-  is never checked out instead.
-- If the path exists, it MUST be a worktree of this repository with `refs/heads/NAME` checked out.
-  Pair never switches it.
-- If the current checkout has pair set up, pair runs `pair init` in the worktree.
+- If the path does not exist, pair creates it on branch `NAME` with `git worktree add`. An existing
+  local branch is checked out. A branch found only on remotes is created to track it: on one
+  remote, that remote; on several, the one named by `checkout.defaultRemote`, and pair refuses if
+  none is. Otherwise a new branch starts at `HEAD`, so uncommitted changes stay in the current
+  checkout. A tag named `NAME` is never checked out instead.
+- If the path exists, it MUST be a worktree of this repository. The session runs on whatever it
+  has checked out, a branch that need not be `NAME` (it may have been renamed) or a detached
+  `HEAD`; the summary shows which.
+  Pair never switches it, and refuses to start if it changes while the summary waits for Enter.
+- If the worktree lacks pair's instructions (a new branch has only what was committed), pair runs
+  `pair init` there. The current checkout is left alone.
 - The channel, author and reviewer all belong to the worktree. `pair status` and `pair stop` MUST be
   run there. The worktree remains after the session; remove it with `git worktree remove`.
 
@@ -192,12 +195,15 @@ session (`-p`, `--bg`), select a Codex subcommand, move the author away from its
 `--worktree`), or replace settings pair passes. The reviewer list excludes everything that changes
 its tools, permissions or sandbox (§10). Codex reviewer options must also work with `exec resume`.
 
-For a Claude author, pair records the conversation's ID only when it knows it: a new conversation
-gets an ID pair picks (`--session-id`), and `--resume ID` keeps that ID. With `--continue`,
-`--fork-session`, or a `--resume` name or search term, Claude picks the conversation, and pair
-records it as unknown. `--continue` picks the newest conversation in the directory the session runs
-in, which is the worktree, not where you typed the command. `--continue` and `--resume` together
-are refused. Pair can't learn a Codex author's ID.
+A Codex author resumes a conversation with `-- resume <UUID> [options]`, by ID only; `resume`
+MUST come first. Pair records the author's conversation ID when it knows it. A new Claude
+conversation gets an ID pair picks (`--session-id`), and a resumed one keeps the ID it was given.
+Otherwise (a new Codex conversation, or Claude's `--continue`, `--fork-session`, or `--resume` with
+a name or search term), the CLI picks the conversation, and pair learns its ID from the author's
+first review request, which carries the ID the CLI sets for the author's commands
+(`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`). `--continue` picks the newest conversation in the
+directory the session runs in, which is the worktree, not where you typed the command. `--continue`
+and `--resume` together are refused.
 
 ### 5.4. Control and recovery
 
@@ -215,10 +221,12 @@ pair stop      # stop the author, its reviewers and their tools
   own error message, shortened and with control characters escaped. The author retries the round
   with `pair wait --as <author>` in the same session, with the same reviewer settings. To change
   `--reviewer-model` or `--reviewer-effort`, stop the session and start it again.
-- `pair status` and `pair stop` show the Claude author's last known conversation ID (§5.3) and a
-  command that starts the session again in this worktree and resumes it, for example
-  `cd /path/to/worktree && pair start --as claude -- --resume <id>`. Change any option in it before
-  running it. This is recovery data: pair does not check that the conversation still exists.
+- `pair status` and `pair stop` show the author's last known conversation ID (§5.3) and a command
+  that starts the session again in this worktree and resumes it, for example
+  `cd /path/to/worktree && pair start --as claude -- --resume <id>`, or `-- resume <id>` for Codex.
+  Change any option in it before running it. This is recovery data: pair does not check that the
+  conversation still exists.
+- If the author can't be started at all, `pair start` says why and exits 1.
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,

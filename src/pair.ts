@@ -195,6 +195,8 @@ interface WorktreePlan {
   name: string;
   path: string;
   add?: string[];
+  /** A reused worktree's HEAD as the summary showed it: refs/heads/BRANCH, or the commit when detached. */
+  head?: string;
 }
 
 function git(args: string[], cwd: string): SpawnSyncReturns<string> {
@@ -205,26 +207,29 @@ function git(args: string[], cwd: string): SpawnSyncReturns<string> {
   return result;
 }
 
-// feature/x and feature-x share a path, a reused worktree may have been switched, and a tag named NAME
-// can win over a branch. The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME.
-function checkBranch(path: string, name: string, what: string): void {
-  const head = git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
-  if (head !== `refs/heads/${name}`) {
-    const actual = head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
-    throw new PairError(`${path} ${what} ${actual} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
-  }
+// The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME. A detached HEAD
+// has no branch to name, so its commit is its identity.
+function headOf(path: string): string {
+  return git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim() || git(["rev-parse", "--verify", "--quiet", "HEAD"], path).stdout.trim();
 }
 
-/** An existing path must be a worktree of this repository with NAME checked out; pair never switches it. */
-function checkReused(root: string, path: string, name: string): void {
+function describeHead(head: string): string {
+  return head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : `a detached HEAD at ${head.slice(0, 12)}`;
+}
+
+/**
+ * An existing path must be a worktree of this repository; it runs on whatever it has checked out
+ * (people rename a ticket's branch), which the summary shows. Pair never switches it. Returns its HEAD.
+ */
+function checkReused(root: string, path: string): string {
   const top = gitPath("--show-toplevel", path);
   if (!top || realpathSync(top) !== realpathSync(path) || gitPath("--git-common-dir", path) !== gitPath("--git-common-dir", root)) {
     throw new PairError(`${path} already exists and isn't a worktree of this repository`);
   }
-  checkBranch(path, name, "has");
+  return headOf(path);
 }
 
-/** ../<repo>-NAME on branch NAME, created from HEAD on first use and reused after. Checks only; changes nothing. */
+/** ../<repo>-NAME, created on branch NAME on first use and reused after. Checks only; changes nothing. */
 function planWorktree(root: string, name: string): WorktreePlan {
   if (!gitPath("--show-toplevel")) {
     throw new PairError("--worktree needs a git repository");
@@ -235,8 +240,7 @@ function planWorktree(root: string, name: string): WorktreePlan {
   }
   const path = join(dirname(root), `${basename(root)}-${name.replaceAll("/", "-")}`);
   if (existsSync(path)) {
-    checkReused(root, path, name);
-    return { name, path };
+    return { name, path, head: checkReused(root, path) };
   }
   const ok = (ref: string) => git(["rev-parse", "--verify", "--quiet", ref], root).status === 0;
   if (ok(`refs/heads/${name}`)) {
@@ -252,7 +256,7 @@ function planWorktree(root: string, name: string): WorktreePlan {
   return { name, path, add: remote ? ["--track", "-b", name, path, `refs/remotes/${remote}/${name}`] : ["-b", name, path] };
 }
 
-/** Creates the planned worktree if needed and runs pair init there; returns its real path. */
+/** Creates the planned worktree if needed, or checks the reused one again; returns its real path. */
 function openWorktree(root: string, plan: WorktreePlan): string {
   const { name, path } = plan;
   if (plan.add) {
@@ -260,22 +264,27 @@ function openWorktree(root: string, plan: WorktreePlan): string {
     if (add.error || add.status !== 0) {
       throw new PairError(`git worktree add ${path} failed`);
     }
-    checkBranch(path, name, "was created with");
+    // A tag named NAME can win over a branch.
+    const head = headOf(path);
+    if (head !== `refs/heads/${name}`) {
+      throw new PairError(`${path} was created with ${describeHead(head)} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
+    }
   } else {
-    checkReused(root, path, name); // again: it may have changed while pair start waited for Enter
-  }
-  const worktree = realpathSync(path);
-  // Instruction files that aren't committed on the branch only exist in the checkout pair init ran in.
-  // Checked on reuse too, in case an earlier run stopped before init.
-  const setUp = [instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()), instructionState(join(root, "AGENTS.md"), codexSection(), true)];
-  if (setUp.some((state) => state !== "missing")) {
-    const wrote = init(channelDir(worktree), worktree).split("\n").filter((line) => line.startsWith("wrote: "));
-    if (wrote.length) {
-      console.error(wrote.map((line) => `pair: ${line}`).join("\n"));
+    // Again: it may have been switched or replaced while pair start waited for Enter.
+    const head = checkReused(root, path);
+    if (head !== plan.head) {
+      throw new PairError(`${path} changed while pair start waited: it has ${describeHead(head)} checked out now, not ${describeHead(plan.head ?? "")}; run pair start again`);
     }
   }
+  const worktree = realpathSync(path);
   console.error(`pair: this session runs in worktree ${worktree}; run pair status and pair stop there`);
   return worktree;
+}
+
+/** Whether the agents in root lack pair's instructions; a new branch has only what was committed. */
+function needsInit(root: string): boolean {
+  return instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()) === "missing"
+    || instructionState(join(root, "AGENTS.md"), codexSection(), true) === "missing";
 }
 
 /** Enter or y accepts; anything else, Ctrl-C or end of input cancels. Releases stdin before the author takes the terminal. */
@@ -1768,18 +1777,19 @@ const COMMAND_HELP: Record<string, string> = {
 
 Auto mode (macOS and Linux). Opens the --as agent interactively as the author. Each review request
 starts the other agent as a non-interactive reviewer for one round, and the review comes back
-inline to the author's pair send. Run it in your own terminal, outside Claude or Codex, after
-pair init. A Codex session registered with pair register blocks it; run pair unregister first.
+inline to the author's pair send. Run it in your own terminal, outside Claude or Codex; it runs
+pair init where the session runs if pair's instructions are missing there. A Codex session
+registered with pair register blocks it; run pair unregister first.
 It first prints where it will run, the author's session and the reviewer's settings, and in a
 terminal waits for Enter.
 
 options:
   --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
-  --worktree NAME              run everything in the git worktree ../<repo>-NAME on branch NAME.
-                               The first run creates them (a new branch from HEAD, so uncommitted
-                               changes stay here, or one tracking a remote branch NAME) and runs
-                               pair init there. Later runs reuse it
-                               while it still has branch NAME checked out.
+  --worktree NAME              run everything in the git worktree ../<repo>-NAME.
+                               The first run creates it on branch NAME (a new branch from HEAD, so
+                               uncommitted changes stay here, or one tracking a remote NAME). Later runs
+                               reuse it with whatever it has checked out then (a branch or a
+                               detached HEAD); the summary shows it.
   -y, --yes                    start without waiting for Enter
   --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
@@ -1797,10 +1807,12 @@ options:
   -- AUTHOR_ARGS...            pass the rest to the interactive claude or codex. Only options that
                                keep it an interactive session in this worktree are accepted, each
                                with at most one value; others are refused with the supported list.
-                               A new claude conversation gets an ID pair picks; pair status and
-                               pair stop show it with a command that resumes it. --resume ID keeps
-                               that ID; with --continue, --fork-session or a --resume name, Claude
-                               picks the conversation and pair can't name it.
+                               A codex author resumes with -- resume <UUID> [options]. pair status
+                               and pair stop show the author's conversation ID with a command that
+                               resumes it: a new claude conversation gets an ID pair picks, and a
+                               resumed one keeps its ID. Otherwise (a new codex conversation,
+                               --continue, --fork-session, a --resume name), pair learns the ID from
+                               the author's first review request.
 
   pair start --as claude --reviewer-effort high -- --model opus --permission-mode acceptEdits
   pair start --as codex --worktree feature/login
@@ -1926,7 +1938,9 @@ async function main(argv: string[]): Promise<number> {
     const state = channelAccess(channel, () => stateOf(listMessages(thread)));
     if (state.kind !== "awaiting-review") return false;
     try {
-      await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file }, 24 * 60 * 60 * 1000);
+      // The author's own conversation ID, which its CLI sets for the commands it runs; the owner records it for pair stop.
+      const author = me === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : process.env.CODEX_THREAD_ID;
+      await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file, author }, 24 * 60 * 60 * 1000);
     } catch (error) {
       if (hasCode(error, "EPERM", "EACCES")) {
         throw new PairError(`managed review cannot connect to ${autoSocketPath(stateDir(channel))}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
@@ -1958,7 +1972,7 @@ async function main(argv: string[]): Promise<number> {
           const plan = values.worktree === undefined ? undefined : planWorktree(root, values.worktree);
           const reviewer = me === "claude" ? "codex" : "claude";
           console.error([
-            `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? "new" : "existing"} worktree, branch ${plan.name})` : ""}`,
+            `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
             `pair:   author ${me} · session ${describeSession(session)}`,
             `pair:   reviewer ${reviewer} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
           ].join("\n"));
@@ -1967,6 +1981,11 @@ async function main(argv: string[]): Promise<number> {
             throw new PairError("pair start cancelled; nothing was started");
           }
           const startRoot = plan ? openWorktree(root, plan) : root;
+          // The agents follow these instructions (finding, severity and verdict rules), so auto mode can't do without them.
+          if (needsInit(startRoot)) {
+            const wrote = init(channelDir(startRoot), startRoot).split("\n").filter((line) => line.startsWith("wrote: "));
+            console.error(wrote.map((line) => `pair: ${line}`).join("\n"));
+          }
           process.chdir(startRoot); // so pair ps groups this launcher with the worktree it runs
           const startChannel = channelDir(startRoot);
           // Its listener would wake that session for either lane, and its pair wait could take the auto author's reviews.
