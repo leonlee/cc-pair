@@ -167,8 +167,9 @@ branch `NAME`:
   several, the one named by `checkout.defaultRemote`, and pair refuses if none is. Otherwise a new
   branch starts at `HEAD`, so uncommitted changes stay in the current checkout. A tag named `NAME`
   is never checked out instead.
-- If the path exists, it MUST be a worktree of this repository with `refs/heads/NAME` checked out.
-  Pair never switches it.
+- If the path exists, it MUST be a worktree of this repository. The session runs on whatever it
+  has checked out, which need not be `NAME` (a branch may have been renamed); the summary shows it.
+  Pair never switches it, and refuses to start if it changes while the summary waits for Enter.
 - If the worktree lacks pair's instructions (a new branch has only what was committed), pair runs
   `pair init` there. The current checkout is left alone.
 - The channel, author and reviewer all belong to the worktree. `pair status` and `pair stop` MUST be

@@ -483,12 +483,15 @@ test("auto start --worktree checks its input first, and reuses an existing workt
     absent("bad executable");
     assert.match(run(root, ["start", "--as", "claude", "--claude", process.execPath, "--codex", process.execPath, "--worktree", "feat"], { PAIR_AUTO_SOCKET_DIR: "relative" }).stderr, /PAIR_AUTO_SOCKET_DIR must be an absolute path/);
     absent("bad socket directory");
-    // A reused worktree must be on NAME: fix/one and fix-one share a path, and a worktree can be switched.
+    // A reused worktree runs on whatever it has checked out (a ticket's branch gets renamed), and the summary
+    // says what that is: fix/one and fix-one share a path, and a worktree can be switched or detached.
+    // The registration stops each start after the summary and init, before any agent.
     git("worktree", "add", "-q", "-b", "fix/one", join(base, "repo-fix-one"));
-    assert.match(start("--worktree", "fix-one").stderr, /repo-fix-one has branch fix\/one checked out, not fix-one/);
-    assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/fix-one"], { cwd: root }).status, 1);
+    assert.equal(run(join(base, "repo-fix-one"), ["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
+    assert.match(start("--worktree", "fix-one").stderr, /repo-fix-one \(existing worktree, branch fix\/one\)[\s\S]*a manual Codex session is registered here/);
+    assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/fix-one"], { cwd: root }).status, 1, "nothing is switched or created");
     assert.equal(spawnSync("git", ["checkout", "-q", "--detach"], { cwd: join(base, "repo-fix-one") }).status, 0);
-    assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one has a detached HEAD checked out, not fix\/one/);
+    assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one \(existing worktree, a detached HEAD\)[\s\S]*a manual Codex session is registered here/);
     // A branch on several remotes needs checkout.defaultRemote; nothing is created without it.
     for (const remote of ["r1", "r2"]) {
       assert.equal(spawnSync("git", ["init", "-q", "--bare", join(base, `${remote}.git`)]).status, 0);
@@ -900,8 +903,8 @@ finally:
     // A reused worktree switched while the prompt waits is checked again before anything runs there.
     git("worktree", "add", "-q", "-b", "feat", `${root}-feat`);
     git("branch", "other");
-    const switched = await start("\r", "checked out, not feat", `git -C '${root}-feat' switch -q other`, "--worktree", "feat");
-    assert.match(switched, /\(existing worktree, branch feat\)[\s\S]*-feat has branch other checked out, not feat[\s\S]*EXIT 1/);
+    const switched = await start("\r", "run pair start again", `git -C '${root}-feat' switch -q other`, "--worktree", "feat");
+    assert.match(switched, /\(existing worktree, branch feat\)[\s\S]*-feat changed while pair start waited: it has branch other checked out now, not branch feat; run pair start again[\s\S]*EXIT 1/);
     assert.doesNotMatch(switched, /TTY_READY/, "no author starts");
     assert.ok(!existsSync(join(root, "state")), "no session record");
     const started = await start("\r", "TTY_READY", "");

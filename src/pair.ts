@@ -195,6 +195,8 @@ interface WorktreePlan {
   name: string;
   path: string;
   add?: string[];
+  /** A reused worktree's HEAD as the summary showed it: refs/heads/BRANCH, or empty when detached. */
+  head?: string;
 }
 
 function git(args: string[], cwd: string): SpawnSyncReturns<string> {
@@ -205,26 +207,28 @@ function git(args: string[], cwd: string): SpawnSyncReturns<string> {
   return result;
 }
 
-// feature/x and feature-x share a path, a reused worktree may have been switched, and a tag named NAME
-// can win over a branch. The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME.
-function checkBranch(path: string, name: string, what: string): void {
-  const head = git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
-  if (head !== `refs/heads/${name}`) {
-    const actual = head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
-    throw new PairError(`${path} ${what} ${actual} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
-  }
+// The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME.
+function headOf(path: string): string {
+  return git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
 }
 
-/** An existing path must be a worktree of this repository with NAME checked out; pair never switches it. */
-function checkReused(root: string, path: string, name: string): void {
+function describeHead(head: string): string {
+  return head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
+}
+
+/**
+ * An existing path must be a worktree of this repository; it runs on whatever it has checked out
+ * (people rename a ticket's branch), which the summary shows. Pair never switches it. Returns its HEAD.
+ */
+function checkReused(root: string, path: string): string {
   const top = gitPath("--show-toplevel", path);
   if (!top || realpathSync(top) !== realpathSync(path) || gitPath("--git-common-dir", path) !== gitPath("--git-common-dir", root)) {
     throw new PairError(`${path} already exists and isn't a worktree of this repository`);
   }
-  checkBranch(path, name, "has");
+  return headOf(path);
 }
 
-/** ../<repo>-NAME on branch NAME, created from HEAD on first use and reused after. Checks only; changes nothing. */
+/** ../<repo>-NAME, created on branch NAME on first use and reused after. Checks only; changes nothing. */
 function planWorktree(root: string, name: string): WorktreePlan {
   if (!gitPath("--show-toplevel")) {
     throw new PairError("--worktree needs a git repository");
@@ -235,8 +239,7 @@ function planWorktree(root: string, name: string): WorktreePlan {
   }
   const path = join(dirname(root), `${basename(root)}-${name.replaceAll("/", "-")}`);
   if (existsSync(path)) {
-    checkReused(root, path, name);
-    return { name, path };
+    return { name, path, head: checkReused(root, path) };
   }
   const ok = (ref: string) => git(["rev-parse", "--verify", "--quiet", ref], root).status === 0;
   if (ok(`refs/heads/${name}`)) {
@@ -260,9 +263,17 @@ function openWorktree(root: string, plan: WorktreePlan): string {
     if (add.error || add.status !== 0) {
       throw new PairError(`git worktree add ${path} failed`);
     }
-    checkBranch(path, name, "was created with");
+    // A tag named NAME can win over a branch.
+    const head = headOf(path);
+    if (head !== `refs/heads/${name}`) {
+      throw new PairError(`${path} was created with ${describeHead(head)} checked out, not ${name}; switch it there yourself, or pick another --worktree name`);
+    }
   } else {
-    checkReused(root, path, name); // again: it may have changed while pair start waited for Enter
+    // Again: it may have been switched or replaced while pair start waited for Enter.
+    const head = checkReused(root, path);
+    if (head !== plan.head) {
+      throw new PairError(`${path} changed while pair start waited: it has ${describeHead(head)} checked out now, not ${describeHead(plan.head ?? "")}; run pair start again`);
+    }
   }
   const worktree = realpathSync(path);
   console.error(`pair: this session runs in worktree ${worktree}; run pair status and pair stop there`);
@@ -1776,7 +1787,8 @@ options:
   --worktree NAME              run everything in the git worktree ../<repo>-NAME on branch NAME.
                                The first run creates them (a new branch from HEAD, so uncommitted
                                changes stay here, or one tracking a remote branch NAME). Later runs
-                               reuse it while it still has branch NAME checked out.
+                               reuse it on whatever branch it has checked out then; the summary
+                               shows it.
   -y, --yes                    start without waiting for Enter
   --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
@@ -1959,7 +1971,7 @@ async function main(argv: string[]): Promise<number> {
           const plan = values.worktree === undefined ? undefined : planWorktree(root, values.worktree);
           const reviewer = me === "claude" ? "codex" : "claude";
           console.error([
-            `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? "new" : "existing"} worktree, branch ${plan.name})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
+            `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
             `pair:   author ${me} · session ${describeSession(session)}`,
             `pair:   reviewer ${reviewer} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
           ].join("\n"));
