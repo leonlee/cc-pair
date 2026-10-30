@@ -684,7 +684,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         // A new user turn on every launch, so a resumed conversation whose recorded instructions name an old run's path gets the current one.
         `Act as the pair author described in your system instructions and wait for the user's task. Run pair as "$PAIR_BIN" in this launch; an absolute .../auto-*/bin/pair path from an earlier launch no longer exists.`,
       ]
-      : [...options.authorArgs, ...(options.authorArgs.length ? ["--"] : []), authorPrompt];
+      // --cd: a resumed Codex session may otherwise switch to the directory it was recorded in, off this channel.
+      : [...options.authorArgs, "--cd", options.root, "--", authorPrompt];
     if (options.author === "claude") console.error(`pair: Claude sandbox.network.allowUnixSockets includes ${path} for this session only`);
     sendGuardian({ type: "launch", job: { id: "author", executable: paths[options.author], args: authorArgs, cwd: options.root, env: childEnv("author"), interactive: true, timeoutMs: 0 } satisfies Job });
     state.phase = "idle";

@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -147,7 +147,7 @@ if (reviewer) {
       git("reset", "-q", "--hard", "HEAD~1");
       git("tag", worktree); // a same-name tag at the old commit must not be checked out instead
     }
-    assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
+    if (initRoot) assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
   }
   const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -434,6 +434,18 @@ for (const remoteBranch of [false, true]) test(`auto start --worktree runs the w
   assert.doesNotMatch(restart, /--worktree/, "after cd, --worktree would name a second worktree");
 });
 
+test("auto start --worktree sets up pair in the new worktree even when the main checkout has none", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold", worktree: "feat", initRoot: false });
+  await until(() => existsSync(f.file("author.pid")), "author started");
+  const worktree = realpathSync(`${f.root}-feat`);
+  assert.match(f.output(), /\(new worktree, branch feat\); pair init runs there if its branch lacks the instructions/);
+  assert.match(f.output(), /pair: wrote: .*-feat\/AGENTS\.md/);
+  assert.ok(existsSync(join(worktree, ".claude", "skills", "pair", "SKILL.md")));
+  assert.ok(!existsSync(join(f.root, "AGENTS.md")), "the main checkout is left alone");
+  const stop = spawnSync(process.execPath, [CLI, "stop"], { cwd: worktree, env: f.env, encoding: "utf8" });
+  assert.equal(stop.status, 0, stop.stderr);
+});
+
 test("pair ps lists a --worktree launcher under the worktree it runs", { timeout: 15_000, skip: spawnSync("ps", ["-p", String(process.pid)]).status !== 0 && "ps is blocked here" }, async (t) => {
   const f = fixture(t, { scenario: "hold", worktree: "feat" });
   await until(() => existsSync(f.file("author.pid")), "author started");
@@ -493,11 +505,10 @@ test("auto start --worktree checks its input first, and reuses an existing workt
     // A tag with the branch's name must not make pair misread the branch (git's short form is heads/feat).
     git("worktree", "add", "-q", "-b", "feat", join(base, "repo-feat"));
     git("tag", "feat");
-    assert.equal(run(root, ["init"]).status, 0); // so the reused worktree, created by plain git, gets pair init too
     assert.equal(run(join(base, "repo-feat"), ["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
     const reused = start("--worktree", "feat");
     assert.equal(reused.status, 1);
-    assert.match(reused.stderr, /pair: wrote: .*repo-feat\/AGENTS\.md[\s\S]*this session runs in worktree .*repo-feat; run pair status and pair stop there\n[\s\S]*a manual Codex session is registered here/);
+    assert.match(reused.stderr, /this session runs in worktree .*repo-feat; run pair status and pair stop there\n[\s\S]*pair: wrote: .*repo-feat\/AGENTS\.md[\s\S]*a manual Codex session is registered here/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -586,7 +597,7 @@ test("reset refuses an active auto review, then clears it after stop", { timeout
 
 test("auto start rejects nested launches from agent shells", () => {
   const result = spawnSync(process.execPath, [CLI, "start", "--as", "claude"], {
-    env: { ...process.env, CODEX_THREAD_ID: "11111111-1111-4111-8111-111111111111", PAIR_NO_UPDATE_CHECK: "1" }, encoding: "utf8",
+    env: { ...process.env, CODEX_THREAD_ID: "11111111-1111-4111-8111-111111111111", PAIR_AUTO_ROLE: "", PAIR_AUTO_RUN: "", PAIR_NO_UPDATE_CHECK: "1" }, encoding: "utf8",
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /outside Claude or Codex/);
@@ -674,6 +685,8 @@ test("a new Claude author gets an ID that pair start, status and stop report, wi
   const args = JSON.parse(f.read("author.args.json"));
   const id = args[args.indexOf("--session-id") + 1];
   assert.match(id, NEW_ID);
+  assert.match(f.output(), /pair: start auto mode in .*; pair init runs there first\n/, "the fixture's directory has no instructions");
+  assert.ok(existsSync(join(f.root, "AGENTS.md")) && existsSync(join(f.root, ".claude", "skills", "pair", "SKILL.md")));
   assert.match(f.output(), new RegExp(`pair: start auto mode in .*\npair:   author claude · session ${id} \\(new\\)\npair:   reviewer codex · model m1 · effort CLI default\n`));
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(new\\)`));
   const stopped = (await f.command(["stop"])).stdout;
@@ -738,7 +751,7 @@ test("a codex author resumes by ID, and pair stop can resume it again", { timeou
   const f = fixture(t, { author: "codex", scenario: "hold", authorArgs: ["resume", id, "-m", "fixture-model"] });
   await until(() => existsSync(f.file("author.args.json")), "author started");
   const args = JSON.parse(f.read("author.args.json"));
-  assert.deepEqual(args.slice(0, 5), ["resume", id, "-m", "fixture-model", "--"], "the prompt follows -- as the resumed session's new message");
+  assert.deepEqual(args.slice(0, 7), ["resume", id, "-m", "fixture-model", "--cd", realpathSync(f.root), "--"], "--cd keeps a resumed session in this worktree; the prompt is its new message");
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(resumed\\)`));
   assert.match((await f.command(["stop"])).stdout, new RegExp(` -- resume ${id} -m fixture-model$`, "m"));
 });

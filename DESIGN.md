@@ -192,6 +192,11 @@ control characters are escaped, and it is labeled as reviewer output; the verdic
 decides whether the round succeeded. When a model or effort override was set, the error names it
 and says that `pair wait` retries with it, since only a new `pair start` can change it.
 
+The agents follow pair's instructions for findings, severity and verdicts, so `pair start` runs
+`pair init` in the session's checkout when either instruction file is missing there, whether or not
+the checkout it was started from has them. A Codex author always gets `--cd <worktree>`, because a
+resumed Codex session otherwise uses, or offers, the directory it was recorded in.
+
 Before it creates anything (a worktree, instruction files, the author record, the socket),
 `pair start` prints the plan: the worktree, the author's conversation and the reviewer's settings.
 With a terminal on stdin and stdout and no `--yes`, it then waits for Enter; readline releases

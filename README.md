@@ -115,8 +115,9 @@ Start Claude Code and Codex in separate terminals in the same worktree.
 
 ## 5. Auto mode
 
-Supported on macOS and Linux. Both CLIs MUST be installed and signed in, and `pair init` MUST have
-run. `pair start` MUST be run in your own terminal, outside an agent session:
+Supported on macOS and Linux. Both CLIs MUST be installed and signed in. `pair start` MUST be run
+in your own terminal, outside an agent session. If the session's checkout lacks pair's instructions,
+`pair start` runs `pair init` there first:
 
 ```sh
 pair start --as claude    # interactive Claude, automatic Codex reviewer
@@ -168,7 +169,8 @@ branch `NAME`:
   is never checked out instead.
 - If the path exists, it MUST be a worktree of this repository with `refs/heads/NAME` checked out.
   Pair never switches it.
-- If the current checkout has pair set up, pair runs `pair init` in the worktree.
+- If the worktree lacks pair's instructions (a new branch has only what was committed), pair runs
+  `pair init` there. The current checkout is left alone.
 - The channel, author and reviewer all belong to the worktree. `pair status` and `pair stop` MUST be
   run there. The worktree remains after the session; remove it with `git worktree remove`.
 
