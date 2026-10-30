@@ -186,6 +186,30 @@ Claude runs these blocking review commands as background Bash tasks and reads th
 output, avoiding the foreground tool timeout. Its author instructions are appended to the system
 prompt; generated instructions also tell agents to check their role after clear/compaction.
 
+A failed round's error includes the last error string the reviewer reported in its JSON stream
+(Codex `error` or `turn.failed`, Claude `result` with `is_error`). It is capped at 4000 characters,
+control characters are escaped, and it is labeled as reviewer output; the verdict on disk still
+decides whether the round succeeded. When a model or effort override was set, the error names it
+and says that `pair wait` retries with it, since only a new `pair start` can change it.
+
+Before it creates anything (a worktree, instruction files, the author record, the socket),
+`pair start` prints the plan: the worktree, the author's conversation and the reviewer's settings.
+With a terminal on stdin and stdout and no `--yes`, it then waits for Enter; readline releases
+stdin before the guardian launches the author. The launcher then changes to the session's worktree,
+so `pair ps` groups it there.
+
+A Claude author's conversation ID is recorded only when it is known before launch: pair passes
+`--session-id` to a new conversation and keeps the ID of `--resume <uuid>`. `--continue`,
+`--fork-session` and a `--resume` name or search term stay unknown, and pair refuses `--continue`
+together with `--resume`. `author.json` in the state directory (written atomically, mode 0600) keeps
+the last known ID and a restart command that starts with `cd` to the worktree. It survives
+`pair stop`, and it is presented as recovery data, never as proof that the conversation still
+exists. Claude records a conversation's system prompt on its first request and reuses it on resume,
+so the author prompt names `"$PAIR_BIN"` rather than the run directory. Every launch also sends a
+first user message that names `"$PAIR_BIN"`, for conversations whose instructions were recorded by
+an older pair. The Claude reviewer keeps the absolute wrapper path, because its `--allowedTools`
+rules match the literal command, and its sessions are resumed only within one run.
+
 Every termination path stops accepting jobs, terminates owned groups, escalates to SIGKILL after
 the configured grace period, and observes the CLI exit and stream closure. Even a successful CLI
 exit triggers cleanup of remaining group members. A private IPC disconnect cleans up if the

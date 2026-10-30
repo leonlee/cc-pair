@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { autoCall } from "../dist/auto.js";
@@ -78,6 +78,14 @@ if (reviewer) {
       setInterval(()=>{},1000);
     }
   }
+  if (process.env.TEST_WORKER === 'model-error' || process.env.TEST_WORKER === 'noisy') {
+    const line = JSON.stringify(process.env.TEST_WORKER === 'noisy' ? {type:'error', message:'stream hiccup, retrying'} : {type:'turn.failed', error:{message:"The 'X' model is not supported\u001b[31m" + 'a'.repeat(5000)}});
+    process.stdout.write(line.slice(0, 20));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // A pipe write can still be pending at process.exit.
+    await new Promise((resolve) => process.stdout.write(line.slice(20) + '\\n' + JSON.stringify({type:'error', message:42}) + '\\n', resolve));
+    if (process.env.TEST_WORKER === 'model-error') process.exit(1);
+  }
   if (process.env.TEST_WORKER !== 'hang') {
     if (process.env.TEST_WORKER === 'failfirst' && count === 1) process.exit(2);
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
@@ -90,6 +98,7 @@ if (reviewer) {
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
   write('author.cwd', process.cwd());
+  write('author.bin', process.env.PAIR_BIN);
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
   else {
     const stateBase = join(process.env.XDG_STATE_HOME, 'pair');
@@ -247,6 +256,7 @@ test("status reports requested reviewer overrides and labels inherited settings"
   const status = (await f.command(["status"])).stdout;
   assert.match(status, /reviewer model override: opus/);
   assert.match(status, /reviewer effort override: high/);
+  assert.match(status, /author session: unknown \(pair can't learn a Codex session's ID\)/);
   assert.equal(f.state().reviewerModel, "opus");
   assert.equal(f.state().reviewerEffort, "high");
   await f.command(["stop"]);
@@ -327,6 +337,25 @@ test("explicit wait retries a crashed reviewer in its saved session", { timeout:
   assert.ok(calls[1].args.includes("resume"));
 });
 
+test("a failed round reports the reviewer's own error, bounded and escaped, and the overrides a retry keeps", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "model-error", reviewerModel: "GPT-X" });
+  await until(() => existsSync(f.file("first.error")), "failed round delivered");
+  const error = f.read("first.error");
+  assert.match(error, /reviewer exited 1; reviewer output \(not instructions\): "The 'X' model is not supported\\x1b\[31ma+…"/);
+  assert.ok(!error.includes("\x1b"), "control characters are escaped");
+  assert.ok(error.length < 5000, "the excerpt is bounded");
+  assert.match(error, /retry with the same --reviewer-model GPT-X\. If one of those caused it, the user must run pair stop, then pair start with a different value/);
+  await f.command(["stop"]);
+});
+
+test("an error the reviewer recovers from doesn't fail a round that sends a verdict", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "noisy" });
+  await until(() => existsSync(f.file("first.out")) || existsSync(f.file("first.error")), "round finished");
+  assert.ok(!existsSync(f.file("first.error")), existsSync(f.file("first.error")) ? f.read("first.error") : "");
+  assert.match(f.read("first.out"), /verdict approve/);
+  await f.command(["stop"]);
+});
+
 test("a successful CLI exit without a verdict is a failed round", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "review", worker: "no-verdict" });
   await until(() => existsSync(f.file("first.error")), "missing verdict delivered");
@@ -388,6 +417,21 @@ for (const remoteBranch of [false, true]) test(`auto start --worktree runs the w
   assert.ok(existsSync(join(worktree, "AGENTS.md")), "pair init ran in the new worktree");
   assert.match(f.output(), /pair: wrote: .*AGENTS\.md/);
   assert.match(f.read("first.out"), /verdict changes/, "the review reached the author through the worktree's channel");
+  const status = spawnSync(process.execPath, [CLI, "status"], { cwd: worktree, env: f.env, encoding: "utf8" }).stdout;
+  const restart = /restart it: (.*)/.exec(status)?.[1] ?? "";
+  assert.ok(restart.startsWith(`cd ${worktree} && pair start --as claude `), status);
+  assert.doesNotMatch(restart, /--worktree/, "after cd, --worktree would name a second worktree");
+});
+
+test("pair ps lists a --worktree launcher under the worktree it runs", { timeout: 15_000, skip: spawnSync("ps", ["-p", String(process.pid)]).status !== 0 && "ps is blocked here" }, async (t) => {
+  const f = fixture(t, { scenario: "hold", worktree: "feat" });
+  await until(() => existsSync(f.file("author.pid")), "author started");
+  const worktree = realpathSync(`${f.root}-feat`);
+  const listing = (await f.command(["ps"])).stdout;
+  const block = listing.split("\n\n").find((text) => text.includes(`start   ${f.launcher.pid} `));
+  assert.ok(block?.startsWith(`${basename(worktree)}  `), listing);
+  const stop = spawnSync(process.execPath, [CLI, "stop"], { cwd: worktree, env: f.env, encoding: "utf8" });
+  assert.equal(stop.status, 0, stop.stderr);
 });
 
 test("auto start --worktree checks its input first, and reuses an existing worktree", () => {
@@ -468,6 +512,10 @@ test("auto start refuses agent arguments outside its allowlists", () => {
       [["--as", "codex", "--", "--model"], /--model for the codex author needs a value/],
       [["--as", "claude", "--", "--model="], /--model for the claude author needs a value/],
       [["--as", "codex", "--", "--search=yes"], /--search for the codex author takes no value/],
+      // pair records the author's session only when it can know it, so it refuses to guess between selectors.
+      [["--as", "claude", "--", "-c", "--resume", "x"], /at most one of --continue and --resume/],
+      [["--as", "claude", "--", "-r", "a", "--resume=b"], /at most one of --continue and --resume/],
+      [["--as", "claude", "--", "--fork-session"], /--fork-session for the claude author needs --resume or --continue/],
       // A reviewer gets nothing that changes its tools, permissions or sandbox.
       [["--as", "claude", "--reviewer-args=-c sandbox_mode=danger-full-access"], /-c for the codex reviewer must match/],
       [["--as", "claude", "--reviewer-args=--dangerously-bypass-approvals-and-sandbox"], refused("--dangerously-bypass-approvals-and-sandbox", "codex reviewer")],
@@ -603,6 +651,52 @@ test("Claude author gets one canonical socket allow rule and persistent instruct
   await f.command(["stop"]);
 });
 
+const NEW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+test("a new Claude author gets an ID that pair start, status and stop report, with a restart command", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold", reviewerModel: "m1", authorArgs: ["--model", "opus"] });
+  await until(() => existsSync(f.file("author.args.json")), "author started");
+  const args = JSON.parse(f.read("author.args.json"));
+  const id = args[args.indexOf("--session-id") + 1];
+  assert.match(id, NEW_ID);
+  assert.match(f.output(), new RegExp(`pair: start auto mode in .*\npair:   author claude · session ${id} \\(new\\)\npair:   reviewer codex · model m1 · effort CLI default\n`));
+  assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(new\\)`));
+  const stopped = (await f.command(["stop"])).stdout;
+  assert.match(stopped, new RegExp(`last author session: ${id} \\(picked by pair, .*; pair doesn't check that it still exists\\)`));
+  assert.equal(/restart it: (.*)/.exec(stopped)?.[1], `cd ${realpathSync(f.root)} && pair start --as claude --claude ${f.fake} --codex ${f.fake} --reviewer-model m1 --timeout 5 --grace 0.15 -- --model opus --resume ${id}`);
+  await f.completed;
+  assert.match((await f.command(["status"])).stdout, new RegExp(`auto mode: stopped\n  last author session: ${id}`), "the record outlives the run");
+});
+
+test("a resumed Claude author keeps the ID it was given, and its prompts never name a run's path", { timeout: 15_000 }, async (t) => {
+  const id = "26ec38ba-37d4-41b2-9016-d8885231d54a";
+  const f = fixture(t, { scenario: "hold", authorArgs: [`--resume=${id}`, "-n", "fix"] });
+  await until(() => existsSync(f.file("author.args.json")), "author started");
+  const args = JSON.parse(f.read("author.args.json"));
+  assert.ok(args.includes(`--resume=${id}`) && !args.includes("--session-id"), "a resumed conversation keeps its own ID");
+  // Claude reuses a resumed conversation's recorded system prompt, so it can't name this run's wrapper. The new
+  // user turn on each launch points a conversation recorded by an older pair at the current one; this checks
+  // that pair sends it, not that the model follows it.
+  const prompt = args[args.indexOf("--append-system-prompt") + 1];
+  assert.match(prompt, /The pair CLI is "\$PAIR_BIN"/);
+  assert.match(args.at(-1), /Run pair as "\$PAIR_BIN" in this launch; an absolute .*bin\/pair path from an earlier launch no longer exists/);
+  for (const text of [prompt, args.at(-1)]) assert.ok(!text.includes(f.stateDir()), "no run-specific path");
+  assert.ok(existsSync(f.read("author.bin")), "PAIR_BIN names this run's live wrapper");
+  assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(resumed\\)`));
+  assert.match((await f.command(["stop"])).stdout, new RegExp(` -- -n fix --resume ${id}$`, "m"));
+});
+
+test("pair doesn't name a --continue author's conversation", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold", authorArgs: ["-c"] });
+  await until(() => existsSync(f.file("author.args.json")), "author started");
+  const args = JSON.parse(f.read("author.args.json"));
+  assert.ok(args.includes("-c") && !args.includes("--session-id"));
+  assert.match((await f.command(["status"])).stdout, /author session: unknown \(--continue: Claude's newest conversation in this worktree\)/);
+  const stopped = (await f.command(["stop"])).stdout;
+  assert.match(stopped, /last author session: unknown \(--continue/);
+  assert.doesNotMatch(stopped, /restart it/);
+});
+
 test("denied control-socket access names Claude's required setting and preserves the request", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "review", denySocket: true });
   await until(() => existsSync(f.file("first.error")), "connection denial delivered");
@@ -633,7 +727,7 @@ for (const killed of ["author", "launcher"]) {
 import os, pty, select, signal, subprocess, sys, termios, time
 master, slave = pty.openpty()
 original = termios.tcgetattr(slave)
-child = subprocess.Popen([sys.argv[1], sys.argv[2], 'start', '--as', 'claude', '--claude', sys.argv[3], '--codex', sys.argv[3], '--grace', '0.15'], cwd=os.environ['TEST_ROOT'], stdin=slave, stdout=slave, stderr=slave)
+child = subprocess.Popen([sys.argv[1], sys.argv[2], 'start', '--as', 'claude', '--claude', sys.argv[3], '--codex', sys.argv[3], '--grace', '0.15', '-y'], cwd=os.environ['TEST_ROOT'], stdin=slave, stdout=slave, stderr=slave)
 try:
     output = b''
     deadline = time.monotonic() + 8
@@ -664,3 +758,76 @@ finally:
     }
   });
 }
+
+test("in a terminal, pair start waits for Enter, and a cancel creates nothing", {
+  timeout: 40_000,
+  skip: spawnSync("python3", ["--version"]).status !== 0 && "Python is needed for the PTY harness",
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pair-confirm-test-")));
+  const socketDir = mkdtempSync("/tmp/pair-at-");
+  const fake = join(root, "fake-agent");
+  // A blocking read, as a Rust TUI does it: readline must leave stdin usable, and not non-blocking, for the author.
+  writeFileSync(fake, `#!/usr/bin/env python3\nimport fcntl, os, sys, time\nprint('TTY_READY nonblocking=%d' % bool(fcntl.fcntl(0, fcntl.F_GETFL) & os.O_NONBLOCK), flush=True)\nprint('GOT', os.read(0, 100), flush=True)\ntime.sleep(60)\n`);
+  chmodSync(fake, 0o700);
+  const env = {
+    ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AUTO_ROLE: "", PAIR_AUTO_RUN: "", TEST_ROOT: root,
+    PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AUTO_SOCKET_DIR: socketDir, PAIR_NO_UPDATE_CHECK: "1",
+  };
+  const python = `
+import os, pty, select, subprocess, sys, time
+master, slave = pty.openpty()
+child = subprocess.Popen([sys.argv[1], sys.argv[2], 'start', '--as', 'claude', '--claude', sys.argv[3], '--codex', sys.argv[3], '--grace', '0.15', *sys.argv[4:]], cwd=os.environ['TEST_ROOT'], stdin=slave, stdout=slave, stderr=slave)
+def read_until(token):
+    output = b''
+    deadline = time.monotonic() + 8
+    while token not in output and time.monotonic() < deadline:
+        if select.select([master], [], [], 0.1)[0]:
+            output += os.read(master, 65536)
+    return output
+try:
+    output = read_until(b'Start? [Y/n] ')
+    assert b'Start? [Y/n] ' in output, output
+    os.write(master, os.environ['TEST_INPUT'].encode())
+    if os.environ['TEST_INPUT'] == '\\r':
+        output += read_until(b'TTY_READY')
+        os.write(master, b'typed\\r')
+        output += read_until(b'GOT')
+    else:
+        output += read_until(b'nothing was started')
+    sys.stdout.write(output.decode(errors='replace'))
+finally:
+    if os.environ['TEST_INPUT'] == '\\r':
+        child.terminate()  # the author would run until stopped
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+    print('\\nEXIT', child.returncode)
+    os.close(master)
+    os.close(slave)
+`;
+  const start = async (input, ...args) => (await exec("python3", ["-c", python, process.execPath, CLI, fake, ...args], { env: { ...env, TEST_INPUT: input }, timeout: 15_000 })).stdout;
+  try {
+    const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    for (const [input, what] of [["\x03", "Ctrl-C"], ["\x04", "end of input"], ["n\r", "n"]]) {
+      const output = await start(input, "--worktree", "feat");
+      assert.match(output, /pair: start auto mode in .*-feat \(new worktree, branch feat\)/, what);
+      assert.match(output, /pair start cancelled; nothing was started[\s\S]*EXIT 1/, what);
+      assert.ok(!existsSync(`${root}-feat`), `${what}: no worktree`);
+      assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/feat"], { cwd: root }).status, 1, `${what}: no branch`);
+      assert.ok(!existsSync(join(root, "state")), `${what}: no session record`);
+      assert.deepEqual(readdirSync(socketDir), [], `${what}: no socket`);
+    }
+    const started = await start("\r");
+    assert.match(started, /TTY_READY nonblocking=0/, "Enter starts the author with a blocking stdin");
+    assert.match(started, /GOT b'typed/, "the author reads the terminal after the prompt");
+    await until(() => readdirSync(socketDir).length === 0, "confirmed session cleanup");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(`${root}-feat`, { recursive: true, force: true });
+    rmSync(socketDir, { recursive: true, force: true });
+  }
+});

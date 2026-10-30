@@ -123,6 +123,10 @@ pair start --as claude    # interactive Claude, automatic Codex reviewer
 pair start --as codex     # interactive Codex, automatic Claude reviewer
 ```
 
+`pair start` first prints where the session will run, the author's conversation and the reviewer's
+settings. In a terminal it then waits for Enter; anything else, Ctrl-C or end of input cancels
+before anything is created. `-y` starts without waiting.
+
 Give the author a task as usual. Each request or response it sends starts the partner as a
 non-interactive reviewer for one round, and the review is returned inline to the author's
 `pair send`. Follow-up rounds resume the reviewer's saved session; new threads start fresh ones.
@@ -134,6 +138,7 @@ second terminal.
 | Option | Default | Meaning |
 |---|---|---|
 | `--worktree NAME` | current worktree | Run in a dedicated worktree (§5.2) |
+| `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias |
 | `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
 | `--reviewer-args="ARGS"` | none | More reviewer options, space-separated (§5.3) |
@@ -187,6 +192,13 @@ session (`-p`, `--bg`), select a Codex subcommand, move the author away from its
 `--worktree`), or replace settings pair passes. The reviewer list excludes everything that changes
 its tools, permissions or sandbox (§10). Codex reviewer options must also work with `exec resume`.
 
+For a Claude author, pair records the conversation's ID only when it knows it: a new conversation
+gets an ID pair picks (`--session-id`), and `--resume ID` keeps that ID. With `--continue`,
+`--fork-session`, or a `--resume` name or search term, Claude picks the conversation, and pair
+records it as unknown. `--continue` picks the newest conversation in the directory the session runs
+in, which is the worktree, not where you typed the command. `--continue` and `--resume` together
+are refused. Pair can't learn a Codex author's ID.
+
 ### 5.4. Control and recovery
 
 From another terminal in the session's worktree:
@@ -199,14 +211,24 @@ pair stop      # stop the author, its reviewers and their tools
 
 - At most one launcher owns a worktree. A registered manual Codex session blocks `pair start`
   until `pair unregister`.
-- A failed launch, missing verdict or timeout keeps the request. The author retries the round with
-  `pair wait --as <author>` in the same session.
+- A failed launch, missing verdict or timeout keeps the request. The error includes the reviewer's
+  own error message, shortened and with control characters escaped. The author retries the round
+  with `pair wait --as <author>` in the same session, with the same reviewer settings. To change
+  `--reviewer-model` or `--reviewer-effort`, stop the session and start it again.
+- `pair status` and `pair stop` show the Claude author's last known conversation ID (§5.3) and a
+  command that starts the session again in this worktree and resumes it, for example
+  `cd /path/to/worktree && pair start --as claude -- --resume <id>`. Change any option in it before
+  running it. This is recovery data: pair does not check that the conversation still exists.
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,
   and Ctrl+Z, do not work in auto mode.
 - Agents receive this run's CLI as `PAIR_BIN`. An interactive Claude author runs managed commands
   in the background, since a review can outlast the foreground tool timeout.
+- Claude reuses a resumed conversation's recorded instructions, so the author's instructions name
+  `"$PAIR_BIN"`, not a path. Instructions recorded by pair 0.6.1 or earlier name a path that is
+  deleted when the session stops. Each launch's first message tells the author to use
+  `"$PAIR_BIN"` instead; if it still runs the old path, tell it to.
 
 Process supervision is specified in DESIGN.md.
 

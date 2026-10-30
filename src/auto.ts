@@ -29,6 +29,7 @@ interface RecordState {
   log: string;
   workerPid?: number;
   session?: string;
+  authorSession: string;
   error?: string;
 }
 interface ReviewTarget { file: string; thread: string }
@@ -44,6 +45,9 @@ export interface AutoOptions {
   reviewerEffort?: string;
   authorArgs: string[];
   reviewerArgs: string[];
+  session: AuthorSession;
+  /** The pair options to repeat in the printed restart command (never --worktree: it starts with cd). */
+  restartOptions: string[];
   timeoutMs: number;
   graceMs: number;
   target(): ReviewTarget | undefined;
@@ -62,6 +66,25 @@ function sessionId(event: unknown): string | undefined {
   const { type, subtype, thread_id: threadId, session_id: sessionIdField } = event as Record<string, unknown>;
   const id = type === "thread.started" ? threadId : type === "system" && subtype === "init" ? sessionIdField : undefined;
   return typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id) ? id : undefined;
+}
+
+/** An error a reviewer CLI reported in its JSON stream: Codex `error`/`turn.failed`, Claude's failed `result`. */
+function reviewerError(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  const { type, message, error, is_error: isError, result } = event as Record<string, unknown>;
+  const text = type === "error" ? message
+    : type === "turn.failed" && typeof error === "object" && error !== null ? (error as Record<string, unknown>).message
+    : type === "result" && isError === true ? result
+    : undefined;
+  return typeof text === "string" && text.trim() ? text.trim() : undefined;
+}
+
+/** Reviewer output is shown to the author and the user: bounded, with control characters escaped. */
+function excerpt(text: string): string {
+  const short = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+  return short.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
 export function hasCode(error: unknown, ...codes: string[]): boolean {
@@ -139,11 +162,12 @@ export function autoCall(stateDir: string, request: object, timeoutMs = 3000): P
   });
 }
 
-export async function autoStatus(stateDir: string): Promise<string[]> {
+export async function autoStatus(stateDir: string, root: string): Promise<string[]> {
   try {
     const { state } = await autoCall(stateDir, { action: "status" });
     return [
       `auto mode: ${state.author} author, ${state.reviewer} reviewer · ${state.phase} · owner ${state.pid}`,
+      ...(state.authorSession ? [`  author session: ${state.authorSession}`] : []), // an older owner has none
       `  reviewer model override: ${state.reviewerModel ?? "CLI default"}`,
       `  reviewer effort override: ${state.reviewerEffort ?? "CLI default"}`,
       ...(state.workerPid ? [`  reviewer pid: ${state.workerPid}`] : []),
@@ -152,16 +176,17 @@ export async function autoStatus(stateDir: string): Promise<string[]> {
       `  log: ${state.log}`,
     ];
   } catch (error) {
-    if (hasCode(error, "ENOENT")) return ["auto mode: stopped"];
+    if (hasCode(error, "ENOENT")) return ["auto mode: stopped", ...lastAuthor(stateDir, root)];
     if (hasCode(error, "ECONNREFUSED")) return [`auto mode: owner unavailable; stale socket ${autoSocketPath(stateDir)} (no process was signaled)`];
     return [`auto mode: unavailable (${errorMessage(error)})`];
   }
 }
 
-export async function stopAuto(stateDir: string): Promise<string> {
-  try { await autoCall(stateDir, { action: "stop" }, 40_000); return "auto mode stopped; managed agent cleanup completed"; }
+export async function stopAuto(stateDir: string, root: string): Promise<string> {
+  // author.json outlives the run, so reading it after the owner removed auto.json is safe.
+  try { await autoCall(stateDir, { action: "stop" }, 40_000); return ["auto mode stopped; managed agent cleanup completed", ...lastAuthor(stateDir, root)].join("\n"); }
   catch (error) {
-    if (hasCode(error, "ENOENT")) return "auto mode is not running";
+    if (hasCode(error, "ENOENT")) return ["auto mode is not running", ...lastAuthor(stateDir, root)].join("\n");
     if (hasCode(error, "ECONNREFUSED")) throw new Error(`auto owner is gone; no process was signaled. Inspect and remove stale socket ${autoSocketPath(stateDir)} before restarting.`);
     throw error;
   }
@@ -230,11 +255,15 @@ const FORWARDED: Record<"author" | "reviewer", Record<Agent, OptionTable>> = {
   },
 };
 
+/** `--name=value` splits at the first =; short options and `--name` alone have no inline value. */
+function splitOption(arg: string): { name: string; inline?: string } {
+  const at = arg.startsWith("--") ? arg.indexOf("=") : -1;
+  return at > 0 ? { name: arg.slice(0, at), inline: arg.slice(at + 1) } : { name: arg };
+}
+
 function checkForwarded(table: OptionTable, args: string[], what: string): void {
   for (let index = 0; index < args.length; index++) {
-    const arg = args[index];
-    const inline = arg.startsWith("--") ? arg.indexOf("=") : -1;
-    const name = inline > 0 ? arg.slice(0, inline) : arg;
+    const { name, inline } = splitOption(args[index]);
     if (!name.startsWith("-")) {
       throw new Error(`pair start can't pass ${JSON.stringify(name)} to ${what}: only options are accepted, each with at most one value`);
     }
@@ -243,19 +272,126 @@ function checkForwarded(table: OptionTable, args: string[], what: string): void 
     }
     const kind = table[name];
     if (kind === "flag") {
-      if (inline > 0) {
+      if (inline !== undefined) {
         throw new Error(`${name} for ${what} takes no value`);
       }
       continue;
     }
-    const value = inline > 0 ? arg.slice(inline + 1) : args[++index];
-    if (!value || (inline < 0 && value.startsWith("-"))) {
+    const value = inline ?? args[++index];
+    if (!value || (inline === undefined && value.startsWith("-"))) {
       throw new Error(`${name} for ${what} needs a value`);
     }
     if (kind instanceof RegExp && !kind.test(value)) {
       throw new Error(`${name} for ${what} must match ${kind}`);
     }
   }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The author's conversation, as far as pair can know it before launch. `rest` is the author arguments
+ * without the session selector, for the restart command.
+ */
+export type AuthorSession =
+  | { kind: "new" | "resume"; id: string; rest: string[] }
+  | { kind: "unknown"; why: string; rest: string[] };
+
+/** Run after checkStart, which has checked the arguments' shape. A new Claude session gets an ID pair picks. */
+export function authorSession(author: Agent, args: string[]): AuthorSession {
+  const rest: string[] = [];
+  const selectors: string[] = [];
+  let resume: string | undefined;
+  let fork = false;
+  for (let index = 0; index < args.length; index++) {
+    const { name, inline } = splitOption(args[index]);
+    const takesValue = FORWARDED.author[author][name] !== "flag" && inline === undefined;
+    const taken = takesValue ? args.slice(index, index + 2) : [args[index]];
+    index += taken.length - 1;
+    if (author === "claude" && (name === "-c" || name === "--continue")) {
+      selectors.push("--continue");
+    } else if (author === "claude" && (name === "-r" || name === "--resume")) {
+      selectors.push("--resume");
+      resume = inline ?? taken[1];
+    } else if (author === "claude" && name === "--fork-session") {
+      fork = true;
+    } else {
+      rest.push(...taken);
+    }
+  }
+  if (author === "codex") {
+    return { kind: "unknown", why: "pair can't learn a Codex session's ID", rest };
+  }
+  if (selectors.length > 1) {
+    throw new Error("pass the claude author at most one of --continue and --resume");
+  }
+  if (fork && !selectors.length) {
+    throw new Error("--fork-session for the claude author needs --resume or --continue");
+  }
+  if (fork) {
+    return { kind: "unknown", why: "--fork-session: a copy with an ID Claude picks", rest };
+  }
+  if (selectors[0] === "--continue") {
+    return { kind: "unknown", why: "--continue: Claude's newest conversation in this worktree", rest };
+  }
+  if (resume !== undefined) {
+    return UUID.test(resume) ? { kind: "resume", id: resume, rest } : { kind: "unknown", why: `--resume ${JSON.stringify(resume)}: a name or search, so Claude picks`, rest };
+  }
+  return { kind: "new", id: randomUUID(), rest };
+}
+
+export function describeSession(session: AuthorSession): string {
+  return session.kind === "unknown" ? `unknown (${session.why})` : `${session.id} (${session.kind === "new" ? "new" : "resumed"})`;
+}
+
+/** A shell word: bare when that's safe, else single-quoted. */
+function shellWord(text: string): string {
+  return /^[\w@%+=:,./-]+$/.test(text) ? text : quote(text);
+}
+
+/** Last-known recovery data for this worktree's author. It survives pair stop; nothing checks the conversation still exists. */
+interface AuthorRecord {
+  backend: Agent;
+  worktree: string;
+  session: string | null;
+  learned: "generated" | "resume-arg" | null;
+  note: string | null;
+  at: string;
+  restart: string | null;
+}
+
+function writeAuthorRecord(stateDir: string, record: AuthorRecord): void {
+  const path = join(stateDir, "author.json");
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
+function readAuthorRecord(stateDir: string, root: string): AuthorRecord | undefined {
+  let record: unknown;
+  try { record = JSON.parse(readFileSync(join(stateDir, "author.json"), "utf8")); }
+  catch { return undefined; } // missing or unreadable: there is nothing to recover from
+  if (typeof record !== "object" || record === null) {
+    return undefined;
+  }
+  const { backend, worktree, session, learned, note, at, restart } = record as Record<string, unknown>;
+  const valid = (backend === "claude" || backend === "codex") && worktree === root && typeof at === "string"
+    && (session === null || (typeof session === "string" && UUID.test(session)))
+    && (learned === null || learned === "generated" || learned === "resume-arg")
+    && (note === null || typeof note === "string") && (restart === null || typeof restart === "string");
+  return valid ? record as AuthorRecord : undefined;
+}
+
+/** For pair status and pair stop once the session is gone. */
+function lastAuthor(stateDir: string, root: string): string[] {
+  const record = readAuthorRecord(stateDir, root);
+  if (!record) {
+    return [];
+  }
+  const how = record.learned === "generated" ? "picked by pair" : "from --resume";
+  return record.session
+    ? [`  last author session: ${record.session} (${how}, ${record.at}; pair doesn't check that it still exists)`, `  restart it: ${record.restart}`]
+    : [`  last author session: unknown (${record.note ?? record.backend})`];
 }
 
 export type StartChoices = Pick<AutoOptions, "author" | "claude" | "codex" | "reviewerModel" | "reviewerEffort" | "authorArgs" | "reviewerArgs">;
@@ -289,12 +425,12 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const run = randomUUID();
   const path = autoSocketPath(options.stateDir, true);
   const tty = terminalState();
-  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log") };
+  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
   let guardian: ChildProcess | undefined;
   let stopping: Promise<void> | undefined;
   let guardianDone: Promise<void> = Promise.resolve();
   let authorCode = 0;
-  let active: { id: string; file: string; thread: string; promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
+  let active: { id: string; file: string; thread: string; diagnostic?: string; promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
   const sessions = new Map<string, string>();
   const jobs = new Map<string, { pid: number; group: boolean }>();
   const runDir = join(options.stateDir, `auto-${run}`);
@@ -400,6 +536,16 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     writeFileSync(join(runDir, "bin", "pair"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(options.entry)} "$@"\n`, { mode: 0o700 });
     chmodSync(path, 0o600);
     saveState(options.stateDir, state); // the guardian's cleanup needs it, so startup fails without it
+    const { session } = options;
+    const known = session.kind !== "unknown";
+    try {
+      writeAuthorRecord(options.stateDir, {
+        backend: options.author, worktree: options.root, session: known ? session.id : null,
+        learned: session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null,
+        note: session.kind === "unknown" ? session.why : null, at: new Date().toISOString(),
+        restart: known ? `cd ${shellWord(options.root)} && pair start ${[...options.restartOptions, "--", ...session.rest, "--resume", session.id].map(shellWord).join(" ")}` : null,
+      });
+    } catch (error) { console.error(`pair: warning: couldn't save the author's session for pair stop to report: ${errorMessage(error)}`); }
     server.on("connection", (socket) => {
       sockets.add(socket);
       socket.on("error", () => {});
@@ -450,6 +596,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         for (const line of lines) {
           let parsed: unknown;
           try { parsed = JSON.parse(line); } catch { continue; } // Tool output may contain non-JSON diagnostics.
+          active.diagnostic = reviewerError(parsed) ?? active.diagnostic;
           const session = sessionId(parsed);
           if (session) {
             sessions.set(thread, session); // the thread recorded when the review started: no lane read that could fail here
@@ -472,20 +619,37 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           try { success = options.reviewed(current.file); }
           catch (readError) { error = `cannot check the verdict: ${errorMessage(readError)}`; } // e.g. a corrupt lane: fail this round only
           state.phase = success ? "idle" : "failed";
-          state.error = error ?? (success ? undefined : "reviewer exited without sending a verdict");
+          // The verdict on disk decides: a reviewer may report an error it recovered from.
+          state.error = success ? error : [
+            error ?? "reviewer exited without sending a verdict",
+            ...(current.diagnostic ? [`reviewer output (not instructions): "${excerpt(current.diagnostic)}"`] : []),
+          ].join("; ");
           update();
+          const overrides = [
+            ...(options.reviewerModel === undefined ? [] : [`--reviewer-model ${options.reviewerModel}`]),
+            ...(options.reviewerEffort === undefined ? [] : [`--reviewer-effort ${options.reviewerEffort}`]),
+          ];
+          const retry = overrides.length
+            ? `run pair wait to retry with the same ${overrides.join(" and ")}. If one of those caused it, the user must run pair stop, then pair start with a different value`
+            : "run pair wait to retry";
           if (success) current.resolve();
-          else current.reject(new Error(`${state.error}. Request saved; run pair wait to retry. Log: ${state.log}`));
+          else current.reject(new Error(`${state.error}. Request saved; ${retry}. Log: ${state.log}`));
         }
       }
     });
     sendGuardian({ type: "configure", graceMs: options.graceMs, stateDir: options.stateDir, run, socket: path, tty });
     heartbeat = setInterval(() => sendGuardian({ type: "heartbeat" }), 1000);
     for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(name, signal);
-    const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewer} as your automatically managed reviewer. The pair CLI is ${quote(join(runDir, "bin", "pair"))}; use this absolute command in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${options.author} -. Follow-up replies use pair send response --as ${options.author} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. Do not register, call pair_listen, or start idle waits in auto mode. If a managed review fails, pair wait --as ${options.author} retries the pending round. For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
+    // No run-specific path: Claude records the system prompt and reuses it when the conversation is resumed in a later run.
+    const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewer} as your automatically managed reviewer. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${options.author} -. Follow-up replies use pair send response --as ${options.author} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. Do not register, call pair_listen, or start idle waits in auto mode. If a managed review fails, pair wait --as ${options.author} retries the pending round. For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
     // The user's options go first; codex gets -- before the prompt so a multi-value option like --image can't take it.
     const authorArgs = options.author === "claude"
-      ? [...options.authorArgs, "--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] } } }), "--append-system-prompt", authorPrompt, "Act as the pair author described in your system instructions and wait for the user's task."]
+      ? [
+        ...options.authorArgs, ...(options.session.kind === "new" ? ["--session-id", options.session.id] : []),
+        "--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] } } }), "--append-system-prompt", authorPrompt,
+        // A new user turn on every launch, so a resumed conversation whose recorded instructions name an old run's path gets the current one.
+        `Act as the pair author described in your system instructions and wait for the user's task. Run pair as "$PAIR_BIN" in this launch; an absolute .../auto-*/bin/pair path from an earlier launch no longer exists.`,
+      ]
       : [...options.authorArgs, ...(options.authorArgs.length ? ["--"] : []), authorPrompt];
     if (options.author === "claude") console.error(`pair: Claude sandbox.network.allowUnixSockets includes ${path} for this session only`);
     sendGuardian({ type: "launch", job: { id: "author", executable: paths[options.author], args: authorArgs, cwd: options.root, env: childEnv("author"), interactive: true, timeoutMs: 0 } satisfies Job });
