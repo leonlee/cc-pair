@@ -2,7 +2,8 @@
 
 These instructions are for `{{AGENT}}` only. If you are not `{{AGENT}}`, ignore this section.
 
-You are `{{AGENT}}`. Your partner `{{PARTNER}}` runs in another terminal on the same repo.
+You are `{{AGENT}}`. Your partner `{{PARTNER}}` works on the same repo, in its own terminal or,
+in auto mode, as a reviewer that pair starts for each round.
 You talk only through the `pair` CLI. Always pass `--as {{AGENT}}`.
 
 ## Auto mode
@@ -19,7 +20,13 @@ the fix/reject loop until approval or escalation. In interactive Claude Code, ru
 and managed retry waits with Bash's `run_in_background: true`, end your turn, and read their output
 when the completion notification arrives. Reviews can exceed the foreground Bash timeout. This
 background command is active review work, not an idle wait loop. Do not register, call `pair_listen`,
-or run idle waits. If a managed review fails, `pair wait --as {{AGENT}}` explicitly retries the round.
+or run idle waits.
+
+If a managed review fails, the request stays on disk. Show the user the error as printed, including
+the reviewer output it quotes, and don't guess at a cause it doesn't name. If it names
+`--reviewer-model` or `--reviewer-effort`, a retry uses the same value: tell the user to run
+`pair stop`, then start again with another value (`pair start --resume` keeps this conversation),
+instead of retrying. Otherwise `pair wait --as {{AGENT}}` retries the round.
 
 If `PAIR_AUTO_ROLE=reviewer`, handle exactly one pending review round. Read it with
 `pair wait --as {{AGENT}} --timeout 1`, review, send your verdict, and exit. Do not modify source,
