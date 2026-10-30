@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.1 (2026-10-30)
+
+`pair start` runs `pair init` wherever the session runs if pair's instructions are missing there,
+and its summary says so. Before, `--worktree` initialized the new worktree only when the checkout it
+was started from had pair set up, so sessions started from an uninitialized checkout ran without
+the review rules.
+
+`pair start --worktree NAME` reuses `../<repo>-NAME` whatever it has checked out, so renaming the
+branch no longer breaks the next start. The summary shows the branch, or the commit of a detached
+HEAD, and pair refuses to start if it changes while the prompt waits. A new worktree is still
+created on branch `NAME`.
+
+The author's review request now reports its own conversation ID. So `pair status` and `pair stop`
+can show a restart command after `--continue`, `--fork-session`, a resume by name, a `/clear`, or
+a new Codex conversation. A Codex author resumes with `-- resume <UUID> [options]`, and it always
+gets `--cd <worktree>`, so a resumed session stays in the session's worktree.
+
+If the author can't be started at all, `pair start` now says why instead of exiting 1 silently.
+
 ## 0.7.0 (2026-10-30)
 
 `pair start` first prints where the session will run, the author's conversation and the
