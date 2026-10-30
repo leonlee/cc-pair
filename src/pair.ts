@@ -1777,21 +1777,19 @@ const COMMAND_HELP: Record<string, string> = {
 
 Auto mode (macOS and Linux). Opens the --as agent interactively as the author. Each review request
 starts the other agent as a non-interactive reviewer for one round, and the review comes back
-inline to the author's pair send. Run it in your own terminal, outside Claude or Codex; it runs
-pair init where the session runs if pair's instructions are missing there. A Codex session
+inline to the author's pair send. Run it in your own terminal, outside Claude or Codex. It first
+prints where it will run, the author's conversation and the reviewer's settings, and in a terminal
+waits for Enter; it runs pair init there if pair's instructions are missing. A Codex session
 registered with pair register blocks it; run pair unregister first.
-It first prints where it will run, the author's session and the reviewer's settings, and in a
-terminal waits for Enter.
 
 options:
   --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
-  --worktree NAME              run everything in the git worktree ../<repo>-NAME.
-                               The first run creates it on branch NAME (a new branch from HEAD, so
-                               uncommitted changes stay here, or one tracking a remote NAME). Later runs
-                               reuse it with whatever it has checked out then (a branch or a
-                               detached HEAD); the summary shows it.
+  --worktree NAME              run everything in the git worktree ../<repo>-NAME. The first run
+                               creates it on branch NAME (a new branch from HEAD, so uncommitted
+                               changes stay here, or one tracking a remote NAME). Later runs reuse
+                               it with whatever it has checked out (a branch or a detached HEAD).
   --resume                     resume the author conversation pair last recorded for the checkout
-                               the session runs in (pair status shows it); the summary names it
+                               the session runs in (pair status shows it)
   -y, --yes                    start without waiting for Enter
   --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
@@ -1809,15 +1807,12 @@ options:
   -- AUTHOR_ARGS...            pass the rest to the interactive claude or codex. Only options that
                                keep it an interactive session in this worktree are accepted, each
                                with at most one value; others are refused with the supported list.
-                               A codex author resumes with -- resume <UUID> [options]. pair status
-                               and pair stop show the author's conversation ID with a command that
-                               resumes it: a new claude conversation gets an ID pair picks, and a
-                               resumed one keeps its ID. Otherwise (a new codex conversation,
-                               --continue, --fork-session, a --resume name), pair learns the ID from
-                               the author's first review request.
+                               To continue a conversation: claude --resume ID or --continue, codex
+                               resume ID (first). See README, Author conversations.
 
   pair start --as claude --reviewer-effort high -- --model opus --permission-mode acceptEdits
   pair start --as codex --worktree feature/login
+  pair start --as codex --worktree feature/login --resume
   pair start --as claude --reviewer-args="-c model_verbosity=low" -- --model opus
   pair start --as codex --reviewer-args="--fallback-model sonnet" -- --model MODEL --search
 
@@ -1826,8 +1821,8 @@ pair status or pair ps -v; stop it with pair stop.`,
   stop: `usage: pair stop
 
 Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.
-When pair knows the claude author's conversation ID, it prints a command that starts the session
-again in this worktree and resumes that conversation.`,
+When pair knows the author's conversation ID, it prints a command that starts the session again in
+this worktree and resumes that conversation; pair start --resume does the same with new options.`,
   send: `usage: pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <FILE|->
 
 Send a message on this worktree's channel. The body is read from FILE, or from stdin with -.
