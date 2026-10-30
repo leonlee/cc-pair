@@ -387,6 +387,26 @@ function readAuthorRecord(stateDir: string, root: string): AuthorRecord | undefi
   return valid ? record as AuthorRecord : undefined;
 }
 
+/** pair start --resume: the author arguments that resume the conversation last recorded for root. */
+export function withRecordedSession(author: Agent, args: string[], stateDir: string, root: string): { args: string[]; id: string; at: string } {
+  const selected = author === "claude" ? args.some((arg) => ["-c", "--continue", "-r", "--resume"].includes(splitOption(arg).name)) : args[0] === "resume";
+  if (selected) {
+    throw new Error(`pair start --resume picks the conversation; drop the ${author === "claude" ? "--continue or --resume" : "resume"} after --`);
+  }
+  const record = readAuthorRecord(stateDir, root);
+  if (!record) {
+    throw new Error(`no author conversation is recorded for ${root}; start without --resume`);
+  }
+  if (record.backend !== author) {
+    throw new Error(`the last author in ${root} was ${record.backend}, not ${author}; start without --resume`);
+  }
+  if (!record.session) {
+    throw new Error(`the last ${author} author in ${root} has no known conversation ID (${record.note ?? "unknown"}); start without --resume`);
+  }
+  const id = record.session;
+  return { args: author === "claude" ? [...args, "--resume", id] : ["resume", id, ...args], id, at: record.at };
+}
+
 /** For pair status and pair stop once the session is gone. */
 function lastAuthor(stateDir: string, root: string): string[] {
   const record = readAuthorRecord(stateDir, root);

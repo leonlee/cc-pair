@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -1736,9 +1736,9 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 }
 
 const USAGE = `usage:
-  pair start --as <claude|codex> [--worktree NAME] [-y] [--reviewer-model MODEL] [--reviewer-effort LEVEL]
-             [--reviewer-args="ARGS"] [--claude /path] [--codex /path] [--timeout seconds]
-             [--grace seconds] [-- AUTHOR_ARGS...]
+  pair start --as <claude|codex> [--worktree NAME] [--resume] [-y] [--reviewer-model MODEL]
+             [--reviewer-effort LEVEL] [--reviewer-args="ARGS"] [--claude /path] [--codex /path]
+             [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
@@ -1790,6 +1790,8 @@ options:
                                uncommitted changes stay here, or one tracking a remote NAME). Later runs
                                reuse it with whatever it has checked out then (a branch or a
                                detached HEAD); the summary shows it.
+  --resume                     resume the author conversation pair last recorded for the checkout
+                               the session runs in (pair status shows it); the summary names it
   -y, --yes                    start without waiting for Enter
   --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
@@ -1903,7 +1905,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -1917,8 +1919,8 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
-  if (values.yes && command !== "start") {
-    throw new PairError("--yes is only supported by pair start");
+  if ((values.yes || values.resume) && command !== "start") {
+    throw new PairError(`${values.yes ? "--yes" : "--resume"} is only supported by pair start`);
   }
   if (values.worktree !== undefined && command !== "start") {
     throw new PairError("--worktree is only supported by pair start");
@@ -1968,12 +1970,23 @@ async function main(argv: string[]): Promise<number> {
             authorArgs: passthrough, reviewerArgs: values["reviewer-args"]?.split(/\s+/).filter(Boolean) ?? [],
           };
           checkStart(choices);
-          const session = authorSession(me, passthrough);
           const plan = values.worktree === undefined ? undefined : planWorktree(root, values.worktree);
+          let authorArgs = passthrough;
+          let recorded: string | undefined;
+          if (values.resume) {
+            if (plan?.add) {
+              throw new PairError(`--resume needs an existing worktree; ${plan.path} doesn't exist yet`);
+            }
+            const target = plan ? realpathSync(plan.path) : root;
+            const found = withRecordedSession(me, passthrough, stateDir(channelDir(target)), target);
+            authorArgs = found.args;
+            recorded = `${found.id} (resumed: the last author conversation here, recorded ${found.at})`;
+          }
+          const session = authorSession(me, authorArgs);
           const reviewer = me === "claude" ? "codex" : "claude";
           console.error([
             `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
-            `pair:   author ${me} · session ${describeSession(session)}`,
+            `pair:   author ${me} · session ${session.kind === "resume" && recorded ? recorded : describeSession(session)}`,
             `pair:   reviewer ${reviewer} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
           ].join("\n"));
           // Before anything is created: a worktree, instruction files, the author record, the socket, any agent.
@@ -1993,7 +2006,7 @@ async function main(argv: string[]): Promise<number> {
             throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
           }
           return await startAuto({
-            ...choices, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
+            ...choices, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
             restartOptions: [
               ["--as", me], ["--claude", values.claude], ["--codex", values.codex], ["--reviewer-model", values["reviewer-model"]],
               ["--reviewer-effort", values["reviewer-effort"]], ["--timeout", values.timeout], ["--grace", values.grace],

@@ -214,7 +214,10 @@ the author's inherited environment so a stale value can't be reported. Pair refu
 together with `--resume`. `author.json` in the state directory (written atomically, mode 0600) keeps
 the last known ID and a restart command that starts with `cd` to the worktree. It survives
 `pair stop`, and it is presented as recovery data, never as proof that the conversation still
-exists. Claude records a conversation's system prompt on its first request and reuses it on resume,
+exists. `pair start --resume` is the explicit way to use it: it adds the recorded ID as the
+author's selector only when the record is valid, is for the same CLI and has a known ID, and it
+refuses author arguments that already select a conversation. A plain `pair start`, or one with
+`--continue`, never resumes the record by itself. Claude records a conversation's system prompt on its first request and reuses it on resume,
 so the author prompt names `"$PAIR_BIN"` rather than the run directory. Every launch also sends a
 first user message that names `"$PAIR_BIN"`, for conversations whose instructions were recorded by
 an older pair. The Claude reviewer keeps the absolute wrapper path, because its `--allowedTools`

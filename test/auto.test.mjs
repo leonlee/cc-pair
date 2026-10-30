@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -25,7 +26,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -131,6 +132,7 @@ if (reviewer) {
     ...(reviewerEffort === undefined ? [] : ["--reviewer-effort", reviewerEffort]),
     ...(reviewerArgs === undefined ? [] : [`--reviewer-args=${reviewerArgs}`]),
     ...(worktree === undefined ? [] : ["--worktree", worktree]),
+    ...pairArgs,
     ...(authorArgs.length ? ["--", ...authorArgs] : []),
   ];
   if (worktree !== undefined) {
@@ -149,6 +151,7 @@ if (reviewer) {
     }
     if (initRoot) assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
   }
+  setup?.({ root, env });
   const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   launcher.stdout.on("data", (data) => { output += data; });
@@ -773,6 +776,65 @@ test("an author that can't start is reported instead of a silent exit", { timeou
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(socketDir, { recursive: true, force: true });
+  }
+});
+
+/** Writes the author record pair keeps for root, as an earlier session would have. */
+function recordAuthor(root, stateHome, record) {
+  const real = realpathSync(root);
+  const dir = join(stateHome, "pair", `${basename(real)}-${createHash("sha1").update(real).digest("hex").slice(0, 8)}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "author.json"), JSON.stringify({ worktree: real, learned: "author-env", note: null, at: "2026-10-30T00:00:00.000Z", restart: "cd x && pair start", ...record }));
+}
+
+for (const author of ["claude", "codex"]) {
+  test(`pair start --resume resumes the ${author} author's last recorded conversation`, { timeout: 15_000 }, async (t) => {
+    const id = "0c8b6a3e-ff15-49a6-915b-b3884cabde5f";
+    const f = fixture(t, { author, scenario: "hold", pairArgs: ["--resume"], authorArgs: ["--model", "m"], setup: ({ root, env }) => recordAuthor(root, env.XDG_STATE_HOME, { backend: author, session: id }) });
+    await until(() => existsSync(f.file("author.args.json")), "author started");
+    const args = JSON.parse(f.read("author.args.json"));
+    if (author === "claude") {
+      assert.deepEqual(args.slice(0, 4), ["--model", "m", "--resume", id]);
+      assert.ok(!args.includes("--session-id"));
+    } else {
+      assert.deepEqual(args.slice(0, 4), ["resume", id, "--model", "m"]);
+    }
+    assert.match(f.output(), new RegExp(`author ${author} · session ${id} \\(resumed: the last author conversation here, recorded 2026-10-30T00:00:00.000Z\\)`));
+    assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(resumed\\)`));
+    await f.command(["stop"]);
+  });
+}
+
+test("pair start --resume refuses without a usable record, or with a selector of its own", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pair-auto-resume-")));
+  const stateHome = join(root, "state");
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_AUTO_RUN: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: stateHome, PAIR_NO_UPDATE_CHECK: "1" };
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args], { cwd: root, env, encoding: "utf8" });
+  const start = (as, ...args) => run("start", "--as", as, "--claude", process.execPath, "--codex", process.execPath, "--resume", ...args);
+  const id = "0c8b6a3e-ff15-49a6-915b-b3884cabde5f";
+  try {
+    assert.equal(spawnSync("git", ["init", "-q"], { cwd: root }).status, 0);
+    assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "base"], { cwd: root }).status, 0);
+    const refused = (result, message) => {
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, message);
+      assert.doesNotMatch(result.stderr, /pair: start auto mode/, "refused before the summary");
+    };
+    refused(start("claude"), /no author conversation is recorded for .*; start without --resume/);
+    refused(run("status", "--resume"), /--resume is only supported by pair start/);
+    refused(start("claude", "--worktree", "feat"), /--resume needs an existing worktree; .*-feat doesn't exist yet/);
+    recordAuthor(root, stateHome, { backend: "codex", session: id });
+    refused(start("claude"), /the last author in .* was codex, not claude/);
+    refused(start("codex", "--", "resume", id), /pair start --resume picks the conversation; drop the resume after --/);
+    recordAuthor(root, stateHome, { backend: "claude", session: id });
+    for (const selector of [["-c"], ["--resume", id], [`--resume=${id}`]]) {
+      refused(start("claude", "--", ...selector), /pair start --resume picks the conversation; drop the --continue or --resume after --/);
+    }
+    recordAuthor(root, stateHome, { backend: "claude", session: null, learned: null, note: "--continue: Claude's newest conversation in this worktree", restart: null });
+    refused(start("claude"), /the last claude author in .* has no known conversation ID \(--continue: Claude's newest conversation in this worktree\)/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(`${root}-feat`, { recursive: true, force: true });
   }
 });
 

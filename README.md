@@ -139,6 +139,7 @@ second terminal.
 | Option | Default | Meaning |
 |---|---|---|
 | `--worktree NAME` | current worktree | Run in a dedicated worktree (§5.2) |
+| `--resume` | new conversation | Resume the author conversation pair last recorded for this checkout (§5.4) |
 | `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias |
 | `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
@@ -226,6 +227,12 @@ pair stop      # stop the author, its reviewers and their tools
   `cd /path/to/worktree && pair start --as claude -- --resume <id>`, or `-- resume <id>` for Codex.
   Change any option in it before running it. This is recovery data: pair does not check that the
   conversation still exists.
+- `pair start --resume` resumes that recorded conversation without copying its ID, for example
+  `pair start --as claude --worktree at-1810 --resume`. The record MUST be for the same CLI and
+  have a known ID, the worktree MUST already exist, and the author arguments MUST NOT select a
+  conversation themselves (`--continue`, `--resume`, Codex `resume`). Only the conversation is
+  reused; every other option comes from the command line. The summary names the conversation and
+  when it was recorded.
 - If the author can't be started at all, `pair start` says why and exits 1.
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
