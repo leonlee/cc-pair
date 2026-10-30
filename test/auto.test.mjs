@@ -25,7 +25,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -34,6 +34,7 @@ function fixture(t, { author = "claude", scenario = "roundtrip", worker = "norma
     PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_NO_UPDATE_CHECK: "1",
     TEST_ROOT: root, TEST_SCENARIO: scenario, TEST_WORKER: worker,
     PAIR_AUTO_SOCKET_DIR: socketDir,
+    ...extraEnv,
   };
   if (clockJumps || denySocket) {
     const hook = join(root, "faults.cjs");
@@ -99,6 +100,7 @@ if (reviewer) {
   }
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
+  if (process.env.TEST_AUTHOR_SESSION) process.env[process.env.PAIR_AGENT === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
   write('author.cwd', process.cwd());
   write('author.bin', process.env.PAIR_BIN);
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
@@ -258,7 +260,7 @@ test("status reports requested reviewer overrides and labels inherited settings"
   const status = (await f.command(["status"])).stdout;
   assert.match(status, /reviewer model override: opus/);
   assert.match(status, /reviewer effort override: high/);
-  assert.match(status, /author session: unknown \(pair can't learn a Codex session's ID\)/);
+  assert.match(status, /author session: unknown until the author's first review request \(a new Codex conversation\)/);
   assert.equal(f.state().reviewerModel, "opus");
   assert.equal(f.state().reviewerEffort, "high");
   await f.command(["stop"]);
@@ -525,6 +527,10 @@ test("auto start refuses agent arguments outside its allowlists", () => {
       [["--as", "claude", "--", "-c", "--resume", "x"], /at most one of --continue and --resume/],
       [["--as", "claude", "--", "-r", "a", "--resume=b"], /at most one of --continue and --resume/],
       [["--as", "claude", "--", "--fork-session"], /--fork-session for the claude author needs --resume or --continue/],
+      // A codex author resumes only by ID, as the first author argument.
+      ...[["resume"], ["resume", "--last"], ["resume", "my-session"]].map((args) => [["--as", "codex", "--", ...args], /resumes a codex author only by session ID/]),
+      [["--as", "codex", "--", "resume", "01a18aac-6f8a-70d1-86ce-9728073a8693", "exec"], /can't pass "exec" to the codex author: only options/],
+      [["--as", "codex", "--", "-m", "m", "resume", "01a18aac-6f8a-70d1-86ce-9728073a8693"], /can't pass "resume" to the codex author: only options/],
       // A reviewer gets nothing that changes its tools, permissions or sandbox.
       [["--as", "claude", "--reviewer-args=-c sandbox_mode=danger-full-access"], /-c for the codex reviewer must match/],
       [["--as", "claude", "--reviewer-args=--dangerously-bypass-approvals-and-sandbox"], refused("--dangerously-bypass-approvals-and-sandbox", "codex reviewer")],
@@ -700,10 +706,58 @@ test("pair doesn't name a --continue author's conversation", { timeout: 15_000 }
   await until(() => existsSync(f.file("author.args.json")), "author started");
   const args = JSON.parse(f.read("author.args.json"));
   assert.ok(args.includes("-c") && !args.includes("--session-id"));
-  assert.match((await f.command(["status"])).stdout, /author session: unknown \(--continue: Claude's newest conversation in this worktree\)/);
+  assert.match((await f.command(["status"])).stdout, /author session: unknown until the author's first review request \(--continue: Claude's newest conversation in this worktree\)/);
   const stopped = (await f.command(["stop"])).stdout;
   assert.match(stopped, /last author session: unknown \(--continue/);
   assert.doesNotMatch(stopped, /restart it/);
+});
+
+for (const [author, authorArgs] of [["claude", ["-c"]], ["codex", []]]) {
+  test(`a ${author} author's first review request reports its conversation, which pair stop can resume`, { timeout: 15_000 }, async (t) => {
+    const id = "0c8b6a3e-ff15-49a6-915b-b3884cabde5f";
+    const f = fixture(t, { author, scenario: "review", authorArgs, extraEnv: { TEST_AUTHOR_SESSION: id } });
+    await until(() => existsSync(f.file("first.out")), "first round");
+    assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(reported by the author\\)`));
+    const stopped = (await f.command(["stop"])).stdout;
+    assert.match(stopped, new RegExp(`last author session: ${id} \\(reported by the author, `));
+    assert.match(stopped, new RegExp(author === "claude" ? ` -- --resume ${id}$` : ` -- resume ${id}$`, "m"), "-c is replaced, not kept");
+  });
+}
+
+test("pair ignores an author ID that isn't a UUID, and a stale one from pair start's own environment", { timeout: 15_000 }, async (t) => {
+  for (const extraEnv of [{ TEST_AUTHOR_SESSION: "not-a-uuid" }, { CLAUDE_CODE_SESSION_ID: "0c8b6a3e-ff15-49a6-915b-b3884cabde5f" }]) {
+    const f = fixture(t, { scenario: "review", authorArgs: ["-c"], extraEnv });
+    await until(() => existsSync(f.file("first.out")), "first round");
+    assert.match((await f.command(["status"])).stdout, /author session: unknown until/, JSON.stringify(extraEnv));
+    await f.command(["stop"]);
+  }
+});
+
+test("a codex author resumes by ID, and pair stop can resume it again", { timeout: 15_000 }, async (t) => {
+  const id = "01a18aac-6f8a-70d1-86ce-9728073a8693";
+  const f = fixture(t, { author: "codex", scenario: "hold", authorArgs: ["resume", id, "-m", "fixture-model"] });
+  await until(() => existsSync(f.file("author.args.json")), "author started");
+  const args = JSON.parse(f.read("author.args.json"));
+  assert.deepEqual(args.slice(0, 5), ["resume", id, "-m", "fixture-model", "--"], "the prompt follows -- as the resumed session's new message");
+  assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(resumed\\)`));
+  assert.match((await f.command(["stop"])).stdout, new RegExp(` -- resume ${id} -m fixture-model$`, "m"));
+});
+
+test("an author that can't start is reported instead of a silent exit", { timeout: 15_000 }, () => {
+  const root = mkdtempSync(join(tmpdir(), "pair-auto-spawn-"));
+  const socketDir = mkdtempSync("/tmp/pair-at-");
+  const broken = join(root, "broken-codex");
+  writeFileSync(broken, "#!/nonexistent/interpreter\n");
+  chmodSync(broken, 0o700);
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AUTO_SOCKET_DIR: socketDir, PAIR_NO_UPDATE_CHECK: "1" };
+  try {
+    const result = spawnSync(process.execPath, [CLI, "start", "--as", "codex", "--codex", broken, "--claude", process.execPath], { cwd: root, env, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /pair: the codex author couldn't start: .*ENOENT/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(socketDir, { recursive: true, force: true });
+  }
 });
 
 test("denied control-socket access names Claude's required setting and preserves the request", { timeout: 15_000 }, async (t) => {

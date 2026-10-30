@@ -303,6 +303,10 @@ export type AuthorSession =
 
 /** Run after checkStart, which has checked the arguments' shape. A new Claude session gets an ID pair picks. */
 export function authorSession(author: Agent, args: string[]): AuthorSession {
+  if (author === "codex") {
+    // Codex can't be given an ID for a new session; the author reports it with its first review request.
+    return args[0] === "resume" ? { kind: "resume", id: args[1], rest: args.slice(2) } : { kind: "unknown", why: "a new Codex conversation", rest: args };
+  }
   const rest: string[] = [];
   const selectors: string[] = [];
   let resume: string | undefined;
@@ -312,19 +316,16 @@ export function authorSession(author: Agent, args: string[]): AuthorSession {
     const takesValue = FORWARDED.author[author][name] !== "flag" && inline === undefined;
     const taken = takesValue ? args.slice(index, index + 2) : [args[index]];
     index += taken.length - 1;
-    if (author === "claude" && (name === "-c" || name === "--continue")) {
+    if (name === "-c" || name === "--continue") {
       selectors.push("--continue");
-    } else if (author === "claude" && (name === "-r" || name === "--resume")) {
+    } else if (name === "-r" || name === "--resume") {
       selectors.push("--resume");
       resume = inline ?? taken[1];
-    } else if (author === "claude" && name === "--fork-session") {
+    } else if (name === "--fork-session") {
       fork = true;
     } else {
       rest.push(...taken);
     }
-  }
-  if (author === "codex") {
-    return { kind: "unknown", why: "pair can't learn a Codex session's ID", rest };
   }
   if (selectors.length > 1) {
     throw new Error("pass the claude author at most one of --continue and --resume");
@@ -345,7 +346,7 @@ export function authorSession(author: Agent, args: string[]): AuthorSession {
 }
 
 export function describeSession(session: AuthorSession): string {
-  return session.kind === "unknown" ? `unknown (${session.why})` : `${session.id} (${session.kind === "new" ? "new" : "resumed"})`;
+  return session.kind === "unknown" ? `unknown until the author's first review request (${session.why})` : `${session.id} (${session.kind === "new" ? "new" : "resumed"})`;
 }
 
 /** A shell word: bare when that's safe, else single-quoted. */
@@ -358,7 +359,7 @@ interface AuthorRecord {
   backend: Agent;
   worktree: string;
   session: string | null;
-  learned: "generated" | "resume-arg" | null;
+  learned: "generated" | "resume-arg" | "author-env" | null;
   note: string | null;
   at: string;
   restart: string | null;
@@ -381,7 +382,7 @@ function readAuthorRecord(stateDir: string, root: string): AuthorRecord | undefi
   const { backend, worktree, session, learned, note, at, restart } = record as Record<string, unknown>;
   const valid = (backend === "claude" || backend === "codex") && worktree === root && typeof at === "string"
     && (session === null || (typeof session === "string" && UUID.test(session)))
-    && (learned === null || learned === "generated" || learned === "resume-arg")
+    && (learned === null || learned === "generated" || learned === "resume-arg" || learned === "author-env")
     && (note === null || typeof note === "string") && (restart === null || typeof restart === "string");
   return valid ? record as AuthorRecord : undefined;
 }
@@ -392,7 +393,7 @@ function lastAuthor(stateDir: string, root: string): string[] {
   if (!record) {
     return [];
   }
-  const how = record.learned === "generated" ? "picked by pair" : "from --resume";
+  const how = record.learned === "generated" ? "picked by pair" : record.learned === "author-env" ? "reported by the author" : "given to pair start";
   return record.session
     ? [`  last author session: ${record.session} (${how}, ${record.at}; pair doesn't check that it still exists)`, `  restart it: ${record.restart}`]
     : [`  last author session: unknown (${record.note ?? record.backend})`];
@@ -414,7 +415,15 @@ export function checkStart(options: StartChoices): void {
   if (options.reviewerEffort !== undefined && !efforts.includes(options.reviewerEffort)) {
     throw new Error(`--reviewer-effort for ${reviewer} must be one of: ${efforts.join(", ")}. Availability also depends on the installed CLI and selected model.`);
   }
-  checkForwarded(FORWARDED.author[options.author], options.authorArgs, `the ${options.author} author`);
+  let authorArgs = options.authorArgs;
+  if (options.author === "codex" && authorArgs[0] === "resume") {
+    // Only an ID: a name, a search or --last could pick another worktree's conversation.
+    if (!UUID.test(authorArgs[1] ?? "")) {
+      throw new Error("pair start resumes a codex author only by session ID: -- resume <UUID> [options]");
+    }
+    authorArgs = authorArgs.slice(2);
+  }
+  checkForwarded(FORWARDED.author[options.author], authorArgs, `the ${options.author} author`);
   checkForwarded(FORWARDED.reviewer[reviewer], options.reviewerArgs, `the ${reviewer} reviewer`);
   executable("claude", options.claude);
   executable("codex", options.codex);
@@ -530,7 +539,33 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     // A new CLI owns its own identity; never inherit the caller's session registration.
     delete env.CODEX_THREAD_ID;
     delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_SESSION_ID;
     return env;
+  };
+  const { session } = options;
+  let authorId = session.kind === "unknown" ? undefined : session.id;
+  let learned: AuthorRecord["learned"] = session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null;
+  const recordAuthor = (report: (problem: string) => void) => {
+    const selector = (id: string) => options.author === "claude" ? [...session.rest, "--resume", id] : ["resume", id, ...session.rest];
+    try {
+      writeAuthorRecord(options.stateDir, {
+        backend: options.author, worktree: options.root, session: authorId ?? null, learned,
+        note: session.kind === "unknown" ? session.why : null, at: new Date().toISOString(),
+        restart: authorId ? `cd ${shellWord(options.root)} && pair start ${[...options.restartOptions, "--", ...selector(authorId)].map(shellWord).join(" ")}` : null,
+      });
+    } catch (error) { report(`couldn't save the author's session for pair stop to report: ${errorMessage(error)}`); }
+  };
+  // The author's pair send reports its own conversation (CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID): the only way
+  // to learn it after --continue, a fork or a new Codex session, and it follows the author through a /clear.
+  const learnAuthor = (id: unknown, requestedRun: unknown) => {
+    if (requestedRun !== run || typeof id !== "string" || !UUID.test(id) || id === authorId) {
+      return;
+    }
+    authorId = id;
+    learned = "author-env";
+    state.authorSession = `${id} (reported by the author)`;
+    update();
+    recordAuthor((problem) => log(`pair: ${problem}\n`)); // the author has the terminal
   };
   const signal = () => { authorCode = 130; void shutdown(); };
   let heartbeat: NodeJS.Timeout | undefined;
@@ -540,16 +575,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     writeFileSync(join(runDir, "bin", "pair"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(options.entry)} "$@"\n`, { mode: 0o700 });
     chmodSync(path, 0o600);
     saveState(options.stateDir, state); // the guardian's cleanup needs it, so startup fails without it
-    const { session } = options;
-    const known = session.kind !== "unknown";
-    try {
-      writeAuthorRecord(options.stateDir, {
-        backend: options.author, worktree: options.root, session: known ? session.id : null,
-        learned: session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null,
-        note: session.kind === "unknown" ? session.why : null, at: new Date().toISOString(),
-        restart: known ? `cd ${shellWord(options.root)} && pair start ${[...options.restartOptions, "--", ...session.rest, "--resume", session.id].map(shellWord).join(" ")}` : null,
-      });
-    } catch (error) { console.error(`pair: warning: couldn't save the author's session for pair stop to report: ${errorMessage(error)}`); }
+    recordAuthor((problem) => console.error(`pair: warning: ${problem}`));
     server.on("connection", (socket) => {
       sockets.add(socket);
       socket.on("error", () => {});
@@ -565,7 +591,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             const request = JSON.parse(input);
             if (request.action === "status") socket.end(`${JSON.stringify({ state })}\n`);
             else if (request.action === "stop") { await shutdown(); socket.end('{"ok":true}\n'); }
-            else if (request.action === "review") { await review(request.file, request.run); socket.end('{"ok":true}\n'); }
+            else if (request.action === "review") { learnAuthor(request.author, request.run); await review(request.file, request.run); socket.end('{"ok":true}\n'); }
             else socket.end('{"error":"unknown auto action"}\n');
           } catch (error) { socket.end(`${JSON.stringify({ error: errorMessage(error) })}\n`); }
         })();
@@ -609,10 +635,14 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           }
         }
       } else if (event.type === "finished") {
-        jobs.delete(event.id);
+        const spawned = jobs.delete(event.id);
         output.delete(event.id);
         if (event.id === "author") {
           if (!stopping) authorCode = event.result.code ?? 1;
+          if (!spawned) { // otherwise pair start would exit 1 without a word
+            state.error = `the ${options.author} author couldn't start: ${event.result.error ?? "unknown error"}`;
+            console.error(`pair: ${state.error}`);
+          }
           void shutdown();
         } else if (active && active.id === event.id) {
           const current = active;

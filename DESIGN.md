@@ -198,9 +198,14 @@ With a terminal on stdin and stdout and no `--yes`, it then waits for Enter; rea
 stdin before the guardian launches the author. The launcher then changes to the session's worktree,
 so `pair ps` groups it there.
 
-A Claude author's conversation ID is recorded only when it is known before launch: pair passes
-`--session-id` to a new conversation and keeps the ID of `--resume <uuid>`. `--continue`,
-`--fork-session` and a `--resume` name or search term stay unknown, and pair refuses `--continue`
+The author's conversation ID comes from pair before launch when it can: pair passes `--session-id`
+to a new Claude conversation, and keeps the ID of Claude's `--resume <uuid>` or Codex's
+`resume <uuid>`. Codex is resumed only by ID, since a name, a search or `--last` could pick another
+directory's conversation. In every other case (a new Codex conversation, `--continue`,
+`--fork-session`, a `--resume` name or search term), the author's review request carries the ID
+that its CLI sets for the commands it runs (`CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID`). The
+owner accepts it only as a UUID with this run's ID, and the launcher removes both variables from
+the author's inherited environment so a stale value can't be reported. Pair refuses `--continue`
 together with `--resume`. `author.json` in the state directory (written atomically, mode 0600) keeps
 the last known ID and a restart command that starts with `cd` to the worktree. It survives
 `pair stop`, and it is presented as recovery data, never as proof that the conversation still

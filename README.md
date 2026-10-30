@@ -192,12 +192,15 @@ session (`-p`, `--bg`), select a Codex subcommand, move the author away from its
 `--worktree`), or replace settings pair passes. The reviewer list excludes everything that changes
 its tools, permissions or sandbox (§10). Codex reviewer options must also work with `exec resume`.
 
-For a Claude author, pair records the conversation's ID only when it knows it: a new conversation
-gets an ID pair picks (`--session-id`), and `--resume ID` keeps that ID. With `--continue`,
-`--fork-session`, or a `--resume` name or search term, Claude picks the conversation, and pair
-records it as unknown. `--continue` picks the newest conversation in the directory the session runs
-in, which is the worktree, not where you typed the command. `--continue` and `--resume` together
-are refused. Pair can't learn a Codex author's ID.
+A Codex author resumes a conversation with `-- resume <UUID> [options]`, by ID only; `resume`
+MUST come first. Pair records the author's conversation ID when it knows it. A new Claude
+conversation gets an ID pair picks (`--session-id`), and a resumed one keeps the ID it was given.
+Otherwise (a new Codex conversation, or Claude's `--continue`, `--fork-session`, or `--resume` with
+a name or search term), the CLI picks the conversation, and pair learns its ID from the author's
+first review request, which carries the ID the CLI sets for the author's commands
+(`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`). `--continue` picks the newest conversation in the
+directory the session runs in, which is the worktree, not where you typed the command. `--continue`
+and `--resume` together are refused.
 
 ### 5.4. Control and recovery
 
@@ -215,10 +218,12 @@ pair stop      # stop the author, its reviewers and their tools
   own error message, shortened and with control characters escaped. The author retries the round
   with `pair wait --as <author>` in the same session, with the same reviewer settings. To change
   `--reviewer-model` or `--reviewer-effort`, stop the session and start it again.
-- `pair status` and `pair stop` show the Claude author's last known conversation ID (§5.3) and a
-  command that starts the session again in this worktree and resumes it, for example
-  `cd /path/to/worktree && pair start --as claude -- --resume <id>`. Change any option in it before
-  running it. This is recovery data: pair does not check that the conversation still exists.
+- `pair status` and `pair stop` show the author's last known conversation ID (§5.3) and a command
+  that starts the session again in this worktree and resumes it, for example
+  `cd /path/to/worktree && pair start --as claude -- --resume <id>`, or `-- resume <id>` for Codex.
+  Change any option in it before running it. This is recovery data: pair does not check that the
+  conversation still exists.
+- If the author can't be started at all, `pair start` says why and exits 1.
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,

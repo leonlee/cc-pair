@@ -1797,10 +1797,12 @@ options:
   -- AUTHOR_ARGS...            pass the rest to the interactive claude or codex. Only options that
                                keep it an interactive session in this worktree are accepted, each
                                with at most one value; others are refused with the supported list.
-                               A new claude conversation gets an ID pair picks; pair status and
-                               pair stop show it with a command that resumes it. --resume ID keeps
-                               that ID; with --continue, --fork-session or a --resume name, Claude
-                               picks the conversation and pair can't name it.
+                               A codex author resumes with -- resume <UUID> [options]. pair status
+                               and pair stop show the author's conversation ID with a command that
+                               resumes it: a new claude conversation gets an ID pair picks, and a
+                               resumed one keeps its ID. Otherwise (a new codex conversation,
+                               --continue, --fork-session, a --resume name), pair learns the ID from
+                               the author's first review request.
 
   pair start --as claude --reviewer-effort high -- --model opus --permission-mode acceptEdits
   pair start --as codex --worktree feature/login
@@ -1926,7 +1928,9 @@ async function main(argv: string[]): Promise<number> {
     const state = channelAccess(channel, () => stateOf(listMessages(thread)));
     if (state.kind !== "awaiting-review") return false;
     try {
-      await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file }, 24 * 60 * 60 * 1000);
+      // The author's own conversation ID, which its CLI sets for the commands it runs; the owner records it for pair stop.
+      const author = me === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : process.env.CODEX_THREAD_ID;
+      await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file, author }, 24 * 60 * 60 * 1000);
     } catch (error) {
       if (hasCode(error, "EPERM", "EACCES")) {
         throw new PairError(`managed review cannot connect to ${autoSocketPath(stateDir(channel))}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
