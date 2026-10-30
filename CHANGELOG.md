@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.3 (2026-10-30)
+
+The documentation is restructured. The README now covers auto mode first. Resuming an author
+conversation is described in one place (Author conversations), and worktrees in one section for
+both modes. Out-of-date examples and old upgrade notes are gone; links to the old sections still
+work. DESIGN.md's auto-session design is split into startup, review rounds, author conversations
+and supervision. `pair help start` is shorter and shows `--resume`, and `pair help stop` covers
+Codex authors too. No behavior changes.
+
 ## 0.7.2 (2026-10-30)
 
 `pair start --resume` resumes the author conversation pair last recorded for the checkout the
