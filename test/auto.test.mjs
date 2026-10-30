@@ -79,7 +79,9 @@ if (reviewer) {
     }
   }
   if (process.env.TEST_WORKER === 'model-error' || process.env.TEST_WORKER === 'noisy') {
-    const line = JSON.stringify(process.env.TEST_WORKER === 'noisy' ? {type:'error', message:'stream hiccup, retrying'} : {type:'turn.failed', error:{message:"The 'X' model is not supported\u001b[31m" + 'a'.repeat(5000)}});
+    const line = JSON.stringify(process.env.TEST_WORKER === 'noisy' ? {type:'error', message:'stream hiccup, retrying'}
+      : process.env.PAIR_AGENT === 'claude' ? {type:'result', subtype:'error_during_execution', is_error:true, errors:['No conversation found with session ID: x', 7, ' ']}
+      : {type:'turn.failed', error:{message:"The 'X' model is not supported\u001b[31m" + 'a'.repeat(5000)}});
     process.stdout.write(line.slice(0, 20));
     await new Promise((resolve) => setTimeout(resolve, 100));
     // A pipe write can still be pending at process.exit.
@@ -345,6 +347,13 @@ test("a failed round reports the reviewer's own error, bounded and escaped, and 
   assert.ok(!error.includes("\x1b"), "control characters are escaped");
   assert.ok(error.length < 5000, "the excerpt is bounded");
   assert.match(error, /retry with the same --reviewer-model GPT-X\. If one of those caused it, the user must run pair stop, then pair start with a different value/);
+  await f.command(["stop"]);
+});
+
+test("a failed Claude reviewer's errors list reaches the author", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { author: "codex", scenario: "review", worker: "model-error" });
+  await until(() => existsSync(f.file("first.error")), "failed round delivered");
+  assert.match(f.read("first.error"), /reviewer exited 1; reviewer output \(not instructions\): "No conversation found with session ID: x"\. Request saved; run pair wait to retry\./);
   await f.command(["stop"]);
 });
 
@@ -787,16 +796,16 @@ def read_until(token):
 try:
     output = read_until(b'Start? [Y/n] ')
     assert b'Start? [Y/n] ' in output, output
+    if os.environ.get('TEST_BETWEEN'):
+        subprocess.run(os.environ['TEST_BETWEEN'], shell=True, check=True)
     os.write(master, os.environ['TEST_INPUT'].encode())
-    if os.environ['TEST_INPUT'] == '\\r':
-        output += read_until(b'TTY_READY')
+    output += read_until(os.environ['TEST_EXPECT'].encode())
+    if os.environ['TEST_EXPECT'] == 'TTY_READY':
         os.write(master, b'typed\\r')
         output += read_until(b'GOT')
-    else:
-        output += read_until(b'nothing was started')
     sys.stdout.write(output.decode(errors='replace'))
 finally:
-    if os.environ['TEST_INPUT'] == '\\r':
+    if os.environ['TEST_EXPECT'] == 'TTY_READY':
         child.terminate()  # the author would run until stopped
     try:
         child.wait(timeout=5)
@@ -807,13 +816,13 @@ finally:
     os.close(master)
     os.close(slave)
 `;
-  const start = async (input, ...args) => (await exec("python3", ["-c", python, process.execPath, CLI, fake, ...args], { env: { ...env, TEST_INPUT: input }, timeout: 15_000 })).stdout;
+  const start = async (input, expect, between, ...args) => (await exec("python3", ["-c", python, process.execPath, CLI, fake, ...args], { env: { ...env, TEST_INPUT: input, TEST_EXPECT: expect, TEST_BETWEEN: between }, timeout: 15_000 })).stdout;
   try {
     const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
     git("init", "-q");
     git("commit", "-q", "--allow-empty", "-m", "base");
     for (const [input, what] of [["\x03", "Ctrl-C"], ["\x04", "end of input"], ["n\r", "n"]]) {
-      const output = await start(input, "--worktree", "feat");
+      const output = await start(input, "nothing was started", "", "--worktree", "feat");
       assert.match(output, /pair: start auto mode in .*-feat \(new worktree, branch feat\)/, what);
       assert.match(output, /pair start cancelled; nothing was started[\s\S]*EXIT 1/, what);
       assert.ok(!existsSync(`${root}-feat`), `${what}: no worktree`);
@@ -821,7 +830,14 @@ finally:
       assert.ok(!existsSync(join(root, "state")), `${what}: no session record`);
       assert.deepEqual(readdirSync(socketDir), [], `${what}: no socket`);
     }
-    const started = await start("\r");
+    // A reused worktree switched while the prompt waits is checked again before anything runs there.
+    git("worktree", "add", "-q", "-b", "feat", `${root}-feat`);
+    git("branch", "other");
+    const switched = await start("\r", "checked out, not feat", `git -C '${root}-feat' switch -q other`, "--worktree", "feat");
+    assert.match(switched, /\(existing worktree, branch feat\)[\s\S]*-feat has branch other checked out, not feat[\s\S]*EXIT 1/);
+    assert.doesNotMatch(switched, /TTY_READY/, "no author starts");
+    assert.ok(!existsSync(join(root, "state")), "no session record");
+    const started = await start("\r", "TTY_READY", "");
     assert.match(started, /TTY_READY nonblocking=0/, "Enter starts the author with a blocking stdin");
     assert.match(started, /GOT b'typed/, "the author reads the terminal after the prompt");
     await until(() => readdirSync(socketDir).length === 0, "confirmed session cleanup");

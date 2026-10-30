@@ -68,17 +68,21 @@ function sessionId(event: unknown): string | undefined {
   return typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id) ? id : undefined;
 }
 
-/** An error a reviewer CLI reported in its JSON stream: Codex `error`/`turn.failed`, Claude's failed `result`. */
+/**
+ * An error a reviewer CLI reported in its JSON stream: Codex `error`/`turn.failed`, or Claude's failed
+ * `result`, which carries `errors: string[]` and sometimes a `result` string.
+ */
 function reviewerError(event: unknown): string | undefined {
   if (typeof event !== "object" || event === null) {
     return undefined;
   }
-  const { type, message, error, is_error: isError, result } = event as Record<string, unknown>;
-  const text = type === "error" ? message
-    : type === "turn.failed" && typeof error === "object" && error !== null ? (error as Record<string, unknown>).message
-    : type === "result" && isError === true ? result
-    : undefined;
-  return typeof text === "string" && text.trim() ? text.trim() : undefined;
+  const { type, message, error, is_error: isError, result, errors } = event as Record<string, unknown>;
+  const texts = type === "error" ? [message]
+    : type === "turn.failed" && typeof error === "object" && error !== null ? [(error as Record<string, unknown>).message]
+    : type === "result" && isError === true ? [result, ...(Array.isArray(errors) ? errors : [])]
+    : [];
+  const found = texts.filter((text): text is string => typeof text === "string" && text.trim() !== "").map((text) => text.trim());
+  return found.length ? found.join("; ") : undefined;
 }
 
 /** Reviewer output is shown to the author and the user: bounded, with control characters escaped. */

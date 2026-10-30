@@ -215,6 +215,15 @@ function checkBranch(path: string, name: string, what: string): void {
   }
 }
 
+/** An existing path must be a worktree of this repository with NAME checked out; pair never switches it. */
+function checkReused(root: string, path: string, name: string): void {
+  const top = gitPath("--show-toplevel", path);
+  if (!top || realpathSync(top) !== realpathSync(path) || gitPath("--git-common-dir", path) !== gitPath("--git-common-dir", root)) {
+    throw new PairError(`${path} already exists and isn't a worktree of this repository`);
+  }
+  checkBranch(path, name, "has");
+}
+
 /** ../<repo>-NAME on branch NAME, created from HEAD on first use and reused after. Checks only; changes nothing. */
 function planWorktree(root: string, name: string): WorktreePlan {
   if (!gitPath("--show-toplevel")) {
@@ -226,11 +235,7 @@ function planWorktree(root: string, name: string): WorktreePlan {
   }
   const path = join(dirname(root), `${basename(root)}-${name.replaceAll("/", "-")}`);
   if (existsSync(path)) {
-    const top = gitPath("--show-toplevel", path);
-    if (!top || realpathSync(top) !== realpathSync(path) || gitPath("--git-common-dir", path) !== gitPath("--git-common-dir", root)) {
-      throw new PairError(`${path} already exists and isn't a worktree of this repository`);
-    }
-    checkBranch(path, name, "has");
+    checkReused(root, path, name);
     return { name, path };
   }
   const ok = (ref: string) => git(["rev-parse", "--verify", "--quiet", ref], root).status === 0;
@@ -256,6 +261,8 @@ function openWorktree(root: string, plan: WorktreePlan): string {
       throw new PairError(`git worktree add ${path} failed`);
     }
     checkBranch(path, name, "was created with");
+  } else {
+    checkReused(root, path, name); // again: it may have changed while pair start waited for Enter
   }
   const worktree = realpathSync(path);
   // Instruction files that aren't committed on the branch only exist in the checkout pair init ran in.
