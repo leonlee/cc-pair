@@ -162,9 +162,10 @@ each bounded reviewer.
 
 ### Startup
 
-Everything that can be checked without changing anything runs first: options, the forwarded
-argument allowlists, both executables (resolved once), the socket directory, the `--worktree` name
-and target, and the `--resume` record. Pair then prints the plan: the worktree, the author's
+The checks run first: options, the forwarded argument allowlists, both executables, the
+`--worktree` name and target, and the `--resume` record. The only thing prepared before
+confirmation is the private socket directory, which is created if missing so its ownership and
+mode can be checked. Pair then prints the plan: the worktree, the author's
 conversation and the reviewer's settings. With a terminal on stdin and stdout and no `--yes`, it
 waits for Enter; readline releases stdin before the guardian launches the author.
 
