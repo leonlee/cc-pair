@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.0 (2026-10-30)
+
+`pair start` first prints where the session will run, the author's conversation and the
+reviewer's settings, and in a terminal waits for Enter. `n`, Ctrl-C or end of input cancels before
+anything is created. Use `-y` to start without waiting, for example in scripts that run in a
+terminal. A reused `--worktree` is checked again after you press Enter, in case it was switched
+while pair waited.
+
+A failed review round now includes the reviewer's own error, shortened and with control
+characters escaped. It also names any `--reviewer-model` or `--reviewer-effort` that a `pair wait`
+retry keeps; to change them, stop the session and start it again.
+
+A new Claude author gets a conversation ID that pair picks, and `--resume <UUID>` keeps its ID.
+`pair status` and `pair stop` show the last known ID with a command that starts the session again
+in its worktree and resumes that conversation. `--continue`, `--fork-session` and resuming by name
+leave the ID unknown, and `--continue` together with `--resume` is refused. The author's
+instructions name `"$PAIR_BIN"` rather than a path that changes on every run, so a resumed
+conversation keeps working. Each launch also tells conversations from older versions to use
+`"$PAIR_BIN"`.
+
+`pair ps` lists a `--worktree` session's launcher under the worktree it runs in.
+
 ## 0.6.1 (2026-10-29)
 
 `pair` with no arguments now lists `pair help [command]` in its usage, so per-command help is
