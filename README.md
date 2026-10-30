@@ -83,8 +83,9 @@ non-interactive reviewer for one round, and the review comes back inline to the 
 Round limits and escalation are as in manual mode. Auto mode needs neither the MCP server nor a
 second terminal.
 
-Before it creates anything, `pair start` prints where the session will run, the author's
-conversation, the reviewer's settings, and whether it will run `pair init` there:
+Before it creates a worktree, writes a file or starts an agent, `pair start` prints where the
+session will run, the author's conversation, the reviewer's settings, and whether it will run
+`pair init` there:
 
 ```
 pair: start auto mode in /Users/you/your-repo-feat (new worktree, branch feat); pair init runs there if its branch lacks the instructions
@@ -93,8 +94,8 @@ pair:   reviewer codex · model CLI default · effort CLI default
 Start? [Y/n]
 ```
 
-In a terminal it waits for Enter; anything else, Ctrl-C or end of input cancels before anything is
-created. `-y` starts without waiting.
+In a terminal it waits for Enter; anything else, Ctrl-C or end of input cancels, and nothing is
+started. `-y` starts without waiting.
 
 <a id="51-options"></a>
 ### 3.1. Options
@@ -102,7 +103,7 @@ created. `-y` starts without waiting.
 | Option | Default | Meaning |
 |---|---|---|
 | `--worktree NAME` | current worktree | Run in the worktree `../<repo>-NAME` ([Worktrees](#5-worktrees)) |
-| `--resume` | new conversation | Resume the author conversation pair last recorded there ([Author conversations](#33-author-conversations)) |
+| `--resume` | new conversation | Resume the author conversation pair last recorded for the session's worktree ([Author conversations](#33-author-conversations)) |
 | `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias, passed as given (Codex IDs are case-sensitive) |
 | `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
@@ -148,9 +149,11 @@ excludes everything that changes its tools, permissions or sandbox
 
 | To continue | Claude author | Codex author |
 |---|---|---|
-| A specific conversation | `-- --resume <id>` | `-- resume <id>` |
-| The newest conversation in the session's worktree | `-- --continue` | not supported |
-| The conversation pair last recorded for the worktree | `--resume` | `--resume` |
+| A specific conversation | `pair start --as claude -- --resume <id>` | `pair start --as codex -- resume <id>` |
+| The newest conversation in the session's worktree | `pair start --as claude -- --continue` | not supported |
+| The conversation pair last recorded for the worktree | `pair start --as claude --resume` | `pair start --as codex --resume` |
+
+The last row uses pair's own `--resume`, before `--`; the others pass the CLI's options after `--`.
 
 Codex is resumed by ID only, with `resume` as the first author argument. `--continue` picks the
 newest conversation in the worktree the session runs in, not where you typed the command.
@@ -164,8 +167,8 @@ as unknown.
 
 `pair status` and `pair stop` show the last recorded ID and a command that starts the session again
 in its worktree and resumes it, for example
-`cd /path/to/worktree && pair start --as claude -- --resume <id>`. Change any option in it before
-running it.
+`cd /path/to/worktree && pair start --as claude -- --resume <id>`. You can change its options
+before running it.
 
 `pair start --resume` uses that record without copying the ID. The record MUST be for the same
 CLI and have a known ID, the worktree MUST already exist, and the author arguments MUST NOT select
@@ -189,8 +192,8 @@ pair stop      # stop the author, its reviewers and their tools
 
 - At most one launcher owns a worktree. A registered manual Codex session blocks `pair start`
   until `pair unregister`.
-- A failed launch, missing verdict or timeout keeps the request, and the error includes the
-  reviewer's own message. The author retries the round with `pair wait --as <author>`, with the
+- A reviewer that fails to start, ends without a verdict or times out keeps the request, and the
+  error includes the reviewer's own message. The author retries the round with `pair wait --as <author>`, with the
   same reviewer settings. To change `--reviewer-model` or `--reviewer-effort`, stop the session and
   start it again; `--resume` keeps the author's conversation.
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
@@ -265,8 +268,8 @@ become dashes):
   never switches it, and refuses to start if it changes while the summary waits for Enter.
 - If the worktree lacks the instructions, pair runs `pair init` there; the current checkout is left
   alone.
-- `pair status` and `pair stop` MUST be run in the worktree. It remains after the session; remove it
-  with `git worktree remove`.
+- `pair status` and `pair stop` MUST be run in the worktree. The worktree remains after the session;
+  remove it with `git worktree remove`.
 
 The agents' own directory and worktree options are refused ([Forwarded arguments](#32-forwarded-arguments)).
 
@@ -316,11 +319,11 @@ instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
   .claude/skills/pair/SKILL.md: current
 codex notifications: no session registered
-auto mode: claude author, codex reviewer · reviewing · owner 65158
-  author session: 41646e9e-f45c-4c57-9ff4-d549cfdfc761 (resumed)
+auto mode: claude author, codex reviewer · reviewing · owner 41820
+  author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
   reviewer model override: CLI default
   reviewer effort override: CLI default
-  reviewer pid: 66012
+  reviewer pid: 41907
   log: /Users/you/.local/state/pair/your-repo-12345678/auto.log
 ```
 
@@ -357,8 +360,9 @@ failure names the backup already written.
 Run `pair upgrade` in your own terminal; agent sandboxes block the network and global installs. It
 installs the latest release and refreshes this worktree's instructions. Other worktrees refresh
 on their next `send`, `wait`, `history` or `clean`. Instruction files are owned by pair and
-overwritten, except files a newer pair wrote. Restart Claude Code and Codex afterwards; an auto
-session restarts with `pair stop`, then `pair start --resume`.
+overwritten, except files a newer pair wrote. Restart Claude Code and Codex afterwards. To restart
+an auto session in the same conversation, run `pair stop`, then `pair start --resume`
+([Author conversations](#33-author-conversations)).
 
 <a id="83-uninstall"></a>
 ### 7.3. Uninstall
