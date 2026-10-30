@@ -491,7 +491,7 @@ test("auto start --worktree checks its input first, and reuses an existing workt
     assert.match(start("--worktree", "fix-one").stderr, /repo-fix-one \(existing worktree, branch fix\/one\)[\s\S]*a manual Codex session is registered here/);
     assert.equal(spawnSync("git", ["rev-parse", "--verify", "--quiet", "refs/heads/fix-one"], { cwd: root }).status, 1, "nothing is switched or created");
     assert.equal(spawnSync("git", ["checkout", "-q", "--detach"], { cwd: join(base, "repo-fix-one") }).status, 0);
-    assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one \(existing worktree, a detached HEAD\)[\s\S]*a manual Codex session is registered here/);
+    assert.match(start("--worktree", "fix/one").stderr, /repo-fix-one \(existing worktree, a detached HEAD at [0-9a-f]{12}\)[\s\S]*a manual Codex session is registered here/);
     // A branch on several remotes needs checkout.defaultRemote; nothing is created without it.
     for (const remote of ["r1", "r2"]) {
       assert.equal(spawnSync("git", ["init", "-q", "--bare", join(base, `${remote}.git`)]).status, 0);
@@ -906,6 +906,14 @@ finally:
     const switched = await start("\r", "run pair start again", `git -C '${root}-feat' switch -q other`, "--worktree", "feat");
     assert.match(switched, /\(existing worktree, branch feat\)[\s\S]*-feat changed while pair start waited: it has branch other checked out now, not branch feat; run pair start again[\s\S]*EXIT 1/);
     assert.doesNotMatch(switched, /TTY_READY/, "no author starts");
+    assert.ok(!existsSync(join(root, "state")), "no session record");
+    // A detached HEAD has no branch, so its commit is what the summary showed and what is checked again.
+    git("commit", "-q", "--allow-empty", "-m", "second");
+    const second = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
+    assert.equal(spawnSync("git", ["checkout", "-q", "--detach", "other"], { cwd: `${root}-feat` }).status, 0);
+    const moved = await start("\r", "run pair start again", `git -C '${root}-feat' checkout -q --detach ${second}`, "--worktree", "feat");
+    assert.match(moved, /\(existing worktree, a detached HEAD at [0-9a-f]{12}\)[\s\S]*-feat changed while pair start waited: it has a detached HEAD at [0-9a-f]{12} checked out now, not a detached HEAD at [0-9a-f]{12}; run pair start again[\s\S]*EXIT 1/);
+    assert.doesNotMatch(moved, /TTY_READY/, "no author starts");
     assert.ok(!existsSync(join(root, "state")), "no session record");
     const started = await start("\r", "TTY_READY", "");
     assert.match(started, /TTY_READY nonblocking=0/, "Enter starts the author with a blocking stdin");

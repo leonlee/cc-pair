@@ -195,7 +195,7 @@ interface WorktreePlan {
   name: string;
   path: string;
   add?: string[];
-  /** A reused worktree's HEAD as the summary showed it: refs/heads/BRANCH, or empty when detached. */
+  /** A reused worktree's HEAD as the summary showed it: refs/heads/BRANCH, or the commit when detached. */
   head?: string;
 }
 
@@ -207,13 +207,14 @@ function git(args: string[], cwd: string): SpawnSyncReturns<string> {
   return result;
 }
 
-// The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME.
+// The full ref, since --short abbreviates a branch to heads/NAME when a tag is also NAME. A detached HEAD
+// has no branch to name, so its commit is its identity.
 function headOf(path: string): string {
-  return git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim();
+  return git(["symbolic-ref", "--quiet", "HEAD"], path).stdout.trim() || git(["rev-parse", "--verify", "--quiet", "HEAD"], path).stdout.trim();
 }
 
 function describeHead(head: string): string {
-  return head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : "a detached HEAD";
+  return head.startsWith("refs/heads/") ? `branch ${head.slice("refs/heads/".length)}` : `a detached HEAD at ${head.slice(0, 12)}`;
 }
 
 /**
@@ -1784,11 +1785,11 @@ terminal waits for Enter.
 
 options:
   --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
-  --worktree NAME              run everything in the git worktree ../<repo>-NAME on branch NAME.
-                               The first run creates them (a new branch from HEAD, so uncommitted
-                               changes stay here, or one tracking a remote branch NAME). Later runs
-                               reuse it on whatever branch it has checked out then; the summary
-                               shows it.
+  --worktree NAME              run everything in the git worktree ../<repo>-NAME.
+                               The first run creates it on branch NAME (a new branch from HEAD, so
+                               uncommitted changes stay here, or one tracking a remote NAME). Later runs
+                               reuse it with whatever it has checked out then (a branch or a
+                               detached HEAD); the summary shows it.
   -y, --yes                    start without waiting for Enter
   --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)

@@ -159,16 +159,16 @@ unsupported model/effort combination fails the round and keeps the request.
 
 ### 5.2. Worktrees
 
-`--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes) on
-branch `NAME`:
+`--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes become dashes):
 
-- If the path does not exist, pair runs `git worktree add`. An existing local branch is checked
-  out. A branch found only on remotes is created to track it: on one remote, that remote; on
-  several, the one named by `checkout.defaultRemote`, and pair refuses if none is. Otherwise a new
-  branch starts at `HEAD`, so uncommitted changes stay in the current checkout. A tag named `NAME`
-  is never checked out instead.
+- If the path does not exist, pair creates it on branch `NAME` with `git worktree add`. An existing
+  local branch is checked out. A branch found only on remotes is created to track it: on one
+  remote, that remote; on several, the one named by `checkout.defaultRemote`, and pair refuses if
+  none is. Otherwise a new branch starts at `HEAD`, so uncommitted changes stay in the current
+  checkout. A tag named `NAME` is never checked out instead.
 - If the path exists, it MUST be a worktree of this repository. The session runs on whatever it
-  has checked out, which need not be `NAME` (a branch may have been renamed); the summary shows it.
+  has checked out, a branch that need not be `NAME` (it may have been renamed) or a detached
+  `HEAD`; the summary shows which.
   Pair never switches it, and refuses to start if it changes while the summary waits for Enter.
 - If the worktree lacks pair's instructions (a new branch has only what was committed), pair runs
   `pair init` there. The current checkout is left alone.
