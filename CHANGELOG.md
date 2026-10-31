@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.4 (2026-10-31)
+
+When a managed review fails, the author now shows you the error as printed, retries once, and if
+the same failure comes back, stops and asks you, naming any reviewer model or effort a retry keeps.
+The failure text states facts instead of telling the author to stop whenever an override is set.
+The agents' instructions and the author's system prompt share this rule. Instructions refresh in
+each worktree on the next `send` or `wait`.
+
+If `pair wait` delivers a finished thread but can't archive it, for example in the Codex desktop
+app, whose sandbox may not apply `writable_roots`, it warns and exits 0 instead of failing; the
+next `wait` that can write the channel archives it. Inside Codex, the channel access error now
+says to run the pair command outside the sandbox or grant the session write access.
+
 ## 0.7.3 (2026-10-30)
 
 The documentation is restructured. The README now covers auto mode first. Resuming an author
