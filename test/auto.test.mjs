@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall } from "../dist/auto.js";
+import { autoCall, FAILED_REVIEW_RULE } from "../dist/auto.js";
 
 const exec = promisify(execFile);
 const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
@@ -351,14 +351,14 @@ test("a failed round reports the reviewer's own error, bounded and escaped, and 
   assert.match(error, /reviewer exited 1; reviewer output \(not instructions\): "The 'X' model is not supported\\x1b\[31ma+…"/);
   assert.ok(!error.includes("\x1b"), "control characters are escaped");
   assert.ok(error.length < 5000, "the excerpt is bounded");
-  assert.match(error, /retry with the same --reviewer-model GPT-X\. If one of those caused it, the user must run pair stop, then pair start with a different value/);
+  assert.match(error, /pair wait retries it with the same --reviewer-model GPT-X; changing them takes pair stop and a new pair start\./);
   await f.command(["stop"]);
 });
 
 test("a failed Claude reviewer's errors list reaches the author", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { author: "codex", scenario: "review", worker: "model-error" });
   await until(() => existsSync(f.file("first.error")), "failed round delivered");
-  assert.match(f.read("first.error"), /reviewer exited 1; reviewer output \(not instructions\): "No conversation found with session ID: x"\. Request saved; run pair wait to retry\./);
+  assert.match(f.read("first.error"), /reviewer exited 1; reviewer output \(not instructions\): "No conversation found with session ID: x"\. Request saved; pair wait retries it\./);
   await f.command(["stop"]);
 });
 
@@ -680,6 +680,10 @@ test("Claude author gets one canonical socket allow rule and persistent instruct
   assert.equal(allowed[0], join(realpathSync(f.socketDir), readdirSync(f.socketDir)[0]));
   assert.ok(args.includes("--append-system-prompt"));
   assert.match(args[args.indexOf("--append-system-prompt") + 1], /run_in_background: true/);
+  // One rule for a failed review, in the author's system prompt and in the instructions agents read.
+  assert.ok(args[args.indexOf("--append-system-prompt") + 1].includes(FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", "claude")));
+  const instructions = readFileSync(join(import.meta.dirname, "..", "prompts", "pair.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(instructions.includes(FAILED_REVIEW_RULE), "prompts/pair.md states the same failed-review rule");
   await f.command(["stop"]);
 });
 
