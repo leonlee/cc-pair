@@ -320,7 +320,7 @@ test("a result delivered but not archived is a warning, and the next wait archiv
   assert.match(denied.stderr, /^pair: warning: delivered, but couldn't archive the finished thread: cannot access channel path .*\(EPERM\)/);
   assert.doesNotMatch(denied.stderr, /In Codex/, "the Codex hint is only for Codex");
   assert.ok(existsSync(thread), "the closed thread stays in its lane");
-  assert.match(waitDenied({ CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).stderr, new RegExp(`In Codex, if writable_roots is already set, this session's sandbox doesn't apply it .*give the session write access to ${dirname(channel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(waitDenied({ CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).stderr, new RegExp(`In Codex, if writable_roots is already set, this session's sandbox may not apply it .*give the session write access to ${dirname(channel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /verdict approve/, "the result is delivered again");
   assert.ok(!existsSync(thread), "and archived once the channel is writable");
 });
