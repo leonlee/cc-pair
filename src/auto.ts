@@ -688,10 +688,10 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           ];
           // Facts only: whether an override caused it is for the reviewer's own message to say.
           const retry = overrides.length
-            ? `pair wait retries it with the same ${overrides.join(" and ")}; changing them takes pair stop and a new pair start`
+            ? `pair wait retries it with the same ${overrides.join(" and ")}; changing that takes pair stop and a new pair start`
             : "pair wait retries it";
           if (success) current.resolve();
-          else current.reject(new Error(`${state.error}. Request saved; ${retry}. Log: ${state.log}`));
+          else current.reject(new Error(`${state.error}. ${retry[0].toUpperCase()}${retry.slice(1)}. Log: ${state.log}`)); // the author's send adds that the request remains
         }
       }
     });

@@ -351,14 +351,14 @@ test("a failed round reports the reviewer's own error, bounded and escaped, and 
   assert.match(error, /reviewer exited 1; reviewer output \(not instructions\): "The 'X' model is not supported\\x1b\[31ma+…"/);
   assert.ok(!error.includes("\x1b"), "control characters are escaped");
   assert.ok(error.length < 5000, "the excerpt is bounded");
-  assert.match(error, /pair wait retries it with the same --reviewer-model GPT-X; changing them takes pair stop and a new pair start\./);
+  assert.match(error, /Pair wait retries it with the same --reviewer-model GPT-X; changing that takes pair stop and a new pair start\./);
   await f.command(["stop"]);
 });
 
 test("a failed Claude reviewer's errors list reaches the author", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { author: "codex", scenario: "review", worker: "model-error" });
   await until(() => existsSync(f.file("first.error")), "failed round delivered");
-  assert.match(f.read("first.error"), /reviewer exited 1; reviewer output \(not instructions\): "No conversation found with session ID: x"\. Request saved; pair wait retries it\./);
+  assert.match(f.read("first.error"), /reviewer exited 1; reviewer output \(not instructions\): "No conversation found with session ID: x"\. Pair wait retries it\./);
   await f.command(["stop"]);
 });
 
