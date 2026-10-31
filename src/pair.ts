@@ -100,7 +100,7 @@ function channelError(channel: string, error: unknown): unknown {
     const path = "path" in error ? String(error.path) : channel;
     // A Codex session's own sandbox, such as the desktop app's, may not apply writable_roots at all.
     const codex = process.env.CODEX_THREAD_ID
-      ? `\nIn Codex, if writable_roots is already set, this session's sandbox doesn't apply it (the desktop app's doesn't): run this pair command outside the sandbox, or give the session write access to ${dirname(channel)}.`
+      ? `\nIn Codex, if writable_roots is already set, this session's sandbox may not apply it (the desktop app's may not): run this pair command outside the sandbox, or give the session write access to ${dirname(channel)}.`
       : "";
     return new PairError(
       `cannot access channel path ${path} (${error.code}). Check filesystem permissions and sandbox restrictions.\n${sandboxConfig(channel)}${codex}`,
