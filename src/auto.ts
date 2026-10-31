@@ -419,6 +419,9 @@ function lastAuthor(stateDir: string, root: string): string[] {
     : [`  last author session: unknown (${record.note ?? record.backend})`];
 }
 
+/** How an auto author handles a failed managed review. prompts/pair.md says the same; a test keeps them equal. */
+export const FAILED_REVIEW_RULE = "If a managed review fails, the request stays on disk. Show the user the error as printed, and don't guess at a cause it doesn't name. Retry once with `pair wait --as {{AGENT}}`. If the same failure comes back, stop and ask the user, naming any reviewer model or effort the error says a retry keeps.";
+
 export type StartChoices = Pick<AutoOptions, "author" | "claude" | "codex" | "reviewerModel" | "reviewerEffort" | "authorArgs" | "reviewerArgs">;
 
 /** Everything pair start can check before it changes anything, such as creating a worktree. */
@@ -683,11 +686,12 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             ...(options.reviewerModel === undefined ? [] : [`--reviewer-model ${options.reviewerModel}`]),
             ...(options.reviewerEffort === undefined ? [] : [`--reviewer-effort ${options.reviewerEffort}`]),
           ];
+          // Facts only: whether an override caused it is for the reviewer's own message to say.
           const retry = overrides.length
-            ? `run pair wait to retry with the same ${overrides.join(" and ")}. If one of those caused it, the user must run pair stop, then pair start with a different value`
-            : "run pair wait to retry";
+            ? `pair wait retries it with the same ${overrides.join(" and ")}; changing that takes pair stop and a new pair start`
+            : "pair wait retries it";
           if (success) current.resolve();
-          else current.reject(new Error(`${state.error}. Request saved; ${retry}. Log: ${state.log}`));
+          else current.reject(new Error(`${state.error}. ${retry[0].toUpperCase()}${retry.slice(1)}. Log: ${state.log}`)); // the author's send adds that the request remains
         }
       }
     });
@@ -695,7 +699,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     heartbeat = setInterval(() => sendGuardian({ type: "heartbeat" }), 1000);
     for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(name, signal);
     // No run-specific path: Claude records the system prompt and reuses it when the conversation is resumed in a later run.
-    const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewer} as your automatically managed reviewer. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${options.author} -. Follow-up replies use pair send response --as ${options.author} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. Do not register, call pair_listen, or start idle waits in auto mode. If a managed review fails, pair wait --as ${options.author} retries the pending round. For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
+    const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewer} as your automatically managed reviewer. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${options.author} -. Follow-up replies use pair send response --as ${options.author} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. Do not register, call pair_listen, or start idle waits in auto mode. ${FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", options.author)} For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
     // The user's options go first; codex gets -- before the prompt so a multi-value option like --image can't take it.
     const authorArgs = options.author === "claude"
       ? [
