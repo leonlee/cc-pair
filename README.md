@@ -59,6 +59,10 @@ writable_roots = ["/Users/you/.pair"]
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
 
+The Codex desktop app gives each session its own sandbox and may not apply `writable_roots`. There,
+approve Codex's requests to run pair commands outside the sandbox, or give the session write access
+to the channel root in the app.
+
 The agents learn pair from instructions in the worktree: `.claude/skills/pair/SKILL.md` for
 Claude Code and a marked section of `AGENTS.md` for Codex. Claude Code also reads `AGENTS.md`; the
 section tells any agent other than Codex to ignore it. `pair start` writes them where the session

@@ -70,6 +70,9 @@ finished" means by when the thread's last message landed, not when it started, s
 finished always survives when `PAIR_KEEP` is at least 1. An invalid `PAIR_KEEP` makes `send` and `wait`
 fail before they touch any thread. If automatic cleanup itself fails (for example, an undeletable
 directory), `pair` prints a warning and still delivers the result or writes the request.
+If `wait` delivers a closed thread but can't archive it, for example from a sandbox that can read
+the channel but not write it, it warns and still exits 0; the thread stays closed in its lane, so
+the next `wait` delivers it again and the first one that can write archives it.
 Archiving is safe against concurrent readers and stale `wait`s. A thread disappearing mid-read
 counts as closed, and a stale archive can only target its own, already-archived directory, so it
 never touches a newer thread.

@@ -296,6 +296,35 @@ test("channel read and write permission errors name the path and give sandbox hi
   }
 });
 
+test("a result delivered but not archived is a warning, and the next wait archives it", () => {
+  const { root, env, ok } = sandbox();
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  const thread = dirname(ok(["send", "request", "--as", "claude", "-"], "request").replace("sent: ", "").trim());
+  ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "looks good");
+  // The Codex desktop app's sandbox can read the channel but not write it, so the archive rename fails.
+  const hook = join(root, "deny-rename.mjs");
+  writeFileSync(hook, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const rename = fs.renameSync;
+    fs.renameSync = (from, ...rest) => {
+      if (String(from) === ${JSON.stringify(thread)}) throw Object.assign(new Error("denied"), { code: "EPERM", path: String(from) });
+      return rename(from, ...rest);
+    };
+    syncBuiltinESMExports();
+  `);
+  const waitDenied = (extra) => spawnSync("node", ["--import", hook, CLI, "wait", "--as", "claude", "--timeout", "1"], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
+  const denied = waitDenied({});
+  assert.equal(denied.status, 0, denied.stderr);
+  assert.match(denied.stdout, /^== pair: review from codex .* verdict approve ==/);
+  assert.match(denied.stderr, /^pair: warning: delivered, but couldn't archive the finished thread: cannot access channel path .*\(EPERM\)/);
+  assert.doesNotMatch(denied.stderr, /In Codex/, "the Codex hint is only for Codex");
+  assert.ok(existsSync(thread), "the closed thread stays in its lane");
+  assert.match(waitDenied({ CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).stderr, new RegExp(`In Codex, if writable_roots is already set, this session's sandbox doesn't apply it .*give the session write access to ${dirname(channel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /verdict approve/, "the result is delivered again");
+  assert.ok(!existsSync(thread), "and archived once the channel is writable");
+});
+
 test("EPERM channel errors are diagnosed without treating installed prompt errors as channel errors", () => {
   const { root, env, ok } = sandbox();
   const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
