@@ -98,8 +98,12 @@ function sandboxConfig(channel: string): string {
 function channelError(channel: string, error: unknown): unknown {
   if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
     const path = "path" in error ? String(error.path) : channel;
+    // A Codex session's own sandbox, such as the desktop app's, may not apply writable_roots at all.
+    const codex = process.env.CODEX_THREAD_ID
+      ? `\nIn Codex, if writable_roots is already set, this session's sandbox (the desktop app's, for one) may not apply it: run this pair command outside the sandbox, or give the session write access to ${dirname(channel)}.`
+      : "";
     return new PairError(
-      `cannot access channel path ${path} (${error.code}). Check filesystem permissions and sandbox restrictions.\n${sandboxConfig(channel)}`,
+      `cannot access channel path ${path} (${error.code}). Check filesystem permissions and sandbox restrictions.\n${sandboxConfig(channel)}${codex}`,
     );
   }
   return error;
@@ -582,7 +586,13 @@ async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise
     if (pending) {
       console.log(formatMessage(me, pending));
       if (pending.state.kind === "closed") {
-        channelAccess(channel, () => archive(channel, pending.state.last));
+        try {
+          channelAccess(channel, () => archive(channel, pending.state.last));
+        } catch (error) {
+          // The result is delivered; a failed archive must not look like a failed wait. The thread stays
+          // closed in its lane, and the next wait or send request that can write the channel archives it.
+          console.error(`pair: warning: delivered, but couldn't archive the finished thread: ${errorMessage(error)}`);
+        }
       }
       return true;
     }
