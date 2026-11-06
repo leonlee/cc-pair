@@ -125,6 +125,61 @@ test("escalates when the round cap is hit with findings still open", () => {
   assert.match(archived, /codex-to-claude-escalated$/);
 });
 
+test("brainstorm: the budget is fixed at open, the last round must complete, and it archives as completed", () => {
+  const { root, env, run, ok } = sandbox();
+  env.PAIR_MAX_ROUNDS = "2";
+  const opened = ok(["send", "request", "--brainstorm", "--as", "claude", "-"], "## Problem\nhow to cache").replace("sent: ", "").trim();
+  assert.match(readFileSync(opened, "utf8"), /^---\nfrom: claude\ntype: request\nround: 1\nstatus: brainstorming\nbudget: 2\n---\n/);
+  delete env.PAIR_MAX_ROUNDS;
+
+  const first = ok(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.match(first, /^== pair: brainstorm request from claude · claude-to-codex · round 1 ==/);
+  assert.match(first, /next: add your ideas, then: pair send review --verdict continue\|complete/);
+  assert.match(ok(["status"]), /claude-to-codex: brainstorm awaiting-review \(round 1, codex's turn\)/);
+  assert.match(run(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "x").out, /this thread is a brainstorm; reply with --verdict continue\|complete/);
+  ok(["send", "review", "--as", "codex", "--verdict", "continue", "-"], "A or B?");
+  assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /brainstorm review from codex · claude-to-codex · round 1 · verdict continue[\s\S]*next: reply with your answers/);
+  ok(["send", "response", "--as", "claude", "-"], "B, and my proposal C");
+
+  // The stored budget decides, whatever each shell's PAIR_MAX_ROUNDS says now.
+  assert.match(ok(["wait", "--as", "codex", "--timeout", "1"]), /round 2[\s\S]*next: this is the brainstorm's last round \(budget 2\)[^\n]*--verdict complete/);
+  env.PAIR_MAX_ROUNDS = "5";
+  assert.match(run(["send", "review", "--as", "codex", "--verdict", "continue", "-"], "more").out, /last round \(budget 2\)/);
+  const sent = ok(["send", "review", "--as", "codex", "--verdict", "complete", "-"], "## Options\nB, C\n## Recommendation\nC");
+  assert.doesNotMatch(sent, /ESCALATED/);
+  const done = ok(["wait", "--as", "claude", "--timeout", "1"]);
+  assert.match(done, /verdict complete[\s\S]*next: brainstorm completed and closed/);
+  assert.doesNotMatch(done, /ESCALATED/);
+
+  const [channel] = readdirSync(join(root, "home"));
+  assert.match(readdirSync(join(root, "home", channel, "archive"))[0], /-claude-to-codex-completed$/);
+  assert.match(ok(["history"]), /claude-to-codex {2}completed {2}4 messages {2}how to cache/);
+  assert.match(ok(["status"]), /claude-to-codex: idle/);
+  ok(["send", "request", "--as", "claude", "-"], "a review after it");
+});
+
+test("verdicts and statuses can't cross between reviews and brainstorms", () => {
+  const { run, ok } = sandbox();
+  const request = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  assert.match(run(["send", "review", "--as", "codex", "--verdict", "continue", "-"], "x").out, /this thread is a review; reply with --verdict approve\|changes/);
+  assert.match(run(["send", "review", "--brainstorm", "--as", "codex", "--verdict", "approve", "-"], "x").out, /--brainstorm is only supported by pair send request/);
+  assert.match(run(["send", "--brainstorm", "response", "--as", "claude", "-"], "x").out, /--brainstorm is only supported by pair send request/);
+
+  const corrupt = (file, text, pattern) => {
+    writeFileSync(file, text);
+    const result = run(["wait", "--as", "codex", "--timeout", "1"]);
+    assert.equal(result.code, 1, result.out);
+    assert.match(result.out, pattern);
+  };
+  const review = join(dirname(request), "002-review.md");
+  corrupt(review, "---\nfrom: codex\ntype: review\nround: 1\nverdict: continue\nstatus: brainstorming\n---\nx\n", /a review and a brainstorm can't share a thread/);
+  corrupt(review, "---\nfrom: codex\ntype: review\nround: 1\nverdict: approve\nstatus: completed\n---\nx\n", /verdict must be one of: continue, complete/);
+  rmSync(review);
+  corrupt(request, "---\nfrom: claude\ntype: request\nround: 1\nstatus: brainstorming\n---\nx\n", /a brainstorm request needs a positive whole budget[^\n]*"none"/);
+  corrupt(request, "---\nfrom: claude\ntype: request\nround: 1\nstatus: brainstorming\nbudget: 0\n---\nx\n", /positive whole budget[^\n]*"0"/);
+  corrupt(request, "---\nfrom: claude\ntype: request\nround: 1\nstatus: open\nbudget: 2\n---\nx\n", /positive whole budget[^\n]*"2"/);
+});
+
 test("wait blocks until the partner writes, and messages are stored with frontmatter", async () => {
   const { root, env, ok } = sandbox();
   const waiting = promisify(execFile)("node", [CLI, "wait", "--as", "codex", "--timeout", "10"], { cwd: root, env });

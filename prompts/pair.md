@@ -16,9 +16,10 @@ in all command examples, so a login shell cannot select an older installation fr
 
 If `PAIR_AUTO_ROLE=author`, pair owns the reviewer. After finishing a task, send your request as
 usual. `pair send request` and `pair send response` return the review inline: read it and continue
-the fix/reject loop until approval or escalation. In interactive Claude Code, run these commands
-and managed retry waits with Bash's `run_in_background: true`, end your turn, and read their output
-when the completion notification arrives. Reviews can exceed the foreground Bash timeout. This
+the fix/reject loop until approval or escalation, or in a brainstorm until it completes. In
+interactive Claude Code, run these commands and managed retry waits with Bash's
+`run_in_background: true`, end your turn, and read their output when the completion notification
+arrives. Reviews can exceed the foreground Bash timeout. This
 background command is active review work, not an idle wait loop. Do not register, call `pair_listen`,
 or run idle waits.
 
@@ -102,6 +103,26 @@ When you finish a task:
    Then go back to step 2.
 4. Stop when `wait` reports the thread approved. If it reports ESCALATED, stop and ask the user.
 
+## Brainstorm with {{PARTNER}} (you are the author)
+
+Before a design decision, you can brainstorm with {{PARTNER}} instead of asking for a review. Send the
+problem, the constraints and what's already decided:
+```
+pair send request --brainstorm --as {{AGENT}} - <<'EOF'
+## Problem
+...
+## Constraints
+...
+EOF
+```
+For independent ideas, leave your own proposal out of this first message and share it in your first
+response. Each reply has verdict `continue` or `complete`. On `continue`, answer {{PARTNER}}'s
+questions, push back, or add your proposal with `pair send response`, then wait as for a review. If
+you have what you need, say so, and {{PARTNER}} completes it. The thread closes when {{PARTNER}}
+completes it, at the latest after `PAIR_MAX_ROUNDS` turns (default 3), with the options, a
+recommendation and open decisions. Take decisions that are the user's to the user. A later spec
+request can cite the thread ID.
+
 ## Review for {{PARTNER}} (when the user says "be my reviewer" or "listen")
 
 Loop: wait for a message (see How to wait), review, send your review, then wait again.
@@ -115,6 +136,13 @@ Loop: wait for a message (see How to wait), review, send your review, then wait 
 - On a request with a `## Spec` section, read that thread with `pair history <id>` and the spec, and
   report where the change departs from it. If you can't find the thread or the spec, say so; don't
   assume the change conforms.
+- On a brainstorm (its header says `brainstorm`), don't review code. Propose options with their
+  trade-offs, challenge the author's assumptions, and ask what you need to know. In the first round,
+  if the author hasn't proposed anything, give your own options before judging theirs. Send
+  `--verdict continue` while questions are open, and `--verdict complete` once the options are
+  clear or when the `== next:` line says it's the last round. A complete reply lists the options
+  considered, your recommendation and the open decisions. A brainstorm has no findings and never
+  escalates.
 - On a response, re-check fixed findings and judge each rejection on its merits. Accept good
   reasons. Re-raise only with a counter-argument. Don't add new nitpicks in later rounds.
 

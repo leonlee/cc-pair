@@ -43,6 +43,14 @@ code departs from the spec. `pair history` only sees the current worktree's thre
 spec in the worktree that implements it. This is part of the agents' instructions, not the
 protocol, so pair treats these threads like any other.
 
+A **brainstorm** is a thread for ideas before there's a design: the author asks with
+`pair send request --brainstorm`, the reviewer answers with options, trade-offs and questions and a
+verdict of `continue` or `complete`, and the author replies as in a review. The reviewer gets
+`PAIR_MAX_ROUNDS` turns, fixed when the brainstorm opens, and the last one must complete it with
+the options, a recommendation and the open decisions. A brainstorm never escalates, and it ends as
+**completed**. Both agents need pair 0.8.0 or later: an older pair rejects a brainstorm as a
+corrupt message.
+
 <a id="2-installation"></a>
 <a id="3-setup"></a>
 ## 2. Installation and setup
@@ -236,7 +244,8 @@ Start Claude Code and Codex in separate terminals in the same worktree, after `p
    command; Codex registers and ends its turn until woken ([Waking Codex](#41-waking-codex)).
 2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
 3. The author verifies each finding, then fixes it or rejects it with a reason, and replies.
-4. The thread ends on approval or escalation.
+4. The thread ends on approval or escalation. To brainstorm first, say **"brainstorm this with
+   codex"**; that thread ends when the reviewer completes it.
 
 <a id="31-waking-codex-manual-mode"></a>
 ### 4.1. Waking Codex
@@ -316,7 +325,8 @@ Agents run `send` and `wait`; users mostly run `start`, `stop`, `status`, `histo
 ```
 pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]     # auto mode
 pair stop
-pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
+pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict VERDICT] <file|->
+                             # approve|changes, or continue|complete in a brainstorm
 pair wait --as <claude|codex> [--timeout seconds]   # default 540; prints "no message … yet"
 pair status
 pair history [thread-id]     # finished threads, newest first, or one thread by any unique part of its id
@@ -408,7 +418,7 @@ and remove `~/.pair` from the sandbox settings.
 |---|---|---|
 | `PAIR_HOME` | `~/.pair` | Channel root. Relative paths resolve against the worktree root |
 | `PAIR_AGENT` | none | Default for `--as` |
-| `PAIR_MAX_ROUNDS` | `3` | Rounds before escalation |
+| `PAIR_MAX_ROUNDS` | `3` | Rounds before escalation; a new brainstorm's turns |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
 | `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
 | `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |

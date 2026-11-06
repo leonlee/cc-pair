@@ -16,6 +16,7 @@ a chat channel. In manual mode, each runs as a live session in its own terminal.
 | Request | The author's summary plus a list of files. The reviewer reads the files from the shared repo. |
 | Review | Numbered findings with severity, and a verdict of `approve` or `changes`. Multiple rounds. |
 | Specs | A spec or plan, in any format, is reviewed in an ordinary thread: the request names its paths and commit, and the instructions give the reviewer a spec checklist. An implementation's request can cite the approved thread under `## Spec`; the reviewer reads it with `pair history` and reports departures. Pair parses neither, so no message field or version boundary is needed, and the Claude reviewer's allowlist includes `pair history`. |
+| Brainstorms | `pair send request --brainstorm` opens a thread for ideas in the author's lane. The reviewer replies `continue` or `complete` instead of `approve` or `changes`. Its statuses are `brainstorming` and `completed`, and the kind comes from the status, so pair ≤ 0.7.4 rejects the request as corrupt and can't review it as code; both agents need 0.8.0. The request stores `budget:`, `PAIR_MAX_ROUNDS` when it opened, so the agents' shells can't disagree on it; on the last round `continue` is refused. It never escalates. |
 | Disputes | Cap of 3 rounds (`PAIR_MAX_ROUNDS`). A review that still says `changes` at the cap marks the thread `escalated`, and both agents stop to ask the user. |
 | Concurrency | At most one open thread per direction. |
 | Storage | `~/.pair/<repo>-<hash>/` (or `$PAIR_HOME`). The hash comes from `git rev-parse --show-toplevel`, so each worktree gets its own channel. A reviewer reads the author's files, so both agents must run in the same worktree, and parallel pairs in different worktrees stay isolated. |
@@ -32,7 +33,7 @@ a chat channel. In manual mode, each runs as a live session in its own terminal.
       003-response.md                 # round 2
       004-review.md                   # round 2, verdict approve, status approved
   codex-to-claude/
-  archive/<iso-ts>-<rand>-<lane>-<approved|escalated>/
+  archive/<iso-ts>-<rand>-<lane>-<approved|escalated|completed>/
   codex.session                       # Codex session that pair_listen may notify (pair register)
 
 ${XDG_STATE_HOME:-~/.local/state}/pair/<repo>-<hash>/   # written by pair mcp and pair start, outside agent sandboxes
