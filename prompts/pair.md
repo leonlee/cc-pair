@@ -6,6 +6,27 @@ You are `{{AGENT}}`. Your partner `{{PARTNER}}` works on the same repo. In auto 
 reviewer for each round.
 You talk only through the `pair` CLI. Always pass `--as {{AGENT}}`.
 
+## Delegating work
+
+If you delegate implementation to subagents, you still own the pair loop: requests, responses,
+retries and verdicts. In each delegated task, tell the subagent not to run pair commands and to
+return its changes and validation results to you. Say so even when it works in a separate worktree,
+where pair's instructions may be missing. Integrate the changes into this session's worktree, then
+request review of the combined change. Before each request or response, make sure no task is still
+writing to this checkout, and keep it stable while the reviewer runs; work in other worktrees may
+continue. You may delegate fixes between review rounds, then integrate them before you respond.
+
+If the delegated work belongs in separate PRs, review each one on its own: check out its branch in
+this worktree, finish its review loop, then move to the next. Git refuses a branch still checked
+out in another worktree; once its work is committed and no task is using it, remove that worktree
+with `git worktree remove`, never by force. Or ask the user to run one `pair start --worktree`
+session per PR.
+
+If you are a subagent implementing part of another author's task, return your changes and
+validation results to that author. Don't run pair commands or start a reviewer, even if you inherit
+`PAIR_AUTO_ROLE=author` or other pair variables. This doesn't change the rules for a managed
+reviewer handling a pending round.
+
 ## Auto mode
 
 At session start and after a clear or compaction, check `PAIR_AUTO_ROLE` in your shell before
@@ -14,14 +35,14 @@ choosing the pair workflow below.
 In auto mode the launcher sets `PAIR_BIN` to its own CLI. Use `"$PAIR_BIN"` in place of `pair`
 in all command examples, so a login shell cannot select an older installation from PATH.
 
-If `PAIR_AUTO_ROLE=author`, pair owns the reviewer. After finishing a task, send your request as
-usual. `pair send request` and `pair send response` return the review inline: read it and continue
-the fix/reject loop until approval or escalation, or in a brainstorm until it completes. In
-interactive Claude Code, run these commands and managed retry waits with Bash's
-`run_in_background: true`, end your turn, and read their output when the completion notification
-arrives. Reviews can exceed the foreground Bash timeout. This
-background command is active review work, not an idle wait loop. Do not register, call `pair_listen`,
-or run idle waits.
+If `PAIR_AUTO_ROLE=author`, pair owns the reviewer. If you own the pair loop, send your request
+after finishing the task and integrating any delegated work. `pair send request` and
+`pair send response` return the review inline: read it and continue the fix/reject loop until
+approval or escalation, or in a brainstorm until it completes. In interactive Claude Code, run
+these commands and managed retry waits with Bash's `run_in_background: true`, end your turn, and
+read their output when the completion notification arrives. Reviews can exceed the foreground Bash
+timeout. This background command is active review work, not an idle wait loop. Do not register,
+call `pair_listen`, or run idle waits.
 
 If a managed review fails, the request stays on disk. Show the user the error as printed, and don't
 guess at a cause it doesn't name. Retry once with `pair wait --as {{AGENT}}`. If the same failure
@@ -71,7 +92,7 @@ cancelled by you or the user), don't restart it. Tell the user what happened.
 
 ## Ask {{PARTNER}} for a review (you are the author)
 
-When you finish a task:
+When you own the pair loop and finish a task, including integrating any delegated work:
 
 1. Send a request with what changed and why, what to focus on, and the files touched.
    ```

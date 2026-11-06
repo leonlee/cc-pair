@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.1 (2026-11-06)
+
+The agents' instructions now cover parallel work with subagents. A subagent inherits the author's
+pair environment, so following "when you finish a task, request a review" it could open a review
+thread in a checkout other subagents were still editing, or in its own worktree, where no auto
+session serves the request. A new Delegating work section tells the author that it owns the review
+loop: subagents return their changes and validation results without running pair commands, the
+author integrates them and keeps the checkout stable while the reviewer runs, and separate PRs are
+reviewed one at a time in the session's worktree. A subagent is told not to run pair commands even
+with the author's role in its environment.
+
+The auto author prompt says the same, and the README gains a Parallel work section. For PRs
+reviewed in parallel, run one `pair start --worktree` session per PR. Instructions refresh in each
+worktree on the next `send` or `wait`.
+
 ## 0.8.0 (2026-11-06)
 
 Pair now covers more than code review: brainstorm a design, review the spec, then review the code
