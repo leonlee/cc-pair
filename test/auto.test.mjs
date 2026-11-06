@@ -217,6 +217,11 @@ for (const author of ["claude", "codex"]) {
       assert.ok(!args.includes("--model"), "omitted model must inherit CLI defaults");
       assert.ok(!args.includes("--effort") && !args.includes("--config"), "omitted effort must inherit CLI defaults");
     }
+    if (author === "codex") {
+      const tools = calls[0].args[calls[0].args.indexOf("--allowedTools") + 1].split(",");
+      assert.ok(tools.some((tool) => tool.endsWith(" history *)")), "a Claude reviewer can read a cited spec thread");
+      assert.ok(!tools.some((tool) => / (send request|send response|reset|clean|stop|reviewer)/.test(tool)), tools.join(","));
+    }
     const resume = author === "claude" ? "resume" : "--resume";
     assert.ok(calls[1].args.includes(resume));
     assert.equal(calls[1].args[calls[1].args.indexOf(resume) + 1], "11111111-1111-4111-8111-000000000001");

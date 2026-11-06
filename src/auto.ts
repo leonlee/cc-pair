@@ -587,7 +587,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       : ["--effort", settings.effort];
     const args = reviewer === "codex"
       ? ["--sandbox", "workspace-write", "--add-dir", options.channel, "exec", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, ...options.reviewerArgs, "--json", prompt]
-      : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", join(runDir, "bin", "pair")].flatMap((bin) => [`Bash(${bin} wait *)`, `Bash(${bin} send review *)`])].join(","), "--", prompt];
+      : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", join(runDir, "bin", "pair")].flatMap((bin) => [`Bash(${bin} wait *)`, `Bash(${bin} send review *)`, `Bash(${bin} history *)`])].join(","), "--", prompt];
     sendGuardian({ type: "launch", job: { id, executable: paths[reviewer], args, cwd: options.root, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: file }, interactive: false, timeoutMs: options.timeoutMs } satisfies Job });
     return promise;
   };

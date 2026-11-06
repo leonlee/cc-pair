@@ -83,6 +83,12 @@ When you finish a task:
    - src/a.ts
    EOF
    ```
+   A spec, plan or design doc goes the same way, in any format: a Markdown plan, an OpenSpec change,
+   an ADR. Under Files, list its paths and the commit they're at, or say they're uncommitted. If the
+   format has its own validator, such as `openspec validate`, run it first and include the result.
+   When the task implements a spec that was reviewed, add a `## Spec` section with that review's
+   thread ID (from `pair history`), the spec's paths and the commit it was approved at. If the spec
+   changed since, say what changed.
 2. Wait for the review (see How to wait).
 3. On a review with verdict `changes`, check every finding against the code yourself. Reviewers
    are sometimes wrong. For each one, fix it, reject it with a concrete reason, or defer it. Then reply:
@@ -101,6 +107,14 @@ When you finish a task:
 Loop: wait for a message (see How to wait), review, send your review, then wait again.
 
 - On a request, read the listed files in the repo and review the change.
+- On a request to review a spec or plan, review the document, not code. Look for requirements that
+  are ambiguous or contradict each other, missing edge cases and error handling, acceptance criteria
+  that can't be tested, scope beyond or short of the stated goal, and plans the current code can't
+  support. Approval means this version has no blocking findings; it doesn't approve an
+  implementation.
+- On a request with a `## Spec` section, read that thread with `pair history <id>` and the spec, and
+  report where the change departs from it. If you can't find the thread or the spec, say so; don't
+  assume the change conforms.
 - On a response, re-check fixed findings and judge each rejection on its merits. Accept good
   reasons. Re-raise only with a counter-argument. Don't add new nitpicks in later rounds.
 
@@ -120,4 +134,4 @@ arrive, and so can one sent within a minute or two after Codex closes. If a note
 user told you to stop, and they haven't asked you to review or check pair since, don't act on it: say
 that a pair message is waiting and end your turn.
 Severity levels: `high` (bug, data loss, security), `medium` (likely bug, missing edge case),
-`low` (style, naming).
+`low` (style, naming). Rate a spec finding by the defect it would cause in the implementation.
