@@ -1463,6 +1463,14 @@ function renderPrompt(agent: Agent): string {
   return template.replaceAll("{{AGENT}}", agent).replaceAll("{{PARTNER}}", partnerOf(agent));
 }
 
+/** The reviewer's section of the instructions, for managed prompts: a served worktree may not have the files. */
+function reviewerRules(agent: Agent): string {
+  const text = renderPrompt(agent);
+  const start = text.indexOf("## Review for ");
+  if (start < 0) throw new PairError("prompts/pair.md has no reviewer section");
+  return text.slice(start);
+}
+
 function claudeSkill(): string {
   const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, brainstorm a design with codex, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
   return `${header}<!-- pair ${PACKAGE.version} -->\n${renderPrompt("claude")}`;
@@ -1811,8 +1819,8 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 
 const USAGE = `usage:
   pair start --as <claude|codex> [--worktree NAME] [--resume] [-y] [--reviewer-model MODEL]
-             [--reviewer-effort LEVEL] [--reviewer-args="ARGS"] [--claude /path] [--codex /path]
-             [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
+             [--reviewer-effort LEVEL] [--reviewer-args="ARGS"] [--serve-worktrees [--reviewers N]]
+             [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
                                                       (change a running auto session's reviewer, without a restart)
@@ -1877,6 +1885,11 @@ options:
                                reviewer -c/--config model_*=VALUE (effort: --reviewer-effort).
                                Nothing that changes its tools or sandbox. Use = since the value
                                starts with a dash.
+  --serve-worktrees            also review subagents working in other git worktrees of this
+                               repository: each runs its own review loop there, in one queue with
+                               this worktree's. pair status lists them. See README, Parallel work.
+  --reviewers N                review rounds that may run at once with --serve-worktrees (default 1,
+                               max 8)
   --claude /ABSOLUTE/PATH      claude executable (default: first claude on PATH)
   --codex /ABSOLUTE/PATH       codex executable (default: first codex on PATH)
   --timeout SECONDS            limit for each review round (default 900, max 86400)
@@ -1997,7 +2010,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -2017,6 +2030,9 @@ async function main(argv: string[]): Promise<number> {
   if (values.worktree !== undefined && command !== "start") {
     throw new PairError("--worktree is only supported by pair start");
   }
+  if ((values["serve-worktrees"] || values.reviewers !== undefined) && command !== "start") {
+    throw new PairError("--serve-worktrees and --reviewers are only supported by pair start");
+  }
   if (values.thread !== undefined && command !== "reviewer") {
     throw new PairError("--thread is only supported by pair reviewer");
   }
@@ -2030,8 +2046,11 @@ async function main(argv: string[]): Promise<number> {
   if (managedReviewer && !REVIEWER_COMMANDS.includes(command)) {
     throw new PairError(`a managed reviewer may only run pair ${REVIEWER_COMMANDS.join(", ")}`);
   }
-  // Refreshing rewrites files in the worktree, which a reviewer must not modify.
-  const refreshNote = REFRESHING_COMMANDS.includes(command) && !managedReviewer ? refreshInstructions(root) : undefined;
+  // A subagent's worktree served by its parent's session (or any author command outside that session's root).
+  const owner = process.env.PAIR_AUTO_ROLE === "author" && process.env.PAIR_AUTO_OWNER ? process.env.PAIR_AUTO_OWNER : stateDir(channel);
+  const servedChild = owner !== stateDir(channel);
+  // Refreshing rewrites files in the worktree, which a reviewer must not modify, nor a served subagent's checkout.
+  const refreshNote = REFRESHING_COMMANDS.includes(command) && !managedReviewer && !servedChild ? refreshInstructions(root) : undefined;
   const managedReview = async (me: Agent): Promise<boolean> => {
     if (process.env.PAIR_AUTO_ROLE !== "author" || !process.env.PAIR_AUTO_RUN) return false;
     const thread = threadFor(channel, me);
@@ -2039,11 +2058,12 @@ async function main(argv: string[]): Promise<number> {
     if (state.kind !== "awaiting-review") return false;
     try {
       // The author's own conversation ID, which its CLI sets for the commands it runs; the owner records it for pair stop.
-      const author = me === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : process.env.CODEX_THREAD_ID;
-      await autoCall(stateDir(channel), { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file, author }, 24 * 60 * 60 * 1000);
+      // A served subagent never reports one: the session's resume record is its root author's.
+      const author = servedChild ? undefined : me === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : process.env.CODEX_THREAD_ID;
+      await autoCall(owner, { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file, root, author }, 24 * 60 * 60 * 1000);
     } catch (error) {
       if (hasCode(error, "EPERM", "EACCES")) {
-        throw new PairError(`managed review cannot connect to ${autoSocketPath(stateDir(channel))}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
+        throw new PairError(`managed review cannot connect to ${autoSocketPath(owner)}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
       }
       throw new PairError(`managed review failed: ${errorMessage(error)}. The request remains on disk.`);
     }
@@ -2063,6 +2083,14 @@ async function main(argv: string[]): Promise<number> {
           const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
           if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
+          const serveWorktrees = Boolean(values["serve-worktrees"]);
+          if (values.reviewers !== undefined && !serveWorktrees) {
+            throw new PairError("--reviewers needs --serve-worktrees: without it, only this worktree is reviewed, one round at a time");
+          }
+          const reviewers = values.reviewers === undefined ? 1 : Number(values.reviewers);
+          if (!Number.isInteger(reviewers) || reviewers < 1 || reviewers > 8) {
+            throw new PairError(`--reviewers must be a whole number from 1 to 8 (got "${values.reviewers}")`);
+          }
           const choices = {
             author: me, claude: values.claude, codex: values.codex, reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
             authorArgs: passthrough, reviewerArgs: values["reviewer-args"]?.split(/\s+/).filter(Boolean) ?? [],
@@ -2086,6 +2114,7 @@ async function main(argv: string[]): Promise<number> {
             `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
             `pair:   author ${me} · session ${session.kind === "resume" && recorded ? recorded : describeSession(session)}`,
             `pair:   reviewer ${reviewer} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
+            ...(serveWorktrees ? [`pair:   serves subagent worktrees · ${reviewers} reviewer${reviewers === 1 ? "" : "s"} at a time`] : []),
           ].join("\n"));
           // Before anything is created: a worktree, instruction files, the author record, the socket, any agent.
           if (!values.yes && process.stdin.isTTY && process.stdout.isTTY && !(await confirm("Start? [Y/n] "))) {
@@ -2107,20 +2136,26 @@ async function main(argv: string[]): Promise<number> {
             ...choices, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
             restartOptions: [
               ["--as", me], ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
-            ].flatMap(([name, value]) => value === undefined ? [] : [name!, value]).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`]),
+            ].flatMap(([name, value]) => value === undefined ? [] : [name!, value]).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`])
+              .concat(serveWorktrees ? ["--serve-worktrees", ...(values.reviewers === undefined ? [] : ["--reviewers", values.reviewers])] : []),
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,
-            target: () => {
-              const state = stateOf(listMessages(threadFor(startChannel, me)));
+            serveWorktrees, reviewers, reviewerRules: reviewerRules(reviewer),
+            target: (laneChannel) => {
+              const state = stateOf(listMessages(threadFor(laneChannel, me)));
               return state.kind === "awaiting-review"
                 ? { file: state.last.file, thread: basename(dirname(state.last.file)), brainstorm: kindOf(state.last.status) === "brainstorm" }
                 : undefined;
             },
-            reviewed: (file) => {
-              const messages = listMessages(threadFor(startChannel, me));
+            reviewed: (laneChannel, file) => {
+              const messages = listMessages(threadFor(laneChannel, me));
               const index = messages.findIndex((message) => message.file === file);
               return index >= 0 && messages[index + 1]?.type === "review";
             },
+            // A served worktree's channel sits next to this one, under the same PAIR_HOME, whatever the caller's says.
+            channelOf: (childRoot) => join(dirname(startChannel), basename(channelDir(childRoot))),
+            stateDirOf: stateDir,
+            registered: (childChannel) => readRegistration(childChannel) !== undefined,
           });
         } catch (error) { throw new PairError(errorMessage(error)); }
       }

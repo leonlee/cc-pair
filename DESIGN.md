@@ -19,7 +19,7 @@ a chat channel. In manual mode, each runs as a live session in its own terminal.
 | Brainstorms | `pair send request --brainstorm` opens a thread for ideas in the author's lane. The reviewer replies `continue` or `complete` instead of `approve` or `changes`. Its statuses are `brainstorming` and `completed`, and the kind comes from the status, so pair ≤ 0.7.4 rejects the request as corrupt and can't review it as code; both agents need 0.8.0. The request stores `budget:`, `PAIR_MAX_ROUNDS` when it opened, so the agents' shells can't disagree on it; on the last round `continue` is refused. It never escalates. |
 | Disputes | Cap of 3 rounds (`PAIR_MAX_ROUNDS`). A review that still says `changes` at the cap marks the thread `escalated`, and both agents stop to ask the user. |
 | Concurrency | At most one open thread per direction. |
-| Delegation | A subagent inherits the author's pair environment, so the instructions make the parent own the pair loop: subagents return changes without running pair, the parent integrates them (or reviews separate PRs one at a time) in the session's worktree and keeps it stable during each round. Several threads per lane wouldn't stop files moving under a reviewer. One owner serving reviews for subagent worktrees is planned separately. |
+| Delegation | A subagent inherits the author's pair environment, so the instructions make the parent own the pair loop: subagents return changes without running pair, the parent integrates them (or reviews separate PRs one at a time) in the session's worktree and keeps it stable during each round. Several threads per lane wouldn't stop files moving under a reviewer. With `pair start --serve-worktrees`, one owner also serves subagents' own worktrees (see Served worktrees). |
 | Storage | `~/.pair/<repo>-<hash>/` (or `$PAIR_HOME`). The hash comes from `git rev-parse --show-toplevel`, so each worktree gets its own channel. A reviewer reads the author's files, so both agents must run in the same worktree, and parallel pairs in different worktrees stay isolated. |
 | Format | Markdown files with flat YAML frontmatter that the CLI writes. Findings go in the body. |
 
@@ -274,6 +274,33 @@ This is process-group supervision on macOS and Linux, not OS containment: descen
 their own sessions or groups can escape it, and killing both supervisors can leave a stale control
 socket. Stale sockets are reported for manual inspection, never silently replaced. Windows auto mode
 is not supported.
+
+### Served worktrees
+
+`pair start --serve-worktrees` lets one owner review its subagents' own git worktrees, as specified
+in [docs/specs/serve-worktrees.md](docs/specs/serve-worktrees.md). The author's environment carries
+`PAIR_AUTO_OWNER`, the owner's state directory. A subagent inherits it, so its `pair send`, run in
+its own worktree and channel, reaches the owner's socket, the only one a Claude author's sandbox
+allows, with its worktree root and this run's ID. A request without a root, from an older CLI, is
+the root's.
+
+The first request from another worktree enrolls it. The owner checks that it is the canonical top
+of a git worktree of the same repository, listed by `git worktree list`, with no manual Codex
+session registered in its channel, which the owner computes under its own PAIR_HOME. It then claims
+that worktree's auto socket and checks that the requested message is the one pending. Simultaneous
+first contacts share one attempt. The claim keeps `pair start` and `pair reset` out of the
+worktree, answers `pair status` and `pair reviewer --thread` there, and refuses `pair stop`. The
+guardian removes claimed sockets with the owner's if the owner dies.
+
+Rounds wait in one FIFO across all targets, the root included, with at most one entry per target. A
+second request for the same message attaches to it, and a caller's disconnect doesn't cancel it. Up
+to `--reviewers N` run at once (default 1). Each launch, completion and retry re-checks the
+target's identity: its path, inode and git admin directory. A running child's identity is also
+checked on each heartbeat, and on a mismatch the owner asks the guardian to stop that one job.
+Failures, settings snapshots and reviewer sessions are kept per target and thread. A child's
+requests never change the root's resume record, and nothing pair runs writes into a child: its
+commands skip the instruction refresh, and every managed prompt carries the reviewer rules rendered
+from `prompts/pair.md`.
 
 ## Manual reset
 

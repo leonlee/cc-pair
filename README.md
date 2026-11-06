@@ -118,6 +118,8 @@ started. `-y` starts without waiting.
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias, passed as given (Codex IDs are case-sensitive) |
 | `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
 | `--reviewer-args="ARGS"` | none | More reviewer options, space-separated ([Forwarded arguments](#32-forwarded-arguments)) |
+| `--serve-worktrees` | off | Also review subagents' own worktrees of this repository ([Parallel work](#53-parallel-work)) |
+| `--reviewers N` | 1 (max 8) | Review rounds at once, across all served worktrees; needs `--serve-worktrees` |
 | `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
 | `--timeout SECONDS` | 900 (max 86400) | Limit per review round; the author has none |
 | `--grace SECONDS` | 2 (max 30) | Wait between termination and forced termination |
@@ -351,8 +353,28 @@ are still editing, or in its own worktree, where no auto session serves the requ
 When the subagents' work belongs in separate PRs, the author reviews them one at a time: it checks
 out each branch in the session's worktree and finishes that PR's review loop before the next. For
 PRs reviewed in parallel, run one `pair start --worktree NAME` session per PR
-([Worktrees](#6-worktrees)). Approval in each worktree doesn't cover a later merge of their work;
-review the integrated result as well.
+([Worktrees](#6-worktrees)), or let one session serve its subagents' worktrees. Approval in each
+worktree doesn't cover a later merge of their work; review the integrated result as well.
+
+With `pair start --serve-worktrees`, a subagent working in its own git worktree of this repository
+runs its own review loop there, through the session's reviewer. The author prompt gives the author
+the rules to pass on. The first request from a worktree enrolls it, after pair checks that it is a
+worktree of this repository and that the request comes from this session. The session also claims
+that worktree's auto-mode socket, so no other session or reset runs there until this one stops.
+Reviews wait in one first-come-first-served queue with the session's own, and `--reviewers N` runs
+up to N at once (default 1). A review in a worktree that is removed or replaced fails, and its
+reviewer is stopped; the others go on.
+
+```sh
+pair start --as claude --serve-worktrees --reviewers 2
+```
+
+- Pair writes nothing in a served worktree, not even its instruction files: the reviewer's rules
+  come in its prompt.
+- `pair status` in the session's worktree lists what is running, queued and failed. In a served
+  worktree it names the serving session, and `pair reviewer --thread current` fixes that worktree's
+  failed round. `pair stop` runs in the session's worktree, and stops everything.
+- Worktrees stay served until the session stops. Pair never creates, merges or removes them.
 
 <a id="5-worktrees"></a>
 <a id="52-worktrees"></a>
@@ -517,6 +539,10 @@ and remove `~/.pair` from the sandbox settings.
 - **Claude author socket.** Pair grants a Claude author only this session's control socket, through
   `--settings`; your settings files are unchanged. If managed policy denies it, the request fails
   with the required setting named and stays on disk.
+- **Served worktrees.** With `--serve-worktrees`, the owner reviews a worktree only after checking
+  that it is a git worktree of the same repository, that the request carries this run's ID, and
+  that the owner can claim its socket. Each round re-checks the worktree's identity. Subagents hold
+  the author's environment, so this is workflow routing, not an identity boundary between them.
 - **Reviewer output.** A failed round's error quotes the reviewer's own message, shortened, with
   control characters escaped and labeled as reviewer output rather than instructions.
 - **MCP server.** `pair mcp` runs outside Codex's sandbox, so it only reads the channel, writes only

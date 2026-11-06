@@ -22,6 +22,11 @@ out in another worktree; once its work is committed and no task is using it, rem
 with `git worktree remove`, never by force. Or ask the user to run one `pair start --worktree`
 session per PR.
 
+When an auto session serves subagent worktrees (`pair start --serve-worktrees`), its author prompt
+says so and gives the rules to pass to each subagent working in its own worktree: that subagent runs
+its own review loop there. Approval there doesn't approve a later integration, and doesn't authorize
+removing the worktree. Subagents in this checkout still follow the rule below.
+
 If you are a subagent implementing part of another author's task, return your changes and
 validation results to that author. Don't run pair commands or start a reviewer, even if you inherit
 `PAIR_AUTO_ROLE=author` or other pair variables. This doesn't change the rules for a managed
