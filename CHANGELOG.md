@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.0 (2026-11-06)
+
+`pair start --serve-worktrees` lets an auto author delegate separate PRs to subagents that each work
+in their own git worktree of the repository, such as Claude Code's isolated subagent worktrees. Each
+subagent runs its own review loop there, through the session's reviewer, while the others keep
+working. `--reviewers N` runs up to N reviews at once (default 1, max 8); the rest wait in one
+first-come-first-served queue with the session's own reviews.
+
+```sh
+pair start --as claude --serve-worktrees --reviewers 2
+```
+
+A worktree's first request enrolls it after pair checks that it is a worktree of the same
+repository, that the request comes from this session, and that no other session or reset owns it.
+The session then holds that worktree's auto-mode socket until it stops. A worktree that is removed
+or replaced, including a replaced `.git`, fails alone, and its reviewer is stopped. Failures and
+reviewer settings are kept per worktree: in a served worktree, `pair status` names the session that
+serves it, and `pair reviewer --thread current` fixes its failed round. A subagent never changes
+the conversation `pair start --resume` reopens. Pair writes nothing in a served worktree: the
+reviewer's rules come in its prompt, instruction files there aren't refreshed, and status there
+doesn't suggest `pair init`.
+
+The author prompt gives the author the rules to pass to each subagent. Without the flag, nothing
+changes. The message format is unchanged, and a review request from an older CLI is treated as the
+session's own. The README's Parallel work section and DESIGN.md's Served worktrees section describe
+it; the spec is in `docs/specs/serve-worktrees.md`.
+
 ## 0.8.1 (2026-11-06)
 
 The agents' instructions now cover parallel work with subagents. A subagent inherits the author's
