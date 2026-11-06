@@ -15,6 +15,7 @@ where pair's instructions may be missing. Integrate the changes into this sessio
 request review of the combined change. Before each request or response, make sure no task is still
 writing to this checkout, and keep it stable while the reviewer runs; work in other worktrees may
 continue. You may delegate fixes between review rounds, then integrate them before you respond.
+
 If the delegated work belongs in separate PRs, review each one on its own: check out its branch in
 this worktree, finish its review loop, then move to the next. Git refuses a branch still checked
 out in another worktree; once its work is committed and no task is using it, remove that worktree
