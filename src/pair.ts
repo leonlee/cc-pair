@@ -1174,7 +1174,8 @@ function notificationStatus(channel: string): string[] {
   return [`codex notifications: ${registration}`, ...(lastEvent ? [`  last listener event: ${lastEvent}`] : [])];
 }
 
-function status(channel: string, root: string): string {
+/** `served`: another worktree's auto session serves this one, so its agents don't need pair's files here. */
+function status(channel: string, root: string, served = false): string {
   const lanes = channelAccess(channel, () => AGENTS.map((agent) => describe(channel, agent)));
   const agents = instructionState(join(root, "AGENTS.md"), codexSection(), true);
   const skill = instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill());
@@ -1187,8 +1188,10 @@ function status(channel: string, root: string): string {
     `  AGENTS.md (pair section): ${agents}`,
     `  .claude/skills/pair/SKILL.md: ${skill}`,
     ...channelAccess(channel, () => notificationStatus(channel)),
-    ...(agents === "missing" || agents === "stale" || skill === "missing" || skill === "stale"
-      ? ["Run `pair init` to refresh missing or stale instructions, then reload agent sessions."] : []),
+    ...(served
+      ? ["This worktree is served by another worktree's auto session, which gives its agents pair's rules: don't run pair init here."]
+      : agents === "missing" || agents === "stale" || skill === "missing" || skill === "stale"
+        ? ["Run `pair init` to refresh missing or stale instructions, then reload agent sessions."] : []),
     ...(agents.startsWith("unreadable") || skill.startsWith("unreadable")
       ? ["Check permissions on the unreadable instruction paths before refreshing them."] : []),
     ...(agents.startsWith("newer") || skill.startsWith("newer")
@@ -2207,9 +2210,12 @@ async function main(argv: string[]): Promise<number> {
         }
         return 0;
       }
-      case "status":
-        console.log([status(channel, root), ...(await autoStatus(stateDir(channel), root)), ...(await updateNotice())].join("\n"));
+      case "status": {
+        const auto = await autoStatus(stateDir(channel), root);
+        const served = auto[0]?.startsWith("auto mode: served by the session in ") ?? false;
+        console.log([status(channel, root, served), ...auto, ...(await updateNotice())].join("\n"));
         return 0;
+      }
       case "history":
         console.log(channelAccess(channel, () => history(channel, rest[0])));
         return 0;

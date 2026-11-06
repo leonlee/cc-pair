@@ -1149,7 +1149,10 @@ test("--serve-worktrees: a subagent's loop runs through the root's owner, writes
   assert.ok(!existsSync(join(c1, ".claude")), "no pair init there");
   assert.equal(JSON.parse(readFileSync(join(owner, "author.json"), "utf8")).session, recorded, "the root's resume record is its own");
 
-  assert.match((await inDir(f, c1, ["status"])).stdout, new RegExp(`auto mode: served by the session in ${realpathSync(f.root)} \\(owner \\d+\\)`));
+  const childStatus = (await inDir(f, c1, ["status"])).stdout;
+  assert.match(childStatus, new RegExp(`auto mode: served by the session in ${realpathSync(f.root)} \\(owner \\d+\\)`));
+  assert.match(childStatus, /served by another worktree's auto session, which gives its agents pair's rules: don't run pair init here/);
+  assert.doesNotMatch(childStatus, /Run `pair init`/, "no advice to write pair's files into a served worktree");
   const status = (await f.command(["status"])).stdout;
   assert.match(status, /serves subagent worktrees · reviewers 1 · running 0 · queued 0/);
   await assert.rejects(inDir(f, c1, ["stop"]), /served by the auto session in .*run pair stop there, which stops the whole session/s);
