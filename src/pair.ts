@@ -1750,7 +1750,7 @@ const USAGE = `usage:
              [--reviewer-effort LEVEL] [--reviewer-args="ARGS"] [--claude /path] [--codex /path]
              [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
-  pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current]
+  pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
                                                       (change a running auto session's reviewer, without a restart)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)

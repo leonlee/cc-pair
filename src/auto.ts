@@ -202,7 +202,7 @@ export async function stopAuto(stateDir: string, root: string): Promise<string> 
   }
 }
 
-export function describeSettings(settings: ReviewerSettings): string {
+function describeSettings(settings: ReviewerSettings): string {
   return `model ${settings.model ?? "CLI default"} · effort ${settings.effort ?? "CLI default"}`;
 }
 
