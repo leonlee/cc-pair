@@ -339,6 +339,21 @@ the reviewer to complete. A brainstorm never escalates, and `pair history` lists
 Both agents MUST run pair 0.8.0 or later: an older pair rejects a brainstorm as a corrupt message
 instead of reviewing it as code.
 
+### 5.3. Parallel work
+
+An author MAY split a task across subagents, but it alone runs the pair loop. Its instructions tell
+it to have each subagent return its changes and validation results without running pair commands,
+then integrate them into the session's worktree and request review of the combined change, keeping
+the checkout stable while the reviewer runs. A subagent inherits the author's pair environment, so
+without that rule it could open a thread of its own: in the shared checkout, against files others
+are still editing, or in its own worktree, where no auto session serves the request.
+
+When the subagents' work belongs in separate PRs, the author reviews them one at a time: it checks
+out each branch in the session's worktree and finishes that PR's review loop before the next. For
+PRs reviewed in parallel, run one `pair start --worktree NAME` session per PR
+([Worktrees](#6-worktrees)). Approval in each worktree doesn't cover a later merge of their work;
+review the integrated result as well.
+
 <a id="5-worktrees"></a>
 <a id="52-worktrees"></a>
 <a id="6-worktrees-in-manual-mode"></a>
