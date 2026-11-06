@@ -15,6 +15,7 @@ a chat channel. In manual mode, each runs as a live session in its own terminal.
 | Pickup | Manual mode: the reviewer waits in a loop ("be my reviewer"), Claude on a background `pair wait`, Codex woken by `pair mcp`. Auto mode: the launcher starts a reviewer for each round. |
 | Request | The author's summary plus a list of files. The reviewer reads the files from the shared repo. |
 | Review | Numbered findings with severity, and a verdict of `approve` or `changes`. Multiple rounds. |
+| Specs | A spec or plan, in any format, is reviewed in an ordinary thread: the request names its paths and commit, and the instructions give the reviewer a spec checklist. An implementation's request can cite the approved thread under `## Spec`; the reviewer reads it with `pair history` and reports departures. Pair parses neither, so no message field or version boundary is needed, and the Claude reviewer's allowlist includes `pair history`. |
 | Disputes | Cap of 3 rounds (`PAIR_MAX_ROUNDS`). A review that still says `changes` at the cap marks the thread `escalated`, and both agents stop to ask the user. |
 | Concurrency | At most one open thread per direction. |
 | Storage | `~/.pair/<repo>-<hash>/` (or `$PAIR_HOME`). The hash comes from `git rev-parse --show-toplevel`, so each worktree gets its own channel. A reviewer reads the author's files, so both agents must run in the same worktree, and parallel pairs in different worktrees stay isolated. |

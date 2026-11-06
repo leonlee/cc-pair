@@ -35,6 +35,13 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as described in RFC 2119.
 - **Auto session**: one `pair start` run: the interactive author, the reviewer it starts for each
   round, and the processes that supervise them.
 
+A thread can review a spec, plan or design doc as well as code, in any format: a Markdown plan, an
+OpenSpec change, an ADR. The request names the document's paths and commit, and the reviewer checks
+it for ambiguity, missing cases, untestable acceptance criteria and scope. A later request that
+implements it can cite that thread in a `## Spec` section, and the reviewer then reports where the
+code departs from the spec. This is part of the agents' instructions, not the protocol, so pair
+treats these threads like any other.
+
 <a id="2-installation"></a>
 <a id="3-setup"></a>
 ## 2. Installation and setup
@@ -410,7 +417,8 @@ and remove `~/.pair` from the sandbox settings.
 
 - **Managed reviewers.** Codex runs with its `workspace-write` sandbox plus channel access; source
   edits are forbidden by its instructions, not by the OS. Claude runs with `dontAsk`, so beyond your
-  configured permissions it may only read, search, and run `pair wait` and `pair send review`. Pair
+  configured permissions it may only read, search, and run `pair wait`, `pair send review` and
+  `pair history` (to read a spec review a request cites). Pair
   itself refuses every reviewer command except `wait`, `send`, `status` and `history`, and a
   reviewer never refreshes instruction files. These guard against mistakes and casual prompt
   injection, not a determined agent: the role comes from an environment variable, and the Codex
