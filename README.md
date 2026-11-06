@@ -8,7 +8,8 @@ each round. In manual mode, you run both agents yourself.
 A thread can review code, review a spec or plan in any format, or brainstorm a design before there
 is one; you ask the author in your own words ([Workflows](#5-workflows)). In auto mode,
 `pair reviewer` switches the reviewer's model or effort without a restart
-([Changing the reviewer](#35-changing-the-reviewer)).
+([Changing the reviewer](#35-changing-the-reviewer)), and `--serve-worktrees` lets one session
+review subagents' separate PRs, several at once ([Parallel work](#53-parallel-work)).
 
 A review thread, as it looks in manual mode (in auto mode, pair starts the reviewer for each round):
 
@@ -211,6 +212,8 @@ pair stop      # stop the author, its reviewers and their tools
   error includes the reviewer's own message. The author retries the round with
   `pair wait --as <author>`, with the same reviewer settings; to change them first, see
   [Changing the reviewer](#35-changing-the-reviewer).
+- With `--serve-worktrees`, `pair stop` in the session's worktree also stops reviews queued or
+  running for subagent worktrees; their requests stay on disk ([Parallel work](#53-parallel-work)).
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,
@@ -293,6 +296,7 @@ as the reviewer; with a Codex author, say claude. Every workflow works in both m
 | "ask codex for a review" | reports findings with severity: `approve` or `changes` | approved, or escalated after `PAIR_MAX_ROUNDS` rounds |
 | "ask codex to review the plan in docs/plan.md" | checks the document: `approve` or `changes` | the same |
 | "brainstorm with codex how to …" | adds options and questions: `continue` or `complete` | completed, at the latest on the last turn |
+| "use a subagent per PR, each in its own worktree" (session started with `--serve-worktrees`) | reviews each subagent's worktree, up to `--reviewers N` at once | per subagent, as for a review |
 
 For a larger change, chain them: brainstorm the approach, write a plan and have it reviewed, then
 implement it and cite the spec review in the code review.
@@ -343,38 +347,66 @@ instead of reviewing it as code.
 
 ### 5.3. Parallel work
 
-An author MAY split a task across subagents, but it alone runs the pair loop. Its instructions tell
-it to have each subagent return its changes and validation results without running pair commands,
-then integrate them into the session's worktree and request review of the combined change, keeping
-the checkout stable while the reviewer runs. A subagent inherits the author's pair environment, so
-without that rule it could open a thread of its own: in the shared checkout, against files others
-are still editing, or in its own worktree, where no auto session serves the request.
+An author MAY split work across subagents, in one of three shapes:
 
-When the subagents' work belongs in separate PRs, the author reviews them one at a time: it checks
-out each branch in the session's worktree and finishes that PR's review loop before the next. For
-PRs reviewed in parallel, run one `pair start --worktree NAME` session per PR
-([Worktrees](#6-worktrees)), or let one session serve its subagents' worktrees. Approval in each
-worktree doesn't cover a later merge of their work; review the integrated result as well.
+- **One change, several subagents.** The author alone runs the pair loop. Its instructions tell it
+  to have each subagent return its changes and validation results without running pair commands,
+  integrate them into the session's worktree, and request review of the combined change, keeping
+  the checkout stable while the reviewer runs. A subagent inherits the author's pair environment,
+  so without that rule it could open a thread of its own: in the shared checkout, against files
+  others are still editing, or in its own worktree, where no auto session serves the request.
+- **Separate PRs, reviewed in turn.** The author checks out each branch in the session's worktree
+  and finishes that PR's review loop before the next.
+- **Separate PRs, reviewed in parallel.** Run one `pair start --worktree NAME` session per PR
+  ([Worktrees](#6-worktrees)), or let one session serve its subagents' worktrees (below).
 
-With `pair start --serve-worktrees`, a subagent working in its own git worktree of this repository
-runs its own review loop there, through the session's reviewer. The author prompt gives the author
-the rules to pass on. The first request from a worktree enrolls it, after pair checks that it is a
-worktree of this repository and that the request comes from this session. The session also claims
-that worktree's auto-mode socket, so no other session or reset runs there until this one stops.
-Reviews wait in one first-come-first-served queue with the session's own, and `--reviewers N` runs
-up to N at once (default 1). A review in a worktree that is removed or replaced fails, and its
-reviewer is stopped; the others go on.
+Approval of separate pieces doesn't cover a later merge of their work; review the integrated result
+as well.
+
+#### Serving subagent worktrees
+
+Start the session with `--serve-worktrees`; `--reviewers N` runs up to N reviews at once (default 1,
+max 8):
 
 ```sh
 pair start --as claude --serve-worktrees --reviewers 2
 ```
 
-- Pair writes nothing in a served worktree, not even its instruction files: the reviewer's rules
-  come in its prompt.
-- `pair status` in the session's worktree lists what is running, queued and failed. In a served
-  worktree it names the serving session, and `pair reviewer --thread current` fixes that worktree's
-  failed round. `pair stop` runs in the session's worktree, and stops everything.
-- Worktrees stay served until the session stops. Pair never creates, merges or removes them.
+Then ask the author for parallel work, for example: *"Use two subagents, each in its own worktree:
+one fixes the parser bug, the other adds the CSV export. Each runs its own pair review loop and
+reports the outcome."* The author prompt gives the author the rules to pass to each subagent: send
+requests and responses from its own worktree in the background, keep the worktree unchanged while a
+review is queued or running, finish the loop, leave the worktree in place, and report approval,
+escalation or the failure as printed.
+
+- **Enrollment.** A worktree's first request enrolls it, after pair checks that it is a worktree of
+  this repository and that the request comes from this session. The session claims that worktree's
+  auto-mode socket, so no other session or reset runs there until this one stops.
+- **Queue.** Reviews from every worktree, the session's own included, wait in one
+  first-come-first-served queue, and up to N run at once. A retry attaches to its waiting or running
+  round.
+- **Failures.** A failed round affects only its worktree. A worktree that is removed or replaced,
+  including a replaced `.git`, fails alone, and its reviewer is stopped.
+- **No writes.** Pair writes nothing in a served worktree, not even instruction files: the
+  reviewer's rules come in its prompt.
+
+`pair status` in the session's worktree shows the queue:
+
+```
+  serves subagent worktrees · reviewers 2 · running 2 · queued 0
+  running: /Users/you/your-repo/.claude/worktrees/agent-a0b4 (thread 2026-11-06T13-43-14-155Z-66b9d4, pid 30452)
+  running: /Users/you/your-repo/.claude/worktrees/agent-ae4d (thread 2026-11-06T13-43-16-364Z-c9eb51, pid 31639)
+```
+
+In a served worktree, `pair status` names the serving session, and `pair reviewer --thread current`
+fixes that worktree's failed round. `pair stop`, `pair start` and `pair reset` are refused there;
+`pair stop` in the session's worktree stops everything. Worktrees stay served until the session
+stops.
+
+Pair never creates, merges or removes worktrees. Claude Code may create subagent worktrees under the
+main checkout's `.claude/worktrees/`, based on the default branch rather than the session's branch,
+and lock them. After the session, check each one's base and changes before opening its PR, then
+`git worktree unlock` and `git worktree remove` it.
 
 <a id="5-worktrees"></a>
 <a id="52-worktrees"></a>
@@ -445,7 +477,7 @@ files on disk, the Codex registration and the auto session:
 ```
 channel: /Users/you/.pair/your-repo-12345678
 worktree: /Users/you/your-repo
-version: claude-codex-pair 0.8.0
+version: claude-codex-pair 0.9.0
 claude-to-codex: brainstorm awaiting-review (round 1, codex's turn)
 codex-to-claude: idle
 instructions on disk (does not verify what running agents loaded):
@@ -456,6 +488,8 @@ auto mode: claude author, codex reviewer · reviewing · owner 41820
   author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
   reviewer for new threads: model gpt-6.1-sol · effort high
   reviewer for thread 2026-11-06T05-19-31-945Z-da0bac: model CLI default · effort CLI default
+  serves subagent worktrees · reviewers 2 · running 1 · queued 0
+  running: /Users/you/your-repo (thread 2026-11-06T05-19-31-945Z-da0bac, pid 41907)
   reviewer pid: 41907
   log: /Users/you/.local/state/pair/your-repo-12345678/auto.log
 ```
