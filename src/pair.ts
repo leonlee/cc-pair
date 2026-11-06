@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, setReviewer, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
 const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
@@ -1750,6 +1750,8 @@ const USAGE = `usage:
              [--reviewer-effort LEVEL] [--reviewer-args="ARGS"] [--claude /path] [--codex /path]
              [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
+  pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current]
+                                                      (change a running auto session's reviewer, without a restart)
   pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
   pair status
@@ -1805,6 +1807,7 @@ options:
   --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
                                codex: none, minimal, low, medium, high, xhigh, max, ultra
                                claude: low, medium, high, xhigh, max, ultracode
+                               pair reviewer changes the model and effort later.
   --reviewer-args="ARGS"       more reviewer options, split on spaces. A claude reviewer accepts
                                --fallback-model, --max-budget-usd and --strict-mcp-config; a codex
                                reviewer -c/--config model_*=VALUE (effort: --reviewer-effort).
@@ -1828,6 +1831,22 @@ options:
 
 Inspect it from another terminal in the same worktree (with --worktree, the new one) with
 pair status or pair ps -v; stop it with pair stop.`,
+  reviewer: `usage: pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
+
+Change the reviewer settings of this worktree's running auto session without restarting it. Run it
+in your own terminal; the author and its reviewer can't. A thread keeps the settings it had at its
+first review round, so by default the change applies to new threads only. pair status shows both.
+
+options:
+  --reviewer-model MODEL       the reviewer CLI's model ID or alias; default: that CLI's default
+  --reviewer-effort LEVEL      reviewer reasoning effort (values as for pair start); default: the CLI's
+  --thread current|ID          change only the pending thread whose last review round failed, for
+                               example over a mistyped model. Its next round starts a new reviewer
+                               conversation, which reads the thread so far; the author's pair wait
+                               retries it. Refused while a round runs.
+
+  pair reviewer --reviewer-model gpt-6.1-sol
+  pair reviewer --thread current --reviewer-model gpt-6.1-sol --reviewer-effort default`,
   stop: `usage: pair stop
 
 Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.
@@ -1910,7 +1929,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -1929,6 +1948,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (values.worktree !== undefined && command !== "start") {
     throw new PairError("--worktree is only supported by pair start");
+  }
+  if (values.thread !== undefined && command !== "reviewer") {
+    throw new PairError("--thread is only supported by pair reviewer");
   }
   const root = worktreeRoot();
   const channel = channelDir(root);
@@ -2013,8 +2035,7 @@ async function main(argv: string[]): Promise<number> {
           return await startAuto({
             ...choices, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
             restartOptions: [
-              ["--as", me], ["--claude", values.claude], ["--codex", values.codex], ["--reviewer-model", values["reviewer-model"]],
-              ["--reviewer-effort", values["reviewer-effort"]], ["--timeout", values.timeout], ["--grace", values.grace],
+              ["--as", me], ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
             ].flatMap(([name, value]) => value === undefined ? [] : [name!, value]).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`]),
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,
@@ -2034,6 +2055,21 @@ async function main(argv: string[]): Promise<number> {
         try { console.log(await stopAuto(stateDir(channel), root)); }
         catch (error) { throw new PairError(errorMessage(error)); }
         return 0;
+      case "reviewer": {
+        // Workflow discipline, not a security boundary: an author shouldn't pick the reviewer that judges its work.
+        if (process.env.PAIR_AUTO_ROLE) {
+          throw new PairError("run pair reviewer in your own terminal; the author and its reviewer don't choose the reviewer's settings");
+        }
+        if (rest.length) throw new PairError("pair reviewer takes only options; see pair help reviewer");
+        const setting = (value: string | undefined): string | null | undefined => value === "default" ? null : value;
+        const change = { model: setting(values["reviewer-model"]), effort: setting(values["reviewer-effort"]), thread: values.thread };
+        if (change.model === undefined && change.effort === undefined) {
+          throw new PairError("pass --reviewer-model or --reviewer-effort (a value, or default); pair status shows the current settings");
+        }
+        try { console.log(await setReviewer(stateDir(channel), change)); }
+        catch (error) { throw new PairError(errorMessage(error)); }
+        return 0;
+      }
       case "send": {
         autoKeep(); // reject a bad PAIR_KEEP before touching any thread
         const type = oneOf(rest[0], MESSAGE_TYPES, "message type");

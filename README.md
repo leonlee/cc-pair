@@ -127,6 +127,15 @@ Reviewer overrides apply to every round, including resumed ones; pair edits no C
 `pair status` and `pair ps` show them, with `CLI default` for omitted ones. A model or effort the
 reviewer rejects fails the round and keeps the request ([Control and recovery](#34-control-and-recovery)).
 
+To change them while the session runs, use `pair reviewer` in your own terminal; the author and
+its reviewer can't. A thread keeps the settings of its first round, so a change applies to new
+threads. `default` returns a setting to the CLI's own.
+
+```sh
+pair reviewer --reviewer-model gpt-6.1-sol --reviewer-effort high
+pair reviewer --reviewer-effort default
+```
+
 <a id="53-forwarded-arguments"></a>
 ### 3.2. Forwarded arguments
 
@@ -191,6 +200,7 @@ From another terminal in the session's worktree:
 ```sh
 pair status    # lanes, auto session state, author conversation, last failure, log location
 pair ps -v     # pair processes by worktree, with full commands
+pair reviewer  # change the reviewer's model or effort (pair help reviewer)
 pair stop      # stop the author, its reviewers and their tools
 ```
 
@@ -198,8 +208,9 @@ pair stop      # stop the author, its reviewers and their tools
   until `pair unregister`.
 - A reviewer that fails to start, ends without a verdict or times out keeps the request, and the
   error includes the reviewer's own message. The author retries the round with `pair wait --as <author>`, with the
-  same reviewer settings. To change `--reviewer-model` or `--reviewer-effort`, stop the session and
-  start it again; `--resume` keeps the author's conversation.
+  same reviewer settings. To retry with others, for example after a mistyped model, first run
+  `pair reviewer --thread current --reviewer-model MODEL`. It changes only that failed thread, whose
+  next round starts a new reviewer conversation that reads the thread so far.
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,
