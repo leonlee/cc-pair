@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.0 (2026-11-06)
+
+Pair now covers more than code review: brainstorm a design, review the spec, then review the code
+that implements it, and change the reviewer's model while a session runs. Ask the author in your
+own words; the README's new Workflows section shows what to say.
+
+`pair send request --brainstorm` opens a thread for ideas before there's a design. The reviewer
+answers with options, trade-offs and questions and `--verdict continue` or `complete`, and the
+author replies with `pair send response`. The reviewer gets `PAIR_MAX_ROUNDS` turns (default 3),
+stored when the brainstorm opens; on the last one `continue` is refused, and the reviewer completes
+it with the options, a recommendation and the open decisions. A brainstorm never escalates and is
+archived as `completed`. Both agents need 0.8.0: an older pair rejects a brainstorm as a corrupt
+message instead of reviewing it as code.
+
+A spec, plan or design doc in any format, such as a Markdown plan, an OpenSpec change or an ADR,
+can be reviewed in an ordinary thread: the request names its paths and commit, and the reviewer
+checks it for ambiguity, missing cases, untestable acceptance criteria and scope. A later code
+review can cite that thread under `## Spec`; the reviewer reads it with `pair history` and reports
+where the code departs from it. The managed Claude reviewer may now run `pair history`.
+
+`pair reviewer` changes a running auto session's reviewer model or effort without a restart. Run
+it in your own terminal: the author and its reviewer can't. A thread keeps the settings of its
+first round, so a change applies to new threads and to the restart command `pair stop` prints.
+After a round fails, for example on a mistyped model, `pair reviewer --thread current` changes that
+thread before the author retries. `pair status` shows `reviewer for new threads` and the current
+thread's settings in place of the override lines.
+
+The README is reorganized around these workflows, with one section on changing the reviewer;
+later sections are renumbered, and old links still work. Instructions refresh in each worktree on
+the next `send` or `wait`; restart the agents afterwards.
+
 ## 0.7.4 (2026-10-31)
 
 When a managed review fails, the author now shows you the error as printed, retries once, and if
