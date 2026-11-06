@@ -204,13 +204,27 @@ resumed only within the same review thread; no `--last` lookup is used. `--revie
 `--config model_reasoning_effort="LEVEL"`, Claude `--model` and `--effort`. They never reach the
 author or either CLI's config. Status shows the requested values, with `CLI default` for omitted
 ones, since the launcher does not resolve inherited settings. Effort names are checked per backend
-before startup; each CLI decides whether it supports the combination.
+before startup and on every change; each CLI decides whether it supports the combination.
+
+`pair reviewer` changes the settings on the live owner, over the control socket, without a restart.
+A thread takes a snapshot of the settings at its first launch and keeps it for its follow-up rounds
+and retries, so by default a change applies to new threads; the restart command `pair stop` prints
+uses the current ones. `--thread current|ID` changes one thread instead, and only the pending one
+whose last round failed: the owner checks that no round is reserved (a launch reserves the round
+before its process exists, so a missing PID doesn't count), that the failed message is still the one
+waiting, and that it has no verdict, then changes the snapshot in the same synchronous step, so a
+concurrent retry either launches first, making the change fail, or uses the new settings. The
+change drops the thread's saved reviewer session, since a conversation may not resume under another
+model; the next round starts a new one, which reads the earlier messages. The change doesn't retry
+by itself, and a failed attempt doesn't count as a round. The CLI refuses `pair reviewer` from the
+author or a reviewer (`PAIR_AUTO_ROLE`), so an author can't choose the reviewer that judges it. This
+is workflow discipline, not a security boundary: the author can reach the socket.
 
 A failed round keeps the request, and an explicit author `wait` retries it. Its error includes the
 last error the reviewer reported in its JSON stream (Codex `error` or `turn.failed`; Claude's failed
 `result`, from `errors[]` and `result`), capped at 4000 characters, with control characters escaped
-and labeled as reviewer output. When a model or effort override is set, the error names it and says
-that a retry keeps it, since only a new `pair start` can change it.
+and labeled as reviewer output. When a model or effort override is set, the error names it, says
+that a retry keeps it, and names `pair reviewer --thread current` to change it first.
 
 ### Author conversations
 

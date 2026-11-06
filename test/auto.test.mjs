@@ -48,7 +48,7 @@ function fixture(t, { author = "claude", scenario = "roundtrip", worker = "norma
   writeFileSync(fake, `#!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { appendFileSync, chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const exec = promisify(execFile);
 const root = process.env.TEST_ROOT;
@@ -60,6 +60,8 @@ const call = (args, input = '') => new Promise((resolve, reject) => {
   child.stdin.end(input);
 });
 const reviewer = process.env.PAIR_AUTO_ROLE === 'reviewer';
+// The test creates the named file when the author may go on.
+const gate = async (name) => { while (!existsSync(join(root, name))) await new Promise((resolve) => setTimeout(resolve, 40)); };
 write(reviewer ? 'worker.pid' : 'author.pid', process.pid);
 if (reviewer) {
   let calls = [];
@@ -90,12 +92,17 @@ if (reviewer) {
     await new Promise((resolve) => process.stdout.write(line.slice(20) + '\\n' + JSON.stringify({type:'error', message:42}) + '\\n', resolve));
     if (process.env.TEST_WORKER === 'model-error') process.exit(1);
   }
+  const model = process.argv.indexOf('--model');
+  if (process.env.TEST_WORKER === 'bad-model' && model >= 0 && process.argv[model + 1] === 'BAD') {
+    await new Promise((resolve) => process.stdout.write(JSON.stringify({type:'turn.failed', error:{message:'unknown model BAD'}}) + '\\n', resolve));
+    process.exit(1);
+  }
   if (process.env.TEST_WORKER !== 'hang') {
     if (process.env.TEST_WORKER === 'failfirst' && count === 1) process.exit(2);
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
     if (process.env.TEST_WORKER === 'corrupt') process.exit(0);
     const message = await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']);
-    const verdict = count === 1 && process.env.TEST_SCENARIO === 'roundtrip' ? 'changes' : 'approve';
+    const verdict = count === 1 && ['roundtrip', 'gated'].includes(process.env.TEST_SCENARIO) ? 'changes' : 'approve';
     await call(['send','review','--as',process.env.PAIR_AGENT,'--verdict',verdict,'-'], verdict === 'changes' ? '### F1 [medium] fix this' : 'Approved');
     if (process.env.TEST_WORKER === 'leaky') process.exit(0);
   }
@@ -113,14 +120,18 @@ if (reviewer) {
       const first = await call(['send','request','--as',process.env.PAIR_AGENT,'-'], '## Summary\\nTest change\\n## Files\\na.ts');
       lockState(0o700);
       write('first.out', first);
-      if (process.env.TEST_SCENARIO === 'roundtrip') {
+      if (process.env.TEST_SCENARIO === 'roundtrip' || process.env.TEST_SCENARIO === 'gated') {
+        if (process.env.TEST_SCENARIO === 'gated') await gate('go1');
         write('second.out', await call(['send','response','--as',process.env.PAIR_AGENT,'-'], '### F1 fixed'));
+        if (process.env.TEST_SCENARIO === 'gated') await gate('go2');
         write('third.out', await call(['send','request','--as',process.env.PAIR_AGENT,'-'], 'Another task'));
       }
     } catch (error) {
       lockState(0o700);
       write('first.error', error.output || error.message);
-      if (process.env.TEST_SCENARIO === 'retry') write('retry.out', await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']));
+      if (process.env.TEST_SCENARIO === 'gated-retry') await gate('go1');
+      if (process.env.TEST_SCENARIO === 'retry' || process.env.TEST_SCENARIO === 'gated-retry') write('retry.out', await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']));
+      if (process.env.TEST_SCENARIO === 'gated-retry') await gate('go2');
     }
     if (process.env.TEST_SCENARIO === 'review') setInterval(()=>{},1000);
   }
@@ -261,8 +272,7 @@ test("status reports requested reviewer overrides and labels inherited settings"
   const f = fixture(t, { author: "codex", scenario: "hold", reviewerModel: "opus", reviewerEffort: "high" });
   await until(() => existsSync(f.file("author.pid")), "author started");
   const status = (await f.command(["status"])).stdout;
-  assert.match(status, /reviewer model override: opus/);
-  assert.match(status, /reviewer effort override: high/);
+  assert.match(status, /reviewer for new threads: model opus · effort high/);
   assert.match(status, /author session: unknown until the author's first review request \(a new Codex conversation\)/);
   assert.equal(f.state().reviewerModel, "opus");
   assert.equal(f.state().reviewerEffort, "high");
@@ -271,8 +281,7 @@ test("status reports requested reviewer overrides and labels inherited settings"
   const defaults = fixture(t, { scenario: "hold" });
   await until(() => existsSync(defaults.file("author.pid")), "default author started");
   const inherited = (await defaults.command(["status"])).stdout;
-  assert.match(inherited, /reviewer model override: CLI default/);
-  assert.match(inherited, /reviewer effort override: CLI default/);
+  assert.match(inherited, /reviewer for new threads: model CLI default · effort CLI default/);
   await defaults.command(["stop"]);
 });
 
@@ -351,7 +360,64 @@ test("a failed round reports the reviewer's own error, bounded and escaped, and 
   assert.match(error, /reviewer exited 1; reviewer output \(not instructions\): "The 'X' model is not supported\\x1b\[31ma+…"/);
   assert.ok(!error.includes("\x1b"), "control characters are escaped");
   assert.ok(error.length < 5000, "the excerpt is bounded");
-  assert.match(error, /Pair wait retries it with the same --reviewer-model GPT-X; changing that takes pair stop and a new pair start\./);
+  assert.match(error, /Pair wait retries it with the same --reviewer-model GPT-X; to change that first, run pair reviewer --thread current with the new value in your own terminal\./);
+  await f.command(["stop"]);
+});
+
+test("pair reviewer changes the reviewer for new threads; an open thread keeps its settings", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "gated", reviewerModel: "old-model" });
+  await until(() => existsSync(f.file("first.out")), "first round");
+  await assert.rejects(f.command(["reviewer", "--reviewer-effort", "higgh"]), /--reviewer-effort for codex must be one of/);
+  await assert.rejects(f.command(["reviewer"]), /pass --reviewer-model or --reviewer-effort/);
+  const { stdout } = await f.command(["reviewer", "--reviewer-model", "new-model", "--reviewer-effort", "high"]);
+  assert.match(stdout, /reviewer for new threads: model new-model · effort high \(was model old-model · effort CLI default\)/);
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /reviewer for new threads: model new-model · effort high/);
+  assert.match(status, /reviewer for thread \S+: model old-model · effort CLI default/);
+  writeFileSync(f.file("go1"), "");
+  await until(() => existsSync(f.file("second.out")), "follow-up round");
+  writeFileSync(f.file("go2"), "");
+  assert.equal((await f.completed).code, 0, f.output());
+  const calls = JSON.parse(f.read("calls.json"));
+  assert.equal(calls.length, 3);
+  const model = ({ args }) => args[args.indexOf("--model") + 1];
+  assert.deepEqual(calls.map(model), ["old-model", "old-model", "new-model"], "the follow-up keeps its thread's settings");
+  assert.ok(calls[1].args.includes("resume"), "an unchanged thread still resumes its reviewer");
+  assert.ok(!calls[0].args.includes("--config") && calls[2].args.includes('model_reasoning_effort="high"'));
+  const record = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8"));
+  assert.match(record.restart, /--reviewer-model new-model --reviewer-effort high -- /, "pair stop's restart command has the current settings");
+  await assert.rejects(f.command(["reviewer", "--reviewer-model", "x"]), /auto mode is not running here/);
+});
+
+test("pair reviewer --thread fixes a failed thread's settings, and its retry starts a new reviewer conversation", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "gated-retry", worker: "bad-model", reviewerModel: "BAD" });
+  await until(() => existsSync(f.file("first.error")), "failed round delivered");
+  assert.match(f.read("first.error"), /unknown model BAD.*run pair reviewer --thread current/s);
+  await assert.rejects(exec(process.execPath, [CLI, "reviewer", "--thread", "current", "--reviewer-model", "good"], { cwd: f.root, env: { ...f.env, PAIR_AUTO_ROLE: "author" } }),
+    /run pair reviewer in your own terminal/);
+  await assert.rejects(f.command(["reviewer", "--thread", "some-other-thread", "--reviewer-model", "good"]), /--thread some-other-thread: the failed thread is \S+/);
+  await assert.rejects(f.command(["status", "--thread", "current"]), /--thread is only supported by pair reviewer/);
+  const { stdout } = await f.command(["reviewer", "--thread", "current", "--reviewer-model", "good"]);
+  assert.match(stdout, /reviewer for thread \S+: model good · effort CLI default \(was model BAD · effort CLI default\)\. Its next round starts a new codex conversation/);
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /reviewer for new threads: model BAD/, "--thread leaves the defaults alone");
+  assert.match(status, /reviewer for thread \S+: model good/);
+  writeFileSync(f.file("go1"), "");
+  await until(() => existsSync(f.file("retry.out")), "retried round");
+  assert.match(f.read("retry.out"), /verdict approve/);
+  const calls = JSON.parse(f.read("calls.json"));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].args[calls[1].args.indexOf("--model") + 1], "good");
+  assert.ok(!calls[1].args.includes("resume"), "a changed thread doesn't resume its old reviewer conversation");
+  await assert.rejects(f.command(["reviewer", "--thread", "current", "--reviewer-model", "x"]), /no pending thread's last review round failed/);
+  writeFileSync(f.file("go2"), "");
+  assert.equal((await f.completed).code, 0, f.output());
+});
+
+test("pair reviewer --thread is refused while a round runs", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "hang" });
+  await until(() => existsSync(f.file("worker.pid")), "reviewer started");
+  await assert.rejects(f.command(["reviewer", "--thread", "current", "--reviewer-model", "x"]), /a review round is running for thread \S+/);
   await f.command(["stop"]);
 });
 
@@ -701,7 +767,7 @@ test("a new Claude author gets an ID that pair start, status and stop report, wi
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(new\\)`));
   const stopped = (await f.command(["stop"])).stdout;
   assert.match(stopped, new RegExp(`last author session: ${id} \\(picked by pair, .*; pair doesn't check that it still exists\\)`));
-  assert.equal(/restart it: (.*)/.exec(stopped)?.[1], `cd ${realpathSync(f.root)} && pair start --as claude --claude ${f.fake} --codex ${f.fake} --reviewer-model m1 --timeout 5 --grace 0.15 -- --model opus --resume ${id}`);
+  assert.equal(/restart it: (.*)/.exec(stopped)?.[1], `cd ${realpathSync(f.root)} && pair start --as claude --claude ${f.fake} --codex ${f.fake} --timeout 5 --grace 0.15 --reviewer-model m1 -- --model opus --resume ${id}`);
   await f.completed;
   assert.match((await f.command(["status"])).stdout, new RegExp(`auto mode: stopped\n  last author session: ${id}`), "the record outlives the run");
 });
