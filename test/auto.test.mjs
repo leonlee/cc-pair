@@ -1281,6 +1281,28 @@ test("--serve-worktrees: a worktree whose .git was replaced fails like a removed
   assert.equal(reviewerCalls(f).length, 1);
 });
 
+test("--serve-worktrees: a slow git during enrollment doesn't stall the owner past the guardian's watchdog", { timeout: 45_000 }, async (t) => {
+  // A git that takes 7s (more than the 5s watchdog) for the owner's first enrollment check in c1 only.
+  const shims = mkdtempSync(join(tmpdir(), "pair-git-shim-"));
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(join(shims, "git"), `#!/bin/sh\ncase "$(pwd -P)" in *-c1) [ "$1 $2" = "rev-parse --show-toplevel" ] && sleep 7;; esac\nexec ${realGit} "$@"\n`);
+  chmodSync(join(shims, "git"), 0o755);
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees", "--reviewers", "2"], extraEnv: { PATH: `${shims}:${process.env.PATH}` } });
+  const [c1, c2] = [addChild(f, "c1"), addChild(f, "c2")];
+  const sibling = asSubagent(f, owner, c2, ["send", "request", "-"], "c2 work");
+  await until(() => reviewerCalls(f).length === 1, "c2 running");
+  const slow = asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work");
+  await pause(7500); // through the slow enrollment
+  assert.ok(alive(Number(f.read("author.pid"))), "the author survived");
+  assert.notEqual(f.state().phase, "stopping");
+  writeFileSync(f.file("release"), "");
+  assert.match((await sibling).out, /verdict approve/, "the sibling's review survived");
+  const enrolled = await slow;
+  assert.equal(enrolled.code, 0, enrolled.out);
+  assert.match(enrolled.out, /verdict approve/);
+});
+
 test("--serve-worktrees: stop settles running and queued rounds; claimed sockets go with the owner, even when it's killed", { timeout: 40_000 }, async (t) => {
   const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"] });
   const [c1, c2] = [addChild(f, "c1"), addChild(f, "c2")];

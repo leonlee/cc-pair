@@ -1,9 +1,10 @@
-import { spawn, fork, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, fork, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { delimiter, isAbsolute, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { promisify } from "node:util";
 
 type Agent = "claude" | "codex";
 interface Job {
@@ -282,6 +283,22 @@ export async function withAutoStopped<T>(stateDir: string, operation: () => T): 
 
 function gitIn(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim();
+}
+
+const execFileAsync = promisify(execFile);
+/** For a live owner: a slow git must not block its heartbeat past the guardian's watchdog. */
+async function gitAsync(cwd: string, args: string[]): Promise<string> {
+  return (await execFileAsync("git", args, { cwd, encoding: "utf8", timeout: 10_000 })).stdout.trim();
+}
+
+/** Where a worktree's .git points: its own directory, or a linked worktree's "gitdir:" file. No process: the
+ * owner checks this on its heartbeat, and a slow git must not stall it past the guardian's watchdog. */
+function resolvedGitDir(root: string): string {
+  const dotGit = join(root, ".git");
+  if (lstatSync(dotGit).isDirectory()) return realpathSync(dotGit);
+  const pointer = /^gitdir: (.+)$/m.exec(readFileSync(dotGit, "utf8"));
+  if (!pointer) throw new Error(`${dotGit} doesn't name a git directory`);
+  return realpathSync(resolve(root, pointer[1].trim()));
 }
 
 function listenOn(server: Server, path: string): Promise<void> {
@@ -646,7 +663,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     try {
       const now = statSync(target.root);
       return now.dev === target.child.dev && now.ino === target.child.ino && realpathSync(target.root) === target.root
-        && realpathSync(gitIn(target.root, ["rev-parse", "--absolute-git-dir"])) === target.child.gitDir;
+        && resolvedGitDir(target.root) === target.child.gitDir;
     } catch { return false; }
   };
   const gone = (target: Target) => new Error(`worktree ${target.root} was removed or replaced`);
@@ -693,13 +710,15 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     if (real !== root || !statSync(root).isDirectory()) throw refuse("it isn't a canonical directory path");
     let top: string, common: string, gitDir: string;
     try {
-      top = realpathSync(gitIn(root, ["rev-parse", "--show-toplevel"]));
-      common = realpathSync(gitIn(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
-      gitDir = realpathSync(gitIn(root, ["rev-parse", "--absolute-git-dir"]));
+      top = realpathSync(await gitAsync(root, ["rev-parse", "--show-toplevel"]));
+      common = realpathSync(await gitAsync(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+      gitDir = realpathSync(await gitAsync(root, ["rev-parse", "--absolute-git-dir"]));
     } catch { throw refuse("it isn't a git worktree"); }
+    try { if (resolvedGitDir(root) !== gitDir) throw new Error(); }
+    catch { throw refuse("its .git doesn't point at the git directory git reports"); }
     if (top !== root) throw refuse("it isn't the top of a git worktree");
     if (common !== commonDir) throw refuse(`it isn't a worktree of ${options.root}'s repository`);
-    const listed = gitIn(options.root, ["worktree", "list", "--porcelain"]).split("\n").filter((line) => line.startsWith("worktree "))
+    const listed = (await gitAsync(options.root, ["worktree", "list", "--porcelain"])).split("\n").filter((line) => line.startsWith("worktree "))
       .map((line) => { try { return realpathSync(line.slice("worktree ".length)); } catch { return ""; } });
     if (!listed.includes(root)) throw refuse("git worktree list doesn't include it");
     const channel = options.channelOf(root);
