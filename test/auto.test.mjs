@@ -3,6 +3,7 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
@@ -26,7 +27,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -68,16 +69,20 @@ if (reviewer) {
   try { calls = JSON.parse(readFileSync(join(root, 'calls.json'), 'utf8')); } catch {}
   calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT, cwd:process.cwd()});
   write('calls.json', JSON.stringify(calls));
+  // Reviewers running at once would race on calls.json; this log only appends.
+  appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({args:process.argv.slice(2), cwd:process.cwd(), env:{owner:process.env.PAIR_AUTO_OWNER ?? null, message:process.env.PAIR_AUTO_MESSAGE}}) + '\\n');
+  const inC1 = process.cwd().endsWith('-c1');
   const count = calls.length;
   const session = '11111111-1111-4111-8111-' + String(count).padStart(12, '0');
   // Corrupt the lane before announcing the session, so recording the session must not read the lane.
   if (process.env.TEST_WORKER === 'corrupt') writeFileSync(join(dirname(process.env.PAIR_AUTO_MESSAGE), '002-review.md'), '---\\nfrom: nobody\\n---\\njunk\\n');
   console.log(JSON.stringify(process.env.PAIR_AGENT === 'codex' ? {type:'thread.started', thread_id:session} : {type:'system',subtype:'init',session_id:session}));
-  if (process.env.TEST_WORKER === 'hang' || process.env.TEST_WORKER === 'leaky') {
+  const hangs = process.env.TEST_WORKER === 'hang' || (process.env.TEST_WORKER === 'hang-c1' && inC1);
+  if (hangs || process.env.TEST_WORKER === 'leaky') {
     const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], {stdio:'inherit'});
     write('descendant.pid', child.pid);
     await new Promise((resolve) => setTimeout(resolve, 100));
-    if (process.env.TEST_WORKER === 'hang') {
+    if (hangs) {
       process.on('SIGTERM', () => {});
       setInterval(()=>{},1000);
     }
@@ -93,11 +98,12 @@ if (reviewer) {
     if (process.env.TEST_WORKER === 'model-error') process.exit(1);
   }
   const model = process.argv.indexOf('--model');
-  if (process.env.TEST_WORKER === 'bad-model' && model >= 0 && process.argv[model + 1] === 'BAD') {
+  if ((process.env.TEST_WORKER === 'bad-model' || (process.env.TEST_WORKER === 'fail-c1' && inC1)) && model >= 0 && process.argv[model + 1] === 'BAD') {
     await new Promise((resolve) => process.stdout.write(JSON.stringify({type:'turn.failed', error:{message:'unknown model BAD'}}) + '\\n', resolve));
     process.exit(1);
   }
-  if (process.env.TEST_WORKER !== 'hang') {
+  if (!hangs) {
+    if (process.env.TEST_WORKER === 'gated-release' || process.env.TEST_WORKER === 'hang-c1') await gate('release');
     if (process.env.TEST_WORKER === 'failfirst' && count === 1) process.exit(2);
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
     if (process.env.TEST_WORKER === 'corrupt') process.exit(0);
@@ -149,7 +155,7 @@ if (reviewer) {
     ...pairArgs,
     ...(authorArgs.length ? ["--", ...authorArgs] : []),
   ];
-  if (worktree !== undefined) {
+  if (worktree !== undefined || gitRepo) {
     const git = (...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root }).status, 0);
     git("init", "-q");
     git("commit", "-q", "--allow-empty", "-m", "base");
@@ -1079,4 +1085,275 @@ finally:
     rmSync(`${root}-feat`, { recursive: true, force: true });
     rmSync(socketDir, { recursive: true, force: true });
   }
+});
+
+// --serve-worktrees: subagents in other worktrees of the repository review through the root's owner.
+function addChild(f, name) {
+  const dir = `${f.root}-${name}`;
+  assert.equal(spawnSync("git", ["worktree", "add", "-q", dir, "-b", name], { cwd: f.root }).status, 0);
+  return realpathSync(dir);
+}
+
+/** Runs the CLI as a subagent of the auto author would: in its own worktree, with the author's environment. */
+function asSubagent(f, owner, cwd, args, input = "") {
+  const env = { ...f.env, PAIR_AUTO_ROLE: "author", PAIR_AUTO_RUN: f.state().run, PAIR_AUTO_OWNER: owner, PAIR_AGENT: "claude" };
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, ...args], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (data) => { out += data; });
+    child.stderr.on("data", (data) => { out += data; });
+    child.on("close", (code) => resolve({ code, out }));
+    child.stdin.end(input);
+  });
+}
+
+const channelName = (dir) => `${basename(dir)}-${createHash("sha1").update(dir).digest("hex").slice(0, 8)}`;
+const reviewerCalls = (f) => existsSync(f.file("calls.jsonl")) ? f.read("calls.jsonl").trim().split("\n").map((line) => JSON.parse(line)) : [];
+const inDir = (f, cwd, args) => exec(process.execPath, [CLI, ...args], { cwd, env: f.env, timeout: 10_000 });
+
+async function served(t, options) {
+  const f = fixture(t, { scenario: "hold", git: true, timeout: 20, ...options });
+  t.after(() => { for (const name of ["c1", "c2", "c3"]) rmSync(`${f.root}-${name}`, { recursive: true, force: true }); });
+  await until(() => { try { return existsSync(f.file("author.pid")) && f.state().phase === "idle"; } catch { return false; } }, "owner ready");
+  return { f, owner: f.stateDir() };
+}
+
+test("without --serve-worktrees, a subagent worktree's request is refused and stays on disk", { timeout: 20_000 }, async (t) => {
+  const { f, owner } = await served(t, {});
+  const c1 = addChild(f, "c1");
+  const sent = await asSubagent(f, owner, c1, ["send", "request", "-"], "## Summary\nchild work");
+  assert.equal(sent.code, 1, sent.out);
+  assert.match(sent.out, /doesn't serve other worktrees; integrate the work into .*, or start the session with --serve-worktrees.*The request remains on disk/s);
+  assert.equal(reviewerCalls(f).length, 0);
+  assert.match((await inDir(f, c1, ["status"])).stdout, /claude-to-codex: awaiting-review/);
+});
+
+test("--serve-worktrees: a subagent's loop runs through the root's owner, writes nothing in its worktree, and its commands there are scoped", { timeout: 30_000 }, async (t) => {
+  const { f, owner } = await served(t, { pairArgs: ["--serve-worktrees"] });
+  const recorded = JSON.parse(readFileSync(join(owner, "author.json"), "utf8")).session;
+  const c1 = addChild(f, "c1");
+  // A tracked AGENTS.md whose pair section an older pair wrote: a refresh here would rewrite it.
+  const stale = "# repo notes\n<!-- pair:start -->\n<!-- pair 0.1.0 -->\nold pair instructions\n<!-- pair:end -->\n";
+  writeFileSync(join(c1, "AGENTS.md"), stale);
+  assert.equal(spawnSync("git", ["add", "AGENTS.md"], { cwd: c1 }).status, 0);
+  assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "notes"], { cwd: c1 }).status, 0);
+  const sent = await asSubagent(f, owner, c1, ["send", "request", "-"], "## Summary\nchild work");
+  assert.equal(sent.code, 0, sent.out);
+  assert.match(sent.out, /== pair: review from codex · claude-to-codex · round 1 · verdict approve ==/);
+  const [call] = reviewerCalls(f);
+  assert.equal(realpathSync(call.cwd), c1, "the reviewer runs in the subagent's worktree");
+  assert.equal(call.args[call.args.indexOf("--add-dir") + 1], join(f.root, "home", channelName(c1)), "with that worktree's channel");
+  assert.equal(call.env.owner, null, "a reviewer's commands act only on its own worktree");
+  assert.match(call.args.at(-1), /## Review for claude[\s\S]*Managed round: the pair CLI is/, "the rules come with the prompt");
+  assert.equal(readFileSync(join(c1, "AGENTS.md"), "utf8"), stale, "no refresh in a served worktree");
+  assert.ok(!existsSync(join(c1, ".claude")), "no pair init there");
+  assert.equal(JSON.parse(readFileSync(join(owner, "author.json"), "utf8")).session, recorded, "the root's resume record is its own");
+
+  const childStatus = (await inDir(f, c1, ["status"])).stdout;
+  assert.match(childStatus, new RegExp(`auto mode: served by the session in ${realpathSync(f.root)} \\(owner \\d+\\)`));
+  assert.match(childStatus, /served by another worktree's auto session, which gives its agents pair's rules: don't run pair init here/);
+  assert.doesNotMatch(childStatus, /Run `pair init`/, "no advice to write pair's files into a served worktree");
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /serves subagent worktrees · reviewers 1 · running 0 · queued 0/);
+  await assert.rejects(inDir(f, c1, ["stop"]), /served by the auto session in .*run pair stop there, which stops the whole session/s);
+  await assert.rejects(inDir(f, c1, ["reviewer", "--reviewer-model", "x"]), /run pair reviewer there to change the settings for new threads/);
+  await assert.rejects(inDir(f, c1, ["reset", "--as", "claude"]), /cannot reset while auto mode or another reset owns this worktree/);
+  assert.equal(f.state().phase, "idle", "nothing in the subagent's worktree stopped the session");
+});
+
+for (const reviewers of [1, 2]) {
+  test(`--serve-worktrees --reviewers ${reviewers}: one FIFO across worktrees${reviewers > 1 ? ", with rounds running at once" : ""}`, { timeout: 40_000 }, async (t) => {
+    const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees", "--reviewers", String(reviewers)] });
+    const [c1, c2] = [addChild(f, "c1"), addChild(f, "c2")];
+    const first = asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work");
+    await until(() => reviewerCalls(f).length === 1, "c1 launched");
+    const second = asSubagent(f, owner, c2, ["send", "request", "-"], "c2 work");
+    if (reviewers === 1) {
+      await until(() => f.state().served?.queued.length === 1, "c2 queued");
+      assert.match((await f.command(["status"])).stdout, new RegExp(`running 1 · queued 1[\\s\\S]*running: ${c1} \\(thread \\S+, pid \\d+\\)[\\s\\S]*queued:  ${c2}`));
+      assert.match((await inDir(f, c2, ["status"])).stdout, /served by the session in [\s\S]*  queued: thread \S+/);
+      await pause(1000);
+      assert.equal(reviewerCalls(f).length, 1, "the queued round waits for the slot");
+    } else {
+      await until(() => reviewerCalls(f).length === 2, "both rounds run at once");
+    }
+    writeFileSync(f.file("release"), "");
+    for (const done of await Promise.all([first, second])) {
+      assert.equal(done.code, 0, done.out);
+      assert.match(done.out, /verdict approve/);
+    }
+    assert.deepEqual(reviewerCalls(f).map(({ cwd }) => realpathSync(cwd)), [c1, c2], "first come, first served");
+  });
+}
+
+test("--serve-worktrees: retries attach to the round, simultaneous first contacts enroll once, and an older CLI's request means the root", { timeout: 40_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"] });
+  const c1 = addChild(f, "c1");
+  // Written without a managed review, then requested twice at once, as a send and its pair wait retry might.
+  const plain = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, "send", "request", "--as", "claude", "-"], { cwd: c1, env: f.env, stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (data) => { out += data; });
+    child.on("close", () => resolve(out));
+    child.stdin.end("c1 work");
+  });
+  const file = plain.replace("sent: ", "").trim();
+  const request = { action: "review", run: f.state().run, file, root: c1 };
+  const both = Promise.all([f.call(request, 30_000), f.call(request, 30_000)]);
+  await until(() => reviewerCalls(f).length === 1, "one launch");
+  await pause(500);
+  writeFileSync(f.file("release"), "");
+  await both;
+  assert.equal(reviewerCalls(f).length, 1, "both callers shared one round");
+  assert.deepEqual(f.state().served.targets.filter((root) => root === c1), [c1], "one enrollment");
+  await f.call(request, 5000); // a retry after the verdict returns it
+  assert.equal(reviewerCalls(f).length, 1, "without relaunching");
+
+
+  // An older CLI sends no root: the owner serves its own worktree, never a child.
+  writeFileSync(f.file("root-body.md"), "root work");
+  const rootFile = (await f.command(["send", "request", "--as", "claude", f.file("root-body.md")])).stdout.replace("sent: ", "").trim();
+  await f.call({ action: "review", run: f.state().run, file: rootFile }, 30_000);
+  assert.equal(realpathSync(reviewerCalls(f).at(-1).cwd), realpathSync(f.root));
+  assert.deepEqual(f.state().served.targets, [realpathSync(f.root), c1]);
+});
+
+test("--serve-worktrees: one worktree's failed round is corrected there while another succeeds", { timeout: 40_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "fail-c1", reviewerModel: "BAD", pairArgs: ["--serve-worktrees", "--reviewers", "2"] });
+  const [c1, c2] = [addChild(f, "c1"), addChild(f, "c2")];
+  const [failedRound, goodRound] = await Promise.all([
+    asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work"),
+    asSubagent(f, owner, c2, ["send", "request", "-"], "c2 work"),
+  ]);
+  assert.equal(failedRound.code, 1, failedRound.out);
+  assert.match(failedRound.out, new RegExp(`unknown model BAD.*run pair reviewer --thread current with the new value in your own terminal, in ${c1}`, "s"));
+  assert.match(goodRound.out, /verdict approve/);
+  assert.match((await f.command(["status"])).stdout, new RegExp(`failed:  ${c1} thread \\S+: .*unknown model BAD`));
+  const { stdout } = await inDir(f, c1, ["reviewer", "--thread", "current", "--reviewer-model", "good"]);
+  assert.match(stdout, new RegExp(`model good · effort CLI default \\(was model BAD · effort CLI default\\)\\. .*Ask the subagent working in ${c1} to retry with pair wait\\.`));
+  const retry = await asSubagent(f, owner, c1, ["wait", "--timeout", "1"]);
+  assert.match(retry.out, /verdict approve/);
+  const last = reviewerCalls(f).at(-1);
+  assert.equal(realpathSync(last.cwd), c1);
+  assert.equal(last.args[last.args.indexOf("--model") + 1], "good");
+});
+
+test("--serve-worktrees: a worktree removed while queued or running fails alone, and its reviewer is stopped", { timeout: 40_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "hang-c1", pairArgs: ["--serve-worktrees", "--reviewers", "2"] });
+  const [c1, c2, c3] = [addChild(f, "c1"), addChild(f, "c2"), addChild(f, "c3")];
+  const hung = asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work");
+  const sibling = asSubagent(f, owner, c2, ["send", "request", "-"], "c2 work");
+  await until(() => reviewerCalls(f).length === 2 && existsSync(f.file("descendant.pid")), "both running");
+  const queued = asSubagent(f, owner, c3, ["send", "request", "-"], "c3 work");
+  await until(() => f.state().served?.queued.length === 1, "c3 queued");
+  const descendant = Number(f.read("descendant.pid"));
+  rmSync(c3, { recursive: true, force: true });
+  rmSync(c1, { recursive: true, force: true });
+  const removed = await hung;
+  assert.equal(removed.code, 1);
+  assert.match(removed.out, new RegExp(`worktree ${c1} was removed or replaced`));
+  await until(() => !alive(descendant), "its reviewer's process group was stopped");
+  writeFileSync(f.file("release"), "");
+  assert.match((await sibling).out, /verdict approve/, "the sibling's round completes");
+  const dropped = await queued;
+  assert.equal(dropped.code, 1);
+  assert.match(dropped.out, new RegExp(`worktree ${c3} was removed or replaced`));
+  assert.equal(reviewerCalls(f).length, 2, "the removed queued worktree never launched");
+});
+
+test("--serve-worktrees: a worktree whose .git was replaced fails like a removed one, running and on retry", { timeout: 40_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"] });
+  const c1 = addChild(f, "c1");
+  const round = asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work");
+  await until(() => reviewerCalls(f).length === 1 && existsSync(f.file("worker.pid")), "c1 running");
+  const worker = Number(f.read("worker.pid"));
+  // Same directory and inode, but git now resolves it to another repository.
+  rmSync(join(c1, ".git"), { force: true });
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: c1 }).status, 0);
+  const failed = await round;
+  assert.equal(failed.code, 1);
+  assert.match(failed.out, new RegExp(`worktree ${c1} was removed or replaced`));
+  await until(() => !alive(worker), "its reviewer was stopped");
+  writeFileSync(f.file("release"), "");
+  const retry = await asSubagent(f, owner, c1, ["wait", "--timeout", "1"]);
+  assert.equal(retry.code, 1);
+  assert.match(retry.out, new RegExp(`worktree ${c1} was removed or replaced`), "a retry is refused too");
+  assert.equal(reviewerCalls(f).length, 1);
+});
+
+test("--serve-worktrees: a slow git during enrollment doesn't stall the owner past the guardian's watchdog", { timeout: 45_000 }, async (t) => {
+  // A git that takes 7s (more than the 5s watchdog) for the owner's first enrollment check in c1 only.
+  const shims = mkdtempSync(join(tmpdir(), "pair-git-shim-"));
+  t.after(() => rmSync(shims, { recursive: true, force: true }));
+  const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(join(shims, "git"), `#!/bin/sh\ncase "$(pwd -P)" in *-c1) [ "$1 $2" = "rev-parse --show-toplevel" ] && sleep 7;; esac\nexec ${realGit} "$@"\n`);
+  chmodSync(join(shims, "git"), 0o755);
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees", "--reviewers", "2"], extraEnv: { PATH: `${shims}:${process.env.PATH}` } });
+  const [c1, c2] = [addChild(f, "c1"), addChild(f, "c2")];
+  const sibling = asSubagent(f, owner, c2, ["send", "request", "-"], "c2 work");
+  await until(() => reviewerCalls(f).length === 1, "c2 running");
+  const slow = asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work");
+  await pause(7500); // through the slow enrollment
+  assert.ok(alive(Number(f.read("author.pid"))), "the author survived");
+  assert.notEqual(f.state().phase, "stopping");
+  writeFileSync(f.file("release"), "");
+  assert.match((await sibling).out, /verdict approve/, "the sibling's review survived");
+  const enrolled = await slow;
+  assert.equal(enrolled.code, 0, enrolled.out);
+  assert.match(enrolled.out, /verdict approve/);
+});
+
+test("--serve-worktrees: stop settles running and queued rounds; claimed sockets go with the owner, even when it's killed", { timeout: 40_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"] });
+  const [c1, c2] = [addChild(f, "c1"), addChild(f, "c2")];
+  const first = asSubagent(f, owner, c1, ["send", "request", "-"], "c1 work");
+  await until(() => reviewerCalls(f).length === 1, "c1 running");
+  const second = asSubagent(f, owner, c2, ["send", "request", "-"], "c2 work");
+  await until(() => f.state().served?.queued.length === 1, "c2 queued");
+  assert.equal(readdirSync(f.socketDir).length, 3, "the owner's socket and two claims");
+  await f.command(["stop"]);
+  const [running, queued] = await Promise.all([first, second]);
+  for (const done of [running, queued]) {
+    assert.equal(done.code, 1);
+    assert.match(done.out, /The request remains on disk/);
+  }
+  assert.match(running.out, /auto owner stopped/, "the guardian stopped the running reviewer");
+  assert.match(queued.out, /auto mode stopped; review request remains on disk/, "the queued round never launched");
+  await f.completed;
+  assert.deepEqual(readdirSync(f.socketDir), [], "claims released");
+
+  const killed = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"] });
+  const c3 = addChild(killed.f, "c3");
+  void asSubagent(killed.f, killed.owner, c3, ["send", "request", "-"], "c3 work");
+  await until(() => readdirSync(killed.f.socketDir).length === 2, "c3 claimed");
+  killed.f.launcher.kill("SIGKILL");
+  await until(() => readdirSync(killed.f.socketDir).length === 0, "the guardian removes the owner's and the claimed socket");
+});
+
+test("--serve-worktrees: enrollment refuses what it can't validate", { timeout: 40_000 }, async (t) => {
+  const { f, owner } = await served(t, { pairArgs: ["--serve-worktrees"] });
+  const other = mkdtempSync(join(tmpdir(), "pair-other-repo-"));
+  t.after(() => rmSync(other, { recursive: true, force: true }));
+  spawnSync("git", ["init", "-q"], { cwd: other });
+  const foreign = await asSubagent(f, owner, realpathSync(other), ["send", "request", "-"], "x");
+  assert.match(foreign.out, /can't serve .*: it isn't a worktree of .*'s repository/);
+
+  const c1 = addChild(f, "c1");
+  const channel = join(f.root, "home", channelName(c1));
+  mkdirSync(channel, { recursive: true });
+  writeFileSync(join(channel, "codex.session"), JSON.stringify({ thread: "11111111-1111-4111-8111-111111111111", worktree: c1, registeredAt: "x" }));
+  const registered = await asSubagent(f, owner, c1, ["send", "request", "-"], "x");
+  assert.match(registered.out, /a manual Codex session is registered there/);
+
+  // Another owner (or a reset) already holds the second worktree's socket.
+  const c2 = addChild(f, "c2");
+  const taken = createServer().listen(join(f.socketDir, `${createHash("sha256").update(join(f.root, "state", "pair", channelName(c2))).digest("hex").slice(0, 24)}.sock`));
+  try {
+    await new Promise((resolve) => taken.once("listening", resolve));
+    const claimed = await asSubagent(f, owner, c2, ["send", "request", "-"], "x");
+    assert.match(claimed.out, /another auto session or a reset owns it/);
+  } finally {
+    await new Promise((resolve) => taken.close(resolve)); // before the fixture checks that every socket is gone
+  }
+  assert.equal(reviewerCalls(f).length, 0);
 });
