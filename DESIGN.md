@@ -45,7 +45,7 @@ ${XDG_STATE_HOME:-~/.local/state}/pair/<repo>-<hash>/   # written by pair mcp an
   auto-<run>/bin/pair                 # the run's CLI wrapper ($PAIR_BIN); removed when it ends
 ```
 
-Each message has this frontmatter, written by the CLI: `from`, `type`, `round`, `verdict` (reviews only), and `status` (`open`/`approved`/`escalated`).
+Each message has this frontmatter, written by the CLI: `from`, `type`, `round`, `verdict` (reviews only), and `status` (`open`/`approved`/`escalated`, or `brainstorming`/`completed` in a brainstorm). A brainstorm request also has `budget`.
 The CLI writes to a dotfile first and then renames it, so readers never see a partial message.
 When the CLI reads a message, it checks every field and fails with `corrupt message <path>: …` if anything is invalid. It doesn't guess.
 
@@ -57,8 +57,8 @@ The thread state comes from the last message, so there is no separate state file
 |---|---|---|
 | none | idle | author may `send request` |
 | request / response | awaiting-review | reviewer: `send review --verdict …` |
-| review, status open | awaiting-response | author: `send response` |
-| review, approved/escalated | closed | author reads it with `wait`, then it's archived |
+| review, status open/brainstorming | awaiting-response | author: `send response` |
+| review, approved/escalated/completed | closed | author reads it with `wait`, then it's archived |
 
 `pair wait --as X` returns the first message where it is X's turn, in either thread. It
 prints the message and a `next:` line telling the agent what to do. Calling `wait` again before

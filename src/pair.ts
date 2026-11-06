@@ -1464,7 +1464,7 @@ function renderPrompt(agent: Agent): string {
 }
 
 function claudeSkill(): string {
-  const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
+  const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, brainstorm a design with codex, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
   return `${header}<!-- pair ${PACKAGE.version} -->\n${renderPrompt("claude")}`;
 }
 

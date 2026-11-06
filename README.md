@@ -29,8 +29,8 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as described in RFC 2119.
   worktree has its own channel, derived from its root.
 - **Lane**: one direction within a channel, `claude-to-codex/` or `codex-to-claude/`, named by
   the author.
-- **Thread**: one review, stored as numbered messages: `request`, then alternating `review` and
-  `response`. It closes when the reviewer approves. If findings remain open after
+- **Thread**: one review (or [brainstorm](#brainstorms)), stored as numbered messages: `request`,
+  then alternating `review` and `response`. A review closes when the reviewer approves. If findings remain open after
   `PAIR_MAX_ROUNDS` rounds (default 3), it is **escalated** and both agents stop and ask the user.
 - **Auto session**: one `pair start` run: the interactive author, the reviewer it starts for each
   round, and the processes that supervise them.
@@ -43,6 +43,7 @@ code departs from the spec. `pair history` only sees the current worktree's thre
 spec in the worktree that implements it. This is part of the agents' instructions, not the
 protocol, so pair treats these threads like any other.
 
+<a id="brainstorms"></a>
 A **brainstorm** is a thread for ideas before there's a design: the author asks with
 `pair send request --brainstorm`, the reviewer answers with options, trade-offs and questions and a
 verdict of `continue` or `complete`, and the author replies as in a review. The reviewer gets
