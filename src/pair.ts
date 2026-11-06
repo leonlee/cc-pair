@@ -14,10 +14,24 @@ const AGENTS = ["claude", "codex"] as const;
 type Agent = (typeof AGENTS)[number];
 const MESSAGE_TYPES = ["request", "review", "response"] as const;
 type MessageType = (typeof MESSAGE_TYPES)[number];
-const VERDICTS = ["approve", "changes"] as const;
+const VERDICTS = ["approve", "changes", "continue", "complete"] as const;
 type Verdict = (typeof VERDICTS)[number];
-const THREAD_STATUSES = ["open", "approved", "escalated"] as const;
+const THREAD_STATUSES = ["open", "approved", "escalated", "brainstorming", "completed"] as const;
 type ThreadStatus = (typeof THREAD_STATUSES)[number];
+type ThreadKind = "review" | "brainstorm";
+// A brainstorm has its own statuses, so a pair that predates it rejects the request as corrupt
+// instead of reviewing it as code.
+const KINDS = {
+  review: { active: "open", verdicts: ["approve", "changes"] },
+  brainstorm: { active: "brainstorming", verdicts: ["continue", "complete"] },
+} as const satisfies Record<ThreadKind, { active: ThreadStatus; verdicts: readonly Verdict[] }>;
+// The statuses a review message with each verdict may carry.
+const VERDICT_STATUSES: Record<Verdict, readonly ThreadStatus[]> = {
+  approve: ["approved"],
+  changes: ["open", "escalated"],
+  continue: ["brainstorming"],
+  complete: ["completed"],
+};
 
 const DEFAULT_MAX_ROUNDS = 3;
 const DEFAULT_KEEP = 100; // finished threads kept by auto-pruning
@@ -25,7 +39,7 @@ const DEFAULT_WAIT_SECONDS = 540; // stays under Claude Code's 10-minute Bash ca
 const POLL_MS = 1000;
 const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
 // archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
-const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated)$/;
+const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated|completed)$/;
 const PAIR_SECTION = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->\n?/;
 const PAIR_SECTIONS = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->(?:\r?\n)?/g; // for removal, CRLF too
 // SKILL.md as released versions wrote it (0.1.0 and 0.1.1), so `uninit` can tell it from an edited one.
@@ -58,6 +72,7 @@ interface Message {
   round: number;
   verdict?: Verdict;
   status: ThreadStatus;
+  budget?: number; // a brainstorm request only: the partner's turns, fixed when it opens
   body: string;
 }
 
@@ -127,6 +142,10 @@ function positiveNumber(value: string, what: string): number {
 
 function maxRounds(): number {
   return positiveNumber(process.env.PAIR_MAX_ROUNDS ?? String(DEFAULT_MAX_ROUNDS), "PAIR_MAX_ROUNDS");
+}
+
+function kindOf(status: ThreadStatus): ThreadKind {
+  return status === "brainstorming" || status === "completed" ? "brainstorm" : "review";
 }
 
 function partnerOf(agent: Agent): Agent {
@@ -347,19 +366,30 @@ function readMessage(path: string, thread: Thread): Message {
     throw new PairError(`${corrupt} round must be a positive integer (got "${fields.round}")`);
   }
   const status = oneOf(fields.status, THREAD_STATUSES, `${corrupt} status`);
-  const verdict = type === "review" ? oneOf(fields.verdict, VERDICTS, `${corrupt} verdict`) : undefined;
-  const consistent = verdict === "approve" ? status === "approved" : verdict === "changes" ? status !== "approved" : status === "open";
+  const kind = KINDS[kindOf(status)];
+  const verdict = type === "review" ? oneOf(fields.verdict, kind.verdicts, `${corrupt} verdict`) : undefined;
+  const consistent = verdict ? VERDICT_STATUSES[verdict].includes(status) : status === kind.active;
   if (!consistent) {
     throw new PairError(`${corrupt} status "${status}" does not fit verdict "${verdict ?? "none"}"`);
   }
-  return { file: path, from, type, round, verdict, status, body };
+  const budget = fields.budget === undefined ? undefined : Number(fields.budget);
+  const wantsBudget = type === "request" && kindOf(status) === "brainstorm";
+  if (wantsBudget !== (budget !== undefined) || (budget !== undefined && !(Number.isInteger(budget) && budget >= 1))) {
+    throw new PairError(`${corrupt} a brainstorm request needs a positive whole budget, and no other message has one (got "${fields.budget ?? "none"}")`);
+  }
+  return { file: path, from, type, round, verdict, status, budget, body };
 }
 
 function readThread(dir: string, thread: Thread): Message[] {
-  return readdirSync(dir)
+  const messages = readdirSync(dir)
     .filter((name) => MESSAGE_FILE.test(name))
     .sort()
     .map((name) => readMessage(join(dir, name), thread));
+  const mixed = messages.find((message) => kindOf(message.status) !== kindOf(messages[0].status));
+  if (mixed) {
+    throw new PairError(`corrupt message ${mixed.file}: a review and a brainstorm can't share a thread`);
+  }
+  return messages;
 }
 
 function listMessages(thread: Thread): Message[] {
@@ -386,7 +416,7 @@ function stateOf(messages: Message[]): ThreadState {
   if (last.type !== "review") {
     return { kind: "awaiting-review", last };
   }
-  return last.status === "open" ? { kind: "awaiting-response", last } : { kind: "closed", last };
+  return last.status === KINDS[kindOf(last.status)].active ? { kind: "awaiting-response", last } : { kind: "closed", last };
 }
 
 /** Digits only: Number("") is 0, so an empty value must never reach the conversion. */
@@ -451,6 +481,7 @@ function writeMessage(dir: string, seq: number, message: Omit<Message, "file" | 
     `round: ${message.round}`,
     ...(message.verdict ? [`verdict: ${message.verdict}`] : []),
     `status: ${message.status}`,
+    ...(message.budget ? [`budget: ${message.budget}`] : []),
     "---",
     body.trimEnd(),
     "",
@@ -462,7 +493,7 @@ function writeMessage(dir: string, seq: number, message: Omit<Message, "file" | 
   return finalPath;
 }
 
-function send(channel: string, me: Agent, type: MessageType, body: string, verdict?: Verdict): string {
+function send(channel: string, me: Agent, type: MessageType, body: string, verdict?: Verdict, brainstorm = false): string {
   if (type === "review") {
     return sendReview(channel, me, body, verdict);
   }
@@ -476,18 +507,21 @@ function send(channel: string, me: Agent, type: MessageType, body: string, verdi
     if (state.kind === "closed") {
       archive(channel, state.last);
     }
-    return writeMessage(join(thread.lane, newThreadId()), 1, { from: me, type, round: 1, status: "open" }, body);
+    // Fixed now, so the budget can't differ between the agents' shells or change after a restart. Rounds are whole.
+    const opening = brainstorm ? { status: "brainstorming" as const, budget: Math.ceil(maxRounds()) } : { status: "open" as const };
+    return writeMessage(join(thread.lane, newThreadId()), 1, { from: me, type, round: 1, ...opening }, body);
   }
   if (state.kind !== "awaiting-response") {
     throw new PairError(`cannot send response: no open review from ${thread.reviewer} (thread is ${state.kind})`);
   }
   const round = state.last.round + 1;
-  return writeMessage(dirname(state.last.file), messages.length + 1, { from: me, type, round, status: "open" }, body);
+  const status = KINDS[kindOf(state.last.status)].active;
+  return writeMessage(dirname(state.last.file), messages.length + 1, { from: me, type, round, status }, body);
 }
 
 function sendReview(channel: string, me: Agent, body: string, verdict?: Verdict): string {
   if (!verdict) {
-    throw new PairError(`review needs --verdict ${VERDICTS.join("|")}`);
+    throw new PairError("review needs --verdict approve|changes, or continue|complete in a brainstorm");
   }
   const thread = threadFor(channel, partnerOf(me));
   const messages = listMessages(thread);
@@ -499,10 +533,25 @@ function sendReview(channel: string, me: Agent, body: string, verdict?: Verdict)
     throw new PairError("managed reviewer cannot reply to a different message");
   }
   const round = state.last.round;
-  const status: ThreadStatus = verdict === "approve" ? "approved" : round >= maxRounds() ? "escalated" : "open";
+  const kind = kindOf(state.last.status);
+  const allowed: readonly Verdict[] = KINDS[kind].verdicts;
+  if (!allowed.includes(verdict)) {
+    throw new PairError(`this thread is a ${kind}; reply with --verdict ${allowed.join("|")}`);
+  }
+  if (verdict === "continue" && round >= budgetOf(messages)) {
+    throw new PairError(`this is the brainstorm's last round (budget ${budgetOf(messages)}); send --verdict complete with the options, your recommendation and open decisions`);
+  }
+  const status: ThreadStatus = kind === "brainstorm"
+    ? (verdict === "complete" ? "completed" : "brainstorming")
+    : verdict === "approve" ? "approved" : round >= maxRounds() ? "escalated" : "open";
   const review = { from: me, type: "review" as const, round, verdict, status };
   const path = writeMessage(dirname(state.last.file), messages.length + 1, review, body);
   return status === "escalated" ? `${path}\n${escalationNotice()}` : path;
+}
+
+/** A brainstorm's budget, from its request. */
+function budgetOf(messages: Message[]): number {
+  return messages[0]?.budget ?? 1;
 }
 
 function escalationNotice(): string {
@@ -539,7 +588,19 @@ function pendingFor(channel: string, me: Agent): Pending | undefined {
   return undefined;
 }
 
-function nextStep(me: Agent, state: ActiveState): string {
+function nextStep(me: Agent, state: ActiveState, budget: number): string {
+  if (kindOf(state.last.status) === "brainstorm") {
+    switch (state.kind) {
+      case "awaiting-review":
+        return state.last.round >= budget
+          ? `this is the brainstorm's last round (budget ${budget}): add your ideas and close it with the options, your recommendation and open decisions: pair send review --verdict complete --as ${me} <file|->`
+          : `add your ideas, then: pair send review --verdict continue|complete --as ${me} <file|->`;
+      case "awaiting-response":
+        return `reply with your answers, objections or your own proposal: pair send response --as ${me} <file|->`;
+      case "closed":
+        return "brainstorm completed and closed. Nothing to send.";
+    }
+  }
   switch (state.kind) {
     case "awaiting-review":
       return `review it, then: pair send review --verdict approve|changes --as ${me} <file|->`;
@@ -564,7 +625,8 @@ function historyLine({ state, earlier }: Pending): string | undefined {
 
 function messageHeader(message: Message, laneName: string): string {
   const verdict = message.verdict ? ` · verdict ${message.verdict}` : "";
-  return `== pair: ${message.type} from ${message.from} · ${laneName} · round ${message.round}${verdict} ==`;
+  const kind = kindOf(message.status) === "brainstorm" ? "brainstorm " : "";
+  return `== pair: ${kind}${message.type} from ${message.from} · ${laneName} · round ${message.round}${verdict} ==`;
 }
 
 function formatMessage(me: Agent, pending: Pending): string {
@@ -572,7 +634,8 @@ function formatMessage(me: Agent, pending: Pending): string {
   const { last } = state;
   const header = messageHeader(last, basename(thread.lane));
   const history = historyLine(pending);
-  return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, state)} ==`].join("\n");
+  const budget = budgetOf([...pending.earlier, last]);
+  return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, state, budget)} ==`].join("\n");
 }
 
 /**
@@ -1062,7 +1125,8 @@ function describe(channel: string, author: Agent): string {
     return `${basename(thread.lane)}: idle`;
   }
   const turn = state.kind === "awaiting-review" ? thread.reviewer : thread.author;
-  return `${basename(thread.lane)}: ${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
+  const kind = kindOf(state.last.status) === "brainstorm" ? "brainstorm " : "";
+  return `${basename(thread.lane)}: ${kind}${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
 }
 
 function instructionState(path: string, expected: string, sectionOnly = false): string {
@@ -1400,7 +1464,7 @@ function renderPrompt(agent: Agent): string {
 }
 
 function claudeSkill(): string {
-  const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
+  const header = `---\nname: pair\ndescription: Request a code review from codex after finishing a task, brainstorm a design with codex, or act as codex's reviewer ("be my reviewer", "listen"), via the pair CLI.\n---\n\n`;
   return `${header}<!-- pair ${PACKAGE.version} -->\n${renderPrompt("claude")}`;
 }
 
@@ -1752,7 +1816,7 @@ const USAGE = `usage:
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
                                                       (change a running auto session's reviewer, without a restart)
-  pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <file|->
+  pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict approve|changes|continue|complete] <file|->
   pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
@@ -1771,7 +1835,7 @@ const HELP = `${USAGE}
 environment:
   PAIR_HOME              root directory for channels (default ~/.pair)
   PAIR_AGENT             default for --as
-  PAIR_MAX_ROUNDS        review rounds before a thread is escalated (default 3)
+  PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
   PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
   PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
@@ -1852,7 +1916,7 @@ options:
 Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.
 When pair knows the author's conversation ID, it prints a command that starts the session again in
 this worktree and resumes that conversation; pair start --resume does the same with new options.`,
-  send: `usage: pair send <request|review|response> --as <claude|codex> [--verdict approve|changes] <FILE|->
+  send: `usage: pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict VERDICT] <FILE|->
 
 Send a message on this worktree's channel. The body is read from FILE, or from stdin with -.
   request    as the author, open a review thread (fails while your previous thread is still open)
@@ -1861,10 +1925,14 @@ Send a message on this worktree's channel. The body is read from FILE, or from s
 
 options:
 ${AS_OPTION}
+  --brainstorm                 with request: open a brainstorm instead of a review
   --verdict <approve|changes>  required for review; approve closes the thread
+  --verdict <continue|complete>
+                               the same in a brainstorm; complete closes it with a summary
 
 A thread is escalated when changes are still requested after PAIR_MAX_ROUNDS rounds (default 3).
-In auto mode, request and response wait for the managed review and print it.`,
+A brainstorm gets PAIR_MAX_ROUNDS turns from the reviewer, fixed when it opens, and the last one
+must complete it. In auto mode, request and response wait for the managed reply and print it.`,
   wait: `usage: pair wait --as <claude|codex> [--timeout SECONDS]
 
 Wait until a message for --as arrives, print it with what to do next, and exit. On timeout it prints
@@ -1929,7 +1997,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -1951,6 +2019,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (values.thread !== undefined && command !== "reviewer") {
     throw new PairError("--thread is only supported by pair reviewer");
+  }
+  if (values.brainstorm && (command !== "send" || rest[0] !== "request")) {
+    throw new PairError("--brainstorm is only supported by pair send request");
   }
   const root = worktreeRoot();
   const channel = channelDir(root);
@@ -2041,7 +2112,9 @@ async function main(argv: string[]): Promise<number> {
             graceMs: grace * 1000,
             target: () => {
               const state = stateOf(listMessages(threadFor(startChannel, me)));
-              return state.kind === "awaiting-review" ? { file: state.last.file, thread: basename(dirname(state.last.file)) } : undefined;
+              return state.kind === "awaiting-review"
+                ? { file: state.last.file, thread: basename(dirname(state.last.file)), brainstorm: kindOf(state.last.status) === "brainstorm" }
+                : undefined;
             },
             reviewed: (file) => {
               const messages = listMessages(threadFor(startChannel, me));
@@ -2080,7 +2153,7 @@ async function main(argv: string[]): Promise<number> {
           throw new PairError("a managed reviewer may only send its own review verdict");
         }
         const body = readBody(rest[1]);
-        console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict))}`);
+        console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict, values.brainstorm))}`);
         if (type !== "review" && await managedReview(me) && !(await wait(channel, me, 1))) {
           throw new PairError("the managed review finished, but another pair wait already took it; run pair history to read it");
         }

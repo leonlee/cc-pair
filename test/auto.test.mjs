@@ -102,8 +102,9 @@ if (reviewer) {
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
     if (process.env.TEST_WORKER === 'corrupt') process.exit(0);
     const message = await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']);
-    const verdict = count === 1 && ['roundtrip', 'gated'].includes(process.env.TEST_SCENARIO) ? 'changes' : 'approve';
-    await call(['send','review','--as',process.env.PAIR_AGENT,'--verdict',verdict,'-'], verdict === 'changes' ? '### F1 [medium] fix this' : 'Approved');
+    const verdict = process.env.TEST_SCENARIO === 'brainstorm' ? (count === 1 ? 'continue' : 'complete')
+      : count === 1 && ['roundtrip', 'gated'].includes(process.env.TEST_SCENARIO) ? 'changes' : 'approve';
+    await call(['send','review','--as',process.env.PAIR_AGENT,'--verdict',verdict,'-'], verdict === 'changes' ? '### F1 [medium] fix this' : verdict === 'approve' ? 'Approved' : 'Option A or B?');
     if (process.env.TEST_WORKER === 'leaky') process.exit(0);
   }
 } else {
@@ -117,9 +118,11 @@ if (reviewer) {
     const lockState = (mode) => { if (process.env.TEST_SCENARIO === 'readonly-state') chmodSync(join(stateBase, readdirSync(stateBase)[0]), mode); };
     lockState(0o500);
     try {
-      const first = await call(['send','request','--as',process.env.PAIR_AGENT,'-'], '## Summary\\nTest change\\n## Files\\na.ts');
+      const brainstorm = process.env.TEST_SCENARIO === 'brainstorm' ? ['--brainstorm'] : [];
+      const first = await call(['send','request',...brainstorm,'--as',process.env.PAIR_AGENT,'-'], '## Summary\\nTest change\\n## Files\\na.ts');
       lockState(0o700);
       write('first.out', first);
+      if (process.env.TEST_SCENARIO === 'brainstorm') write('second.out', await call(['send','response','--as',process.env.PAIR_AGENT,'-'], 'A, because'));
       if (process.env.TEST_SCENARIO === 'roundtrip' || process.env.TEST_SCENARIO === 'gated') {
         if (process.env.TEST_SCENARIO === 'gated') await gate('go1');
         write('second.out', await call(['send','response','--as',process.env.PAIR_AGENT,'-'], '### F1 fixed'));
@@ -228,6 +231,21 @@ for (const author of ["claude", "codex"]) {
     assert.ok(!calls[2].args.includes(resume));
     assert.match((await f.command(["history"])).stdout, /approved/);
     assert.match((await f.command(["status"])).stdout, /auto mode: stopped/);
+  });
+
+  test(`auto ${author}: a brainstorm continues and completes through managed rounds`, { timeout: 15_000 }, async (t) => {
+    const f = fixture(t, { author, scenario: "brainstorm" });
+    assert.equal((await f.completed).code, 0, f.output());
+    assert.match(f.read("first.out"), /brainstorm review from \w+ [^\n]* verdict continue[\s\S]*next: reply with your answers/);
+    assert.match(f.read("second.out"), /verdict complete[\s\S]*brainstorm completed and closed/);
+    const calls = JSON.parse(f.read("calls.json"));
+    assert.equal(calls.length, 2);
+    for (const { args } of calls) {
+      assert.match(args.at(-1), /This thread is a brainstorm[^]*--verdict continue\|complete; /);
+      assert.doesNotMatch(args.at(-1), /approve\|changes/);
+    }
+    assert.match(JSON.parse(f.read("author.args.json")).join(" "), /use pair send request --brainstorm/);
+    assert.match((await f.command(["history"])).stdout, /completed  4 messages/);
   });
 
   test(`auto ${author}: reviewer overrides persist through resume without changing author arguments`, { timeout: 15_000 }, async (t) => {
