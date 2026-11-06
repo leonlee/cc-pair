@@ -5,6 +5,11 @@ the other reviews it, and they exchange messages through files in a shared direc
 symmetric. In auto mode, `pair start` opens the author and runs the other agent as the reviewer for
 each round. In manual mode, you run both agents yourself.
 
+A thread can review code, review a spec or plan in any format, or brainstorm a design before there
+is one; you ask the author in your own words ([Workflows](#5-workflows)). In auto mode,
+`pair reviewer` switches the reviewer's model or effort without a restart
+([Changing the reviewer](#35-changing-the-reviewer)).
+
 A review thread, as it looks in manual mode (in auto mode, pair starts the reviewer for each round):
 
 ```
@@ -29,28 +34,12 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as described in RFC 2119.
   worktree has its own channel, derived from its root.
 - **Lane**: one direction within a channel, `claude-to-codex/` or `codex-to-claude/`, named by
   the author.
-- **Thread**: one review (or [brainstorm](#brainstorms)), stored as numbered messages: `request`,
-  then alternating `review` and `response`. A review closes when the reviewer approves. If findings remain open after
-  `PAIR_MAX_ROUNDS` rounds (default 3), it is **escalated** and both agents stop and ask the user.
+- **Thread**: one exchange in a lane, stored as numbered messages: `request`, then alternating
+  `review` and `response`. A review closes when the reviewer approves; if findings remain open after
+  `PAIR_MAX_ROUNDS` rounds (default 3), it is **escalated** and both agents stop and ask the user. A
+  [brainstorm](#52-brainstorms) closes as **completed**.
 - **Auto session**: one `pair start` run: the interactive author, the reviewer it starts for each
   round, and the processes that supervise them.
-
-A thread can review a spec, plan or design doc as well as code, in any format: a Markdown plan, an
-OpenSpec change, an ADR. The request names the document's paths and commit, and the reviewer checks
-it for ambiguity, missing cases, untestable acceptance criteria and scope. A later request that
-implements it can cite that thread in a `## Spec` section, and the reviewer then reports where the
-code departs from the spec. `pair history` only sees the current worktree's threads, so review the
-spec in the worktree that implements it. This is part of the agents' instructions, not the
-protocol, so pair treats these threads like any other.
-
-<a id="brainstorms"></a>
-A **brainstorm** is a thread for ideas before there's a design: the author asks with
-`pair send request --brainstorm`, the reviewer answers with options, trade-offs and questions and a
-verdict of `continue` or `complete`, and the author replies as in a review. The reviewer gets
-`PAIR_MAX_ROUNDS` turns, fixed when the brainstorm opens, and the last one must complete it with
-the options, a recommendation and the open decisions. A brainstorm never escalates, and it ends as
-**completed**. Both agents need pair 0.8.0 or later: an older pair rejects a brainstorm as a
-corrupt message.
 
 <a id="2-installation"></a>
 <a id="3-setup"></a>
@@ -123,7 +112,7 @@ started. `-y` starts without waiting.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--worktree NAME` | current worktree | Run in the worktree `../<repo>-NAME` ([Worktrees](#5-worktrees)) |
+| `--worktree NAME` | current worktree | Run in the worktree `../<repo>-NAME` ([Worktrees](#6-worktrees)) |
 | `--resume` | new conversation | Resume the author conversation pair last recorded for the session's worktree ([Author conversations](#33-author-conversations)) |
 | `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias, passed as given (Codex IDs are case-sensitive) |
@@ -142,16 +131,9 @@ pair start --as claude --worktree feature/login --resume
 
 Reviewer overrides apply to every round, including resumed ones; pair edits no CLI configuration.
 `pair status` and `pair ps` show them, with `CLI default` for omitted ones. A model or effort the
-reviewer rejects fails the round and keeps the request ([Control and recovery](#34-control-and-recovery)).
-
-To change them while the session runs, use `pair reviewer` in your own terminal; the author and
-its reviewer can't. A thread keeps the settings of its first round, so a change applies to new
-threads. `default` returns a setting to the CLI's own.
-
-```sh
-pair reviewer --reviewer-model gpt-6.1-sol --reviewer-effort high
-pair reviewer --reviewer-effort default
-```
+reviewer rejects fails the round and keeps the request
+([Control and recovery](#34-control-and-recovery)). `pair reviewer` changes them while the session
+runs ([Changing the reviewer](#35-changing-the-reviewer)).
 
 <a id="53-forwarded-arguments"></a>
 ### 3.2. Forwarded arguments
@@ -170,7 +152,7 @@ The lists are allowlists because unlisted options can turn the author into a pri
 session (`-p`, `--bg`), select a Codex subcommand, move the author away from its channel (`--cd`,
 `--worktree`; use pair's `--worktree` instead), or replace settings pair passes. The reviewer list
 excludes everything that changes its tools, permissions or sandbox
-([Security considerations](#9-security-considerations)). Codex reviewer options must also work with
+([Security considerations](#10-security-considerations)). Codex reviewer options must also work with
 `exec resume`.
 
 ### 3.3. Author conversations
@@ -217,17 +199,16 @@ From another terminal in the session's worktree:
 ```sh
 pair status    # lanes, auto session state, author conversation, last failure, log location
 pair ps -v     # pair processes by worktree, with full commands
-pair reviewer  # change the reviewer's model or effort (pair help reviewer)
+pair reviewer  # change the reviewer's model or effort (Changing the reviewer)
 pair stop      # stop the author, its reviewers and their tools
 ```
 
 - At most one launcher owns a worktree. A registered manual Codex session blocks `pair start`
   until `pair unregister`.
 - A reviewer that fails to start, ends without a verdict or times out keeps the request, and the
-  error includes the reviewer's own message. The author retries the round with `pair wait --as <author>`, with the
-  same reviewer settings. To retry with others, for example after a mistyped model, first run
-  `pair reviewer --thread current --reviewer-model MODEL`. It changes only that failed thread, whose
-  next round starts a new reviewer conversation that reads the thread so far.
+  error includes the reviewer's own message. The author retries the round with
+  `pair wait --as <author>`, with the same reviewer settings; to change them first, see
+  [Changing the reviewer](#35-changing-the-reviewer).
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,
@@ -237,6 +218,24 @@ pair stop      # stop the author, its reviewers and their tools
 
 Process supervision is specified in DESIGN.md.
 
+### 3.5. Changing the reviewer
+
+`pair reviewer` changes a running session's reviewer settings without a restart. Run it in your own
+terminal, in the session's worktree: the author and its reviewer can't, so neither picks the model
+that judges its work. `pair status` shows the current settings.
+
+```sh
+pair reviewer --reviewer-model gpt-6.1-sol --reviewer-effort high   # threads opened from now on
+pair reviewer --reviewer-effort default                             # back to the CLI's default
+pair reviewer --thread current --reviewer-model gpt-6.1-sol         # the thread whose round failed
+```
+
+A thread keeps the settings of its first round for its follow-up rounds and retries, so a plain
+change applies to new threads and to the restart command that `pair stop` prints.
+`--thread current` (or the thread's ID) changes only a pending thread whose last round failed, for
+example after a mistyped model. Its next round starts a new reviewer conversation that reads the
+thread so far. Then tell the author to retry.
+
 ## 4. Manual mode
 
 Start Claude Code and Codex in separate terminals in the same worktree, after `pair init`.
@@ -245,8 +244,9 @@ Start Claude Code and Codex in separate terminals in the same worktree, after `p
    command; Codex registers and ends its turn until woken ([Waking Codex](#41-waking-codex)).
 2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
 3. The author verifies each finding, then fixes it or rejects it with a reason, and replies.
-4. The thread ends on approval or escalation. To brainstorm first, say **"brainstorm this with
-   codex"**; that thread ends when the reviewer completes it.
+4. The thread ends on approval or escalation.
+
+Spec reviews and brainstorms work the same way ([Workflows](#5-workflows)).
 
 <a id="31-waking-codex-manual-mode"></a>
 ### 4.1. Waking Codex
@@ -280,9 +280,69 @@ it is pending, the server runs `codex queue` with a fixed note that never contai
   `$XDG_STATE_HOME` if absolute), rotated at 256 KB. `pair status` shows the registration and the
   last listener event.
 
+## 5. Workflows
+
+Ask the author in your own words; it runs the pair commands. In Claude Code, `/pair <request>`
+loads pair's instructions explicitly; Codex always has them in `AGENTS.md`. The examples name codex
+as the reviewer; with a Codex author, say claude. Every workflow works in both modes.
+
+| Ask the author | The reviewer | The thread ends |
+|---|---|---|
+| "ask codex for a review" | reports findings with severity: `approve` or `changes` | approved, or escalated after `PAIR_MAX_ROUNDS` rounds |
+| "ask codex to review the plan in docs/plan.md" | checks the document: `approve` or `changes` | the same |
+| "brainstorm with codex how to …" | adds options and questions: `continue` or `complete` | completed, at the latest on the last turn |
+
+For a larger change, chain them: brainstorm the approach, write a plan and have it reviewed, then
+implement it and cite the spec review in the code review.
+
+### 5.1. Spec review
+
+A spec, plan or design doc is reviewed like code, in any format: a Markdown plan, an OpenSpec
+change, an ADR. The request names the document's paths and the commit they're at, or says they're
+uncommitted, and includes the result of the format's own validator if it has one, such as
+`openspec validate`. The reviewer checks the document, not code: ambiguous or contradictory requirements, missing edge
+cases and error handling, acceptance criteria that can't be tested, scope, and plans the current
+code can't support. Approval covers that version of the document, not an implementation.
+
+When the author implements a reviewed spec, its code-review request cites it:
+
+```
+## Spec
+Thread 2026-11-06T05-19-31-945Z-da0bac (pair history da0bac).
+docs/plan.md, approved at abc1234; unchanged since.
+```
+
+The reviewer reads that thread with `pair history` and reports where the code departs from the
+spec, or says it can't find it. `pair history` only sees the current worktree's threads, so review
+the spec in the worktree that implements it. Pair parses neither section; this is part of the
+agents' instructions.
+
+### 5.2. Brainstorms
+
+A brainstorm is for ideas before there's a design. The author opens it with
+`pair send request --brainstorm`, giving the problem, the constraints and what's decided, and may
+leave its own proposal out of the first message to get independent ideas. The reviewer answers with
+options, trade-offs and questions and a verdict of `continue` or `complete`, and the author replies
+with `pair send response`, as in a review:
+
+```
+== pair: brainstorm review from codex · claude-to-codex · round 1 · verdict continue ==
+Option A: an in-memory LRU … Option B: HTTP ETags … How stale may a read be?
+== next: reply with your answers, objections or your own proposal: pair send response --as claude <file|-> ==
+```
+
+The reviewer gets `PAIR_MAX_ROUNDS` turns (default 3), fixed when the brainstorm opens. On the last
+one `continue` is refused, and the reviewer completes it with the options considered, a
+recommendation and the open decisions. To stop earlier, tell the author you have enough; it asks
+the reviewer to complete. A brainstorm never escalates, and `pair history` lists it as `completed`.
+
+Both agents MUST run pair 0.8.0 or later: an older pair rejects a brainstorm as a corrupt message
+instead of reviewing it as code.
+
+<a id="5-worktrees"></a>
 <a id="52-worktrees"></a>
 <a id="6-worktrees-in-manual-mode"></a>
-## 5. Worktrees
+## 6. Worktrees
 
 Each worktree has its own channel, so pairs in different worktrees run in parallel without seeing
 each other's messages. The author and reviewer MUST run in the same worktree, since the reviewer
@@ -317,15 +377,17 @@ pair init     # unless AGENTS.md and .claude/skills/pair/ are committed on this 
 If messages do not arrive, compare the `channel:` line of `pair status` in each agent. Removing a
 worktree leaves its channel; delete the directory that `pair status` reports.
 
-<a id="7-commands"></a>
-## 6. Commands
+<a id="6-commands"></a>
+## 7. Commands
 
-Agents run `send` and `wait`; users mostly run `start`, `stop`, `status`, `history` and `upgrade`.
+Agents run `send` and `wait`; users mostly run `start`, `stop`, `status`, `reviewer`, `history` and
+`upgrade`.
 `pair help <command>` describes each command and its options.
 
 ```
 pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]     # auto mode
 pair stop
+pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
 pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict VERDICT] <file|->
                              # approve|changes, or continue|complete in a brainstorm
 pair wait --as <claude|codex> [--timeout seconds]   # default 540; prints "no message … yet"
@@ -346,8 +408,8 @@ files on disk, the Codex registration and the auto session:
 ```
 channel: /Users/you/.pair/your-repo-12345678
 worktree: /Users/you/your-repo
-version: claude-codex-pair 0.7.2
-claude-to-codex: awaiting-review (round 1, codex's turn)
+version: claude-codex-pair 0.8.0
+claude-to-codex: brainstorm awaiting-review (round 1, codex's turn)
 codex-to-claude: idle
 instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
@@ -355,8 +417,8 @@ instructions on disk (does not verify what running agents loaded):
 codex notifications: no session registered
 auto mode: claude author, codex reviewer · reviewing · owner 41820
   author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
-  reviewer model override: CLI default
-  reviewer effort override: CLI default
+  reviewer for new threads: model gpt-6.1-sol · effort high
+  reviewer for thread 2026-11-06T05-19-31-945Z-da0bac: model CLI default · effort CLI default
   reviewer pid: 41907
   log: /Users/you/.local/state/pair/your-repo-12345678/auto.log
 ```
@@ -367,11 +429,11 @@ and `init` also report a newer npm release, checked at most daily.
 
 A channel access failure (`EACCES`, `EPERM`) names the path and prints the sandbox snippets for it.
 
-<a id="8-maintenance"></a>
-## 7. Maintenance
+<a id="7-maintenance"></a>
+## 8. Maintenance
 
-<a id="81-reset"></a>
-### 7.1. Reset
+<a id="71-reset"></a>
+### 8.1. Reset
 
 `pair reset` clears stale pending requests by moving whole lanes to
 `<channel>/resets/<reset-id>/` and printing the path.
@@ -388,8 +450,8 @@ Manual sessions SHOULD be stopped first. Reset refuses while an auto session own
 registrations are unchanged. `history` and `clean` ignore backups; delete them by hand. A partial
 failure names the backup already written.
 
-<a id="82-upgrade"></a>
-### 7.2. Upgrade
+<a id="72-upgrade"></a>
+### 8.2. Upgrade
 
 Run `pair upgrade` in your own terminal; agent sandboxes block the network and global installs. It
 installs the latest release and refreshes this worktree's instructions. Other worktrees refresh
@@ -398,8 +460,8 @@ overwritten, except files a newer pair wrote. Restart Claude Code and Codex afte
 an auto session in the same conversation, run `pair stop`, then `pair start --resume`
 ([Author conversations](#33-author-conversations)).
 
-<a id="83-uninstall"></a>
-### 7.3. Uninstall
+<a id="73-uninstall"></a>
+### 8.3. Uninstall
 
 Run `pair uninit` in each worktree. It removes the skill (unless edited), the pair section of
 `AGENTS.md` (or the file, if nothing else remains) and the Codex registration, and prints the
@@ -412,20 +474,20 @@ npm uninstall -g claude-codex-pair
 
 and remove `~/.pair` from the sandbox settings.
 
-<a id="9-environment"></a>
-## 8. Environment
+<a id="8-environment"></a>
+## 9. Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PAIR_HOME` | `~/.pair` | Channel root. Relative paths resolve against the worktree root |
 | `PAIR_AGENT` | none | Default for `--as` |
-| `PAIR_MAX_ROUNDS` | `3` | Rounds before escalation; a new brainstorm's turns |
+| `PAIR_MAX_ROUNDS` | `3` | Review rounds before escalation; a brainstorm's turns, fixed when it opens |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
 | `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
 | `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |
 
-<a id="10-security-considerations"></a>
-## 9. Security considerations
+<a id="9-security-considerations"></a>
+## 10. Security considerations
 
 - **Managed reviewers.** Codex runs with its `workspace-write` sandbox plus channel access; source
   edits are forbidden by its instructions, not by the OS. Claude runs with `dontAsk`, so beyond your

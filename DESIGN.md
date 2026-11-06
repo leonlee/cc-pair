@@ -294,6 +294,7 @@ the pending lanes and creates neither backups nor an ownership socket, even whil
 ## Known limits
 
 - A lane still in the old flat layout (before 1c588ed) isn't migrated. Commands fail with a recovery hint; `pair reset` can back up and clear it without parsing the old files.
+- An author can't close a brainstorm; it asks the reviewer to complete, which costs a turn. A `## Spec` section's commit is the author's claim, which a managed Claude reviewer can't check, since it has no git access.
 - Polling, not fs events. A 1s delay is fine for chat between agents.
 - Notifications were verified end to end with Codex CLI 0.162.1 and 0.163.0 on the shared app-server daemon, and with the ChatGPT desktop app, which runs its own app-server and starts its own `pair mcp` (with `PAIR_CODEX` pointing at the separately installed CLI). IDE sessions, `--no-daemon` and `--remote` are untested.
 - Approval policy `never` makes `pair_listen` fail; Codex reports it and stops without polling.
