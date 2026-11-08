@@ -4,6 +4,7 @@ import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { isatty } from "node:tty";
 import { promisify } from "node:util";
 
 type Agent = "claude" | "codex";
@@ -150,10 +151,21 @@ function terminalState(): string | undefined {
   catch { return undefined; }
 }
 
+const TERMINAL_RESET = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1049l\x1b[0m\x1b[?25h";
+
 function restoreTerminal(saved: string | undefined): void {
   if (!saved) return;
-  try { execFileSync("stty", [saved], { stdio: ["inherit", "ignore", "ignore"], timeout: 1000 }); } catch { /* terminal may already be closed */ }
-  if (process.stdout.isTTY) process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1004l\x1b[?1049l\x1b[0m\x1b[?25h");
+  // In a child with a timeout: on a terminal that has gone away (its window closed) a write blocks
+  // forever, and in this process it would keep the owner or the guardian alive with it.
+  let alive = false;
+  try {
+    execFileSync("/bin/sh", ["-c", 'stty "$1" 2>/dev/null && printf "%s" "$2"', "sh", saved, isatty(1) ? TERMINAL_RESET : ""], { stdio: ["inherit", "inherit", "ignore"], timeout: 1000 });
+    alive = true;
+  } catch { /* the terminal may already be gone */ }
+  // stty -g doesn't round-trip every setting, but Node restores the exact ones it started with when a
+  // process that opened its terminal stdout exits. Open it only on a live terminal: on a dead one that
+  // too can hold the process.
+  if (alive && isatty(1)) void process.stdout;
 }
 
 function readState(stateDir: string): RecordState | undefined {

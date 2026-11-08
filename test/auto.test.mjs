@@ -999,6 +999,59 @@ finally:
   });
 }
 
+// A closed terminal window: a write to it blocks forever, which once kept a guardian alive for days.
+for (const signal of ["SIGKILL", "SIGTERM"]) {
+  test(`owner and guardian exit when their terminal is gone and the launcher gets ${signal}`, {
+    timeout: 20_000,
+    skip: spawnSync("python3", ["--version"]).status !== 0 && "Python is needed for the PTY harness",
+  }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "pair-gone-tty-test-"));
+    const socketDir = mkdtempSync("/tmp/pair-at-");
+    const fake = join(root, "fake-agent");
+    writeFileSync(fake, `#!/usr/bin/env node\nprocess.stdin.setRawMode(true);\nconsole.log('TTY_READY');\nsetInterval(() => {}, 1000);\n`);
+    chmodSync(fake, 0o700);
+    const env = {
+      ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AUTO_ROLE: "", PAIR_AUTO_RUN: "", TEST_ROOT: root,
+      PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AUTO_SOCKET_DIR: socketDir, PAIR_NO_UPDATE_CHECK: "1",
+    };
+    try {
+      const python = `
+import glob, json, os, pty, select, signal, subprocess, sys, time
+master, slave = pty.openpty()
+child = subprocess.Popen([sys.argv[1], sys.argv[2], 'start', '--as', 'claude', '--claude', sys.argv[3], '--codex', sys.argv[3], '--grace', '0.15', '-y'], cwd=os.environ['TEST_ROOT'], stdin=slave, stdout=slave, stderr=slave)
+def alive(pid):
+    try: os.kill(pid, 0); return True
+    except ProcessLookupError: return False
+try:
+    output = b''
+    deadline = time.monotonic() + 8
+    while b'TTY_READY' not in output and time.monotonic() < deadline:
+        if select.select([master], [], [], 0.1)[0]: output += os.read(master, 65536)
+    assert b'TTY_READY' in output, output
+    guardian = json.load(open(glob.glob(os.environ['XDG_STATE_HOME'] + '/pair/*/auto.json')[0]))['guardianPid']
+    os.close(master)  # the terminal window closes
+    master = None
+    os.kill(child.pid, getattr(signal, sys.argv[4]))
+    deadline = time.monotonic() + 8
+    while (child.poll() is None or alive(guardian)) and time.monotonic() < deadline: time.sleep(0.1)
+    print('owner', 'exited' if child.poll() is not None else 'ALIVE', 'guardian', 'ALIVE' if alive(guardian) else 'exited')
+    if alive(guardian): os.kill(guardian, signal.SIGKILL)
+finally:
+    if child.poll() is None:
+        child.kill()
+        child.wait()
+    if master is not None: os.close(master)
+    os.close(slave)
+`;
+      const { stdout } = await exec("python3", ["-c", python, process.execPath, CLI, fake, signal], { env, timeout: 18_000 });
+      assert.match(stdout, /owner exited guardian exited/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test("in a terminal, pair start waits for Enter, and a cancel creates nothing", {
   timeout: 40_000,
   skip: spawnSync("python3", ["--version"]).status !== 0 && "Python is needed for the PTY harness",
