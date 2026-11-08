@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.1 (2026-11-08)
+
+An auto session no longer hangs when its terminal goes away. On macOS, a write to a terminal whose
+window has closed blocks forever, and the session wrote to its terminal while restoring it on exit:
+the owner in its own cleanup, and the guardian after the owner died. Either could then keep running
+indefinitely; one guardian left by a test ran for nine days. The restore now runs in a child process
+with a one-second timeout, and the exact terminal settings are still restored while the terminal is
+alive.
+
+The README opens with a feature list, each item linking to its section.
+
 ## 0.9.0 (2026-11-06)
 
 `pair start --serve-worktrees` lets an auto author delegate separate PRs to subagents that each work
