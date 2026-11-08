@@ -5,11 +5,31 @@ the other reviews it, and they exchange messages through files in a shared direc
 symmetric. In auto mode, `pair start` opens the author and runs the other agent as the reviewer for
 each round. In manual mode, you run both agents yourself.
 
-A thread can review code, review a spec or plan in any format, or brainstorm a design before there
-is one; you ask the author in your own words ([Workflows](#5-workflows)). In auto mode,
-`pair reviewer` switches the reviewer's model or effort without a restart
-([Changing the reviewer](#35-changing-the-reviewer)), and `--serve-worktrees` lets one session
-review subagents' separate PRs, several at once ([Parallel work](#53-parallel-work)).
+Features:
+
+- **Two modes.** Auto mode runs the author and starts the reviewer for each round, returning the
+  review inline ([Auto mode](#3-auto-mode)). In manual mode you run both agents, and an MCP server
+  wakes Codex without polling ([Manual mode](#4-manual-mode)).
+- **Code review.** Numbered findings with severity and an `approve` or `changes` verdict. Findings
+  still open at the round cap escalate to you ([Workflows](#5-workflows)).
+- **Spec review.** Plans and design docs in any format, such as a Markdown plan or an OpenSpec
+  change; a later code review can cite the approved spec ([Spec review](#51-spec-review)).
+- **Brainstorms.** Ideas before there's a design, with a fixed turn budget and a closing summary of
+  options and open decisions ([Brainstorms](#52-brainstorms)).
+- **Parallel work.** Subagents in their own worktrees, each with its own review loop, up to N
+  reviews at once ([Parallel work](#53-parallel-work)).
+- **Live reviewer settings.** `pair reviewer` changes the reviewer's model or effort without a
+  restart ([Changing the reviewer](#35-changing-the-reviewer)).
+- **Worktrees.** One channel per worktree, so pairs run side by side; `pair start --worktree`
+  creates or reuses one ([Worktrees](#6-worktrees)).
+- **Recovery.** Resumable author conversations, failed rounds that keep the request on disk for a
+  retry, history, and reset ([Author conversations](#33-author-conversations),
+  [Maintenance](#8-maintenance)).
+- **Guard rails.** Reviewers are read-only by instruction, nothing loosens their permissions, and
+  the author can't pick its reviewer's model
+  ([Security considerations](#10-security-considerations)).
+- **Small.** One Node CLI with no runtime dependencies; the agents learn it from a Claude skill and
+  an `AGENTS.md` section, and you ask in your own words.
 
 A review thread, as it looks in manual mode (in auto mode, pair starts the reviewer for each round):
 
@@ -306,9 +326,9 @@ implement it and cite the spec review in the code review.
 A spec, plan or design doc is reviewed like code, in any format: a Markdown plan, an OpenSpec
 change, an ADR. The request names the document's paths and the commit they're at, or says they're
 uncommitted, and includes the result of the format's own validator if it has one, such as
-`openspec validate`. The reviewer checks the document, not code: ambiguous or contradictory requirements, missing edge
-cases and error handling, acceptance criteria that can't be tested, scope, and plans the current
-code can't support. Approval covers that version of the document, not an implementation.
+`openspec validate`. The reviewer checks the document, not code: ambiguous or contradictory
+requirements, missing edge cases and error handling, acceptance criteria that can't be tested,
+scope, and plans the current code can't support. Approval covers that version of the document, not an implementation.
 
 When the author implements a reviewed spec, its code-review request cites it:
 
