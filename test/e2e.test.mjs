@@ -1321,6 +1321,20 @@ test("a managed author's waits and sends stay in its session's lane", () => {
   assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /review from carol · claude-to-carol[\s\S]*approved and closed/, "manual waits see every lane");
 });
 
+test("a managed author's PAIR_PARTNER is checked like --to: no path out of the channel, no self lane", () => {
+  const { root, env, run } = sandbox();
+  Object.assign(env, { PAIR_AUTO_ROLE: "author", PAIR_AGENT: "alice" });
+  for (const [partner, pattern] of [["bob/../../outside", /PAIR_PARTNER must be a participant name/], ["alice", /PAIR_PARTNER names alice itself/]]) {
+    env.PAIR_PARTNER = partner;
+    for (const args of [["send", "request", "--as", "alice", "-"], ["wait", "--as", "alice", "--timeout", "1"]]) {
+      const result = run(args, "body");
+      assert.equal(result.code, 1, `${partner}: ${args[0]}`);
+      assert.match(result.out, pattern, `${partner}: ${args[0]}`);
+    }
+  }
+  assert.ok(!existsSync(join(root, "home", "outside")), "nothing written outside the channel");
+});
+
 test("two Codex sessions in one channel register as different participants and are each woken with their own name", async () => {
   const { root, env, ok } = sandbox();
   const { codex, calls } = fakeCodex(root);

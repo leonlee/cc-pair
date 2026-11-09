@@ -1989,11 +1989,11 @@ const USAGE = `usage:
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
-  pair reset [--as <claude|codex>] [--dry-run]        (back up pending lanes; --as selects their author, default: both)
+  pair reset [--as NAME] [--dry-run]                  (back up pending lanes; --as selects their author, default: all)
   pair init
   pair upgrade                                        (install the latest pair from npm, then refresh this worktree)
   pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
-  pair register | unregister                          (in Codex's shell: let pair_listen notify this session)
+  pair register | unregister [--as NAME]              (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
   pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)
   pair help [command]                                 (this list, or one command's options; same as pair <command> --help)`;
@@ -2002,7 +2002,8 @@ const HELP = `${USAGE}
 
 environment:
   PAIR_HOME              root directory for channels (default ~/.pair)
-  PAIR_AGENT             default for --as
+  PAIR_AGENT             your participant name: the default for --as
+  PAIR_PARTNER           whom a new request goes to without --to (default: claude's or codex's partner)
   PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
   PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
@@ -2141,14 +2142,14 @@ with this shell's PAIR_HOME.`,
 
 Delete all but the N newest finished threads. Pair also does this whenever a thread finishes,
 keeping PAIR_KEEP threads (default 100).`,
-  reset: `usage: pair reset [--as <claude|codex>] [--dry-run]
+  reset: `usage: pair reset [--as NAME] [--dry-run]
 
 Clear stale pending requests by moving whole lanes into a timestamped backup under the channel's
 resets/ directory, and print its path. Source files and finished history are left alone. Stop
 manual agent sessions first; it refuses while auto mode owns the worktree (run pair stop).
 
 options:
-  --as <claude|codex>          reset only the lane of requests this agent authored (default: both)
+  --as NAME                    reset only the lanes this participant authored (default: every lane)
   --dry-run                    show the lanes it would reset without changing anything`,
   init: `usage: pair init
 
@@ -2240,7 +2241,10 @@ async function main(argv: string[]): Promise<number> {
   const sessionLane = (me: Agent): Thread | undefined => {
     if (process.env.PAIR_AUTO_ROLE !== "author") return undefined;
     const partner = process.env.PAIR_PARTNER || defaultPartner(me);
-    return partner === undefined ? undefined : threadFor(channel, me, partner);
+    if (partner === undefined) return undefined;
+    // From the environment, so checked like --to: a lane name never leaves the channel or pairs a participant with itself.
+    if (named(partner, "PAIR_PARTNER") === me) throw new PairError(`PAIR_PARTNER names ${me} itself; a participant can't pair with itself`);
+    return threadFor(channel, me, partner);
   };
   // Whom a send goes to. A new request may use the configured partner; a reply goes only where --to says,
   // or for the default pair to the default partner, so it can't land in another lane.
