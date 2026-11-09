@@ -194,7 +194,7 @@ test("wait blocks until the partner writes, and messages are stored with frontma
 
 test("rejects bad input", () => {
   const { run } = sandbox();
-  assert.match(run(["send", "request", "-"], "x").out, /--as \(or PAIR_AGENT\) must be one of/);
+  assert.match(run(["send", "request", "-"], "x").out, /--as \(or PAIR_AGENT\) must be a participant name/);
   assert.match(run(["send", "review", "--as", "codex", "-"], "x").out, /review needs --verdict/);
   assert.match(run(["send", "request", "--as", "claude", "-"], "  \n").out, /empty/);
   assert.match(run(["send", "nope", "--as", "claude", "-"], "x").out, /message type must be one of/);
@@ -230,7 +230,7 @@ test("init from a subdirectory installs at the repo root", () => {
   const result = spawnSync("node", [CLI, "init"], { cwd: join(root, "sub"), env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(root, "AGENTS.md")));
-  assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /for `codex` only\. If you are not `codex`, ignore this section\./);
+  assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /for Codex sessions only\. If you are not Codex, ignore this section\./);
   assert.ok(existsSync(join(root, ".claude", "skills", "pair", "SKILL.md")));
   assert.ok(!existsSync(join(root, "sub", "AGENTS.md")));
   const status = spawnSync("node", [CLI, "status"], { cwd: join(root, "sub"), env, encoding: "utf8" });
@@ -405,7 +405,7 @@ test("EPERM channel errors are diagnosed without treating installed prompt error
   `);
   const denied = spawnSync("node", ["--import", hook, CLI, "wait", "--as", "codex", "--timeout", "1"], { cwd: root, env, encoding: "utf8" });
   assert.equal(denied.status, 1);
-  assert.ok(denied.stderr.startsWith(`pair: cannot access channel path ${join(channel, "codex-to-claude")} (EPERM)`));
+  assert.ok(denied.stderr.startsWith(`pair: cannot access channel path ${channel} (EPERM)`), denied.stderr); // wait lists the lanes first
   assert.match(denied.stderr, /sandbox_workspace_write/);
   const assetError = spawnSync("node", ["--import", hook, CLI, "status"], { cwd: root, env: { ...env, DENY_PROMPT: "1" }, encoding: "utf8" });
   assert.equal(assetError.status, 1);
@@ -1242,4 +1242,165 @@ test("history finds other worktrees' channels with a relative PAIR_HOME, and ski
   assert.match(skipped.err, new RegExp(`pair: warning: skipped the finished threads of ${root}: `));
   assert.match(skipped.out, /the second worktree's own/);
   assert.doesNotMatch(skipped.out, /under a relative home/);
+});
+
+// Named participants: any two names pair, whatever CLI runs them; replies follow the delivered lane.
+test("named participants pair in their own lane, and every next line names the counterpart", () => {
+  const { ok, run } = sandbox();
+  ok(["send", "request", "--as", "alice", "--to", "bob", "-"], "## Summary\nalice's change");
+  const delivered = ok(["wait", "--as", "bob", "--timeout", "1"]);
+  assert.match(delivered, /^== pair: request from alice · alice-to-bob · round 1 ==/);
+  assert.match(delivered, /next: review it, then: pair send review --verdict approve\|changes --as bob --to alice </);
+  ok(["send", "review", "--as", "bob", "--to", "alice", "--verdict", "changes", "-"], "### F1 [medium] x");
+  assert.match(ok(["wait", "--as", "alice", "--timeout", "1"]), /review from bob · alice-to-bob[\s\S]*next: verify[^\n]*--as alice --to bob </);
+  assert.match(run(["send", "response", "--as", "alice", "-"], "x").out, /pass --to with the participant whose message you're answering/);
+  ok(["send", "response", "--as", "alice", "--to", "bob", "-"], "### F1 fixed");
+  ok(["wait", "--as", "bob", "--timeout", "1"]);
+  ok(["send", "review", "--as", "bob", "--to", "alice", "--verdict", "approve", "-"], "LGTM");
+  assert.match(ok(["wait", "--as", "alice", "--timeout", "1"]), /approved and closed/);
+  assert.match(ok(["history"]), /alice-to-bob\s+approved\s+4 messages/);
+  assert.match(ok(["status"]), /claude-to-codex: idle\ncodex-to-claude: idle\nalice-to-bob: idle/);
+});
+
+test("names, partners and reply lanes resolve as specified", () => {
+  const { ok, run, env } = sandbox();
+  assert.match(run(["send", "request", "--as", "Alice", "--to", "bob", "-"], "x").out, /--as \(or PAIR_AGENT\) must be a participant name/);
+  assert.match(run(["send", "request", "--as", "alice-2", "--to", "bob", "-"], "x").out, /must be a participant name/);
+  assert.match(run(["send", "request", "--as", "alice", "-"], "x").out, /pass --to NAME, or set PAIR_PARTNER/);
+  assert.match(run(["send", "request", "--as", "alice", "--to", "alice", "-"], "x").out, /can't pair with itself/);
+  assert.match(run(["wait", "--as", "alice", "--to", "bob"]).out, /--to is only supported by pair send/);
+
+  // bob's configured partner is alice, but carol's request arrives: the reply follows carol's lane.
+  ok(["send", "request", "--as", "carol", "--to", "bob", "-"], "carol's change");
+  env.PAIR_PARTNER = "alice";
+  assert.match(ok(["wait", "--as", "bob", "--timeout", "1"]), /request from carol · carol-to-bob[\s\S]*--as bob --to carol </);
+  assert.match(run(["send", "review", "--as", "bob", "--verdict", "approve", "-"], "x").out, /pass --to with the participant/);
+  ok(["send", "review", "--as", "bob", "--to", "carol", "--verdict", "approve", "-"], "LGTM");
+  assert.match(ok(["wait", "--as", "carol", "--timeout", "1"]), /review from bob · carol-to-bob[\s\S]*approved and closed/);
+  // A new request does use the configured partner.
+  ok(["send", "request", "--as", "bob", "-"], "bob's own");
+  assert.match(ok(["wait", "--as", "alice", "--timeout", "1"]), /request from bob · bob-to-alice/);
+  delete env.PAIR_PARTNER;
+});
+
+test("an author with two open lanes answers each by --to, and wait takes author duties first, oldest first", () => {
+  const { ok } = sandbox();
+  ok(["send", "request", "--as", "alice", "--to", "bob", "-"], "for bob");
+  ok(["send", "request", "--as", "alice", "--to", "carol", "-"], "for carol");
+  ok(["send", "review", "--as", "bob", "--to", "alice", "--verdict", "changes", "-"], "bob's findings");
+  ok(["send", "review", "--as", "carol", "--to", "alice", "--verdict", "changes", "-"], "carol's findings");
+  ok(["send", "request", "--as", "dave", "--to", "alice", "-"], "dave asks alice for a review");
+  assert.match(ok(["wait", "--as", "alice", "--timeout", "1"]), /review from bob · alice-to-bob[\s\S]*bob's findings/, "author duties first, the oldest");
+  const sent = ok(["send", "response", "--as", "alice", "--to", "carol", "-"], "fixed for carol").replace("sent: ", "").trim();
+  assert.match(sent, /\/alice-to-carol\/[^/]+\/003-response\.md$/);
+  assert.match(ok(["wait", "--as", "alice", "--timeout", "1"]), /review from bob · alice-to-bob/, "bob's still waits");
+  ok(["send", "response", "--as", "alice", "--to", "bob", "-"], "fixed for bob");
+  assert.match(ok(["wait", "--as", "alice", "--timeout", "1"]), /request from dave · dave-to-alice/, "then reviewer duties");
+});
+
+test("a managed author's waits and sends stay in its session's lane", () => {
+  const { ok, run, env } = sandbox();
+  // An unrelated, older, unread approval in another lane.
+  ok(["send", "request", "--as", "claude", "--to", "carol", "-"], "for carol");
+  ok(["send", "review", "--as", "carol", "--to", "claude", "--verdict", "approve", "-"], "carol approves");
+  ok(["send", "request", "--as", "claude", "-"], "the session's own change");
+  ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "codex's findings");
+  Object.assign(env, { PAIR_AUTO_ROLE: "author", PAIR_AGENT: "claude", PAIR_PARTNER: "codex" });
+  try {
+    assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /review from codex · claude-to-codex · round 1 · verdict changes[\s\S]*codex's findings/);
+    assert.match(run(["send", "response", "--as", "claude", "--to", "carol", "-"], "x").out, /this auto session's messages go to codex, not carol/);
+  } finally {
+    for (const name of ["PAIR_AUTO_ROLE", "PAIR_AGENT", "PAIR_PARTNER"]) delete env[name];
+  }
+  assert.match(ok(["wait", "--as", "claude", "--timeout", "1"]), /review from carol · claude-to-carol[\s\S]*approved and closed/, "manual waits see every lane");
+});
+
+test("two Codex sessions in one channel register as different participants and are each woken with their own name", async () => {
+  const { root, env, ok } = sandbox();
+  const { codex, calls } = fakeCodex(root);
+  const [alice, bob] = ["01a13927-59e7-74b1-8f59-306c2811e2b1", "01a13927-59e7-74b1-8f59-306c2811e2b2"];
+  const as = (thread, args) => spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread }, encoding: "utf8" });
+  assert.equal(as(alice, ["register", "--as", "alice"]).status, 0);
+  assert.equal(as(bob, ["register", "--as", "bob"]).status, 0);
+  const twice = as(alice, ["register", "--as", "carol"]);
+  assert.equal(twice.status, 1);
+  assert.match(twice.stderr, /registered here as alice; run pair unregister --as alice first/);
+  const status = ok(["status"]);
+  assert.match(status, new RegExp(`codex notifications: session ${alice} as alice, registered`));
+  assert.match(status, new RegExp(`codex notifications: session ${bob} as bob, registered`));
+  const server = startMcp({ ...env, PAIR_CODEX: codex });
+  try {
+    assert.match((await server.listen(alice)).content[0].text, /a message for alice arrives/);
+    assert.match((await server.listen(bob)).content[0].text, /a message for bob arrives/);
+    ok(["send", "request", "--as", "alice", "--to", "bob", "-"], "for bob");
+    await until(() => calls().length === 1, "bob is woken");
+    assert.match(calls()[0], new RegExp(`^queue --thread ${bob} --message pair: a message is waiting for you\\. Run \`pair wait --as bob --timeout 5\``));
+    ok(["send", "review", "--as", "bob", "--to", "alice", "--verdict", "approve", "-"], "LGTM");
+    await until(() => calls().length === 2, "alice is woken");
+    assert.match(calls()[1], new RegExp(`^queue --thread ${alice} --message [^\\n]*pair wait --as alice --timeout 5`));
+  } finally {
+    await server.stop();
+  }
+  assert.match(as(alice, ["unregister", "--as", "alice"]).stdout, /unregistered codex session/);
+  const after = ok(["status"]);
+  assert.doesNotMatch(after, /as alice/);
+  assert.match(after, /as bob/);
+});
+
+test("a symlinked sessions directory is never used: uninit keeps what it points at, register and unregister refuse", () => {
+  const { root, env, ok } = sandbox();
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  const outside = join(root, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "settings.json"), '{"keep":true}');
+  mkdirSync(channel, { recursive: true });
+  symlinkSync(outside, join(channel, "sessions"));
+  const as = (args) => spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, CODEX_THREAD_ID: "01a13927-59e7-74b1-8f59-306c2811e2b3" }, encoding: "utf8" });
+  const registered = as(["register", "--as", "alice"]);
+  assert.equal(registered.status, 1);
+  assert.match(registered.stderr, /refusing to use .*sessions: it must be a real directory/);
+  assert.equal(as(["unregister", "--as", "settings"]).status, 1, "nothing is removed through it");
+  assert.match(ok(["status"]), /codex notifications: refusing to use .*sessions/);
+  assert.match(ok(["uninit"]), /kept: refusing to use .*sessions[^\n]*remove it by hand/);
+  assert.equal(readFileSync(join(outside, "settings.json"), "utf8"), '{"keep":true}');
+});
+
+test("a corrupt registration doesn't hide a valid one from pair_listen", async () => {
+  const { root, env, ok } = sandbox();
+  const { codex, calls } = fakeCodex(root);
+  const alice = "01a13927-59e7-74b1-8f59-306c2811e2b4";
+  assert.equal(spawnSync("node", [CLI, "register", "--as", "alice"], { cwd: root, env: { ...env, CODEX_THREAD_ID: alice }, encoding: "utf8" }).status, 0);
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  writeFileSync(join(channel, "sessions", "bob.json"), "{ not json");
+  const server = startMcp({ ...env, PAIR_CODEX: codex });
+  try {
+    const listening = await server.listen(alice);
+    assert.equal(listening.isError, undefined, listening.content[0].text);
+    ok(["send", "request", "--as", "carol", "--to", "alice", "-"], "for alice");
+    await until(() => calls().length === 1, "alice is woken");
+    assert.match(calls()[0], /pair wait --as alice --timeout 5/);
+  } finally {
+    await server.stop();
+  }
+  assert.match(ok(["status"]), /codex notifications: corrupt registration .*bob\.json/);
+});
+
+test("an unreadable unrelated channel doesn't stop a valid session from listening", async (t) => {
+  const { root, env, ok } = sandbox();
+  const { codex, calls } = fakeCodex(root);
+  const alice = "01a13927-59e7-74b1-8f59-306c2811e2b5";
+  assert.equal(spawnSync("node", [CLI, "register", "--as", "alice"], { cwd: root, env: { ...env, CODEX_THREAD_ID: alice }, encoding: "utf8" }).status, 0);
+  const sibling = join(env.PAIR_HOME, "other-repo-00000000");
+  mkdirSync(sibling, { recursive: true });
+  chmodSync(sibling, 0o000);
+  t.after(() => chmodSync(sibling, 0o755));
+  const server = startMcp({ ...env, PAIR_CODEX: codex });
+  try {
+    const listening = await server.listen(alice);
+    assert.equal(listening.isError, undefined, listening.content[0]?.text);
+    ok(["send", "request", "--as", "carol", "--to", "alice", "-"], "for alice");
+    await until(() => calls().length === 1, "alice is woken");
+  } finally {
+    await server.stop();
+  }
 });

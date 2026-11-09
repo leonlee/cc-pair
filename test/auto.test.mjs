@@ -1197,7 +1197,7 @@ test("--serve-worktrees: a subagent's loop runs through the root's owner, writes
   assert.equal(realpathSync(call.cwd), c1, "the reviewer runs in the subagent's worktree");
   assert.equal(call.args[call.args.indexOf("--add-dir") + 1], join(f.root, "home", channelName(c1)), "with that worktree's channel");
   assert.equal(call.env.owner, null, "a reviewer's commands act only on its own worktree");
-  assert.match(call.args.at(-1), /## Review for claude[\s\S]*Managed round: the pair CLI is/, "the rules come with the prompt");
+  assert.match(call.args.at(-1), /## Review for your partner[\s\S]*Managed round: the pair CLI is/, "the rules come with the prompt");
   assert.equal(readFileSync(join(c1, "AGENTS.md"), "utf8"), stale, "no refresh in a served worktree");
   assert.ok(!existsSync(join(c1, ".claude")), "no pair init there");
   assert.equal(JSON.parse(readFileSync(join(owner, "author.json"), "utf8")).session, recorded, "the root's resume record is its own");

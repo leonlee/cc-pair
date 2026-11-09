@@ -901,6 +901,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     // The author and its subagents reach this owner from any worktree; a reviewer acts only on its own.
     if (role === "author") env.PAIR_AUTO_OWNER = options.stateDir;
     else delete env.PAIR_AUTO_OWNER;
+    // Each side's counterpart in this session's lane.
+    env.PAIR_PARTNER = role === "author" ? reviewer : options.author;
     // A new CLI owns its own identity; never inherit the caller's session registration.
     delete env.CODEX_THREAD_ID;
     delete env.CLAUDECODE;

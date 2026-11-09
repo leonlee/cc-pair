@@ -10,8 +10,13 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, setReviewer, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 
-const AGENTS = ["claude", "codex"] as const;
-type Agent = (typeof AGENTS)[number];
+// The two CLIs pair runs, and the two default participants, named after them.
+const BACKENDS = ["claude", "codex"] as const;
+type Backend = (typeof BACKENDS)[number];
+/** A participant: any name; claude and codex are the defaults. No dashes, so `<a>-to-<b>` lanes parse. */
+type Agent = string;
+const NAME = /^[a-z][a-z0-9_]{0,31}$/;
+const LANE = /^([a-z][a-z0-9_]{0,31})-to-([a-z][a-z0-9_]{0,31})$/;
 const MESSAGE_TYPES = ["request", "review", "response"] as const;
 type MessageType = (typeof MESSAGE_TYPES)[number];
 const VERDICTS = ["approve", "changes", "continue", "complete"] as const;
@@ -39,7 +44,7 @@ const DEFAULT_WAIT_SECONDS = 540; // stays under Claude Code's 10-minute Bash ca
 const POLL_MS = 1000;
 const MESSAGE_FILE = /^(\d{3})-(request|review|response)\.md$/;
 // archive/<thread id>-<author>-to-<reviewer>-<outcome>; the id starts with a timestamp
-const ARCHIVED_THREAD = /^(.+)-(claude|codex)-to-(claude|codex)-(approved|escalated|completed)$/;
+const ARCHIVED_THREAD = /^(.+)-([a-z][a-z0-9_]{0,31})-to-([a-z][a-z0-9_]{0,31})-(approved|escalated|completed)$/;
 const PAIR_SECTION = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->\n?/;
 const PAIR_SECTIONS = /<!-- pair:start -->[\s\S]*?<!-- pair:end -->(?:\r?\n)?/g; // for removal, CRLF too
 // SKILL.md as released versions wrote it (0.1.0 and 0.1.1), so `uninit` can tell it from an edited one.
@@ -62,8 +67,10 @@ const STALL_MS = 10 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 30_000;
 const CLAIM_LEASE_MS = 2 * QUEUE_TIMEOUT_MS; // longer than any live `codex queue` call can hold a claim
 // Fixed text on purpose: nothing from the channel may reach Codex as user input.
-const NUDGE =
-  "pair: a message is waiting for you. Run `pair wait --as codex --timeout 5`, act on what it prints as the pair instructions in AGENTS.md describe, send your reply if one is due, then end your turn. Don't start another pair wait.";
+/** The note queued into a Codex session: fixed text plus the validated participant name it registered as. */
+function nudge(name: Agent): string {
+  return `pair: a message is waiting for you. Run \`pair wait --as ${name} --timeout 5\`, act on what it prints as the pair instructions in AGENTS.md describe, send your reply if one is due, then end your turn. Don't start another pair wait.`;
+}
 
 interface Message {
   file: string;
@@ -148,13 +155,35 @@ function kindOf(status: ThreadStatus): ThreadKind {
   return status === "brainstorming" || status === "completed" ? "brainstorm" : "review";
 }
 
-function partnerOf(agent: Agent): Agent {
-  return agent === "claude" ? "codex" : "claude";
+function partnerOf(backend: Backend): Backend {
+  return backend === "claude" ? "codex" : "claude";
 }
 
-function threadFor(channel: string, author: Agent): Thread {
-  const reviewer = partnerOf(author);
+/** Only the two default participants have a default partner: each other. */
+function defaultPartner(agent: Agent): Agent | undefined {
+  return agent === "claude" ? "codex" : agent === "codex" ? "claude" : undefined;
+}
+
+function isBackend(name: string): name is Backend {
+  return (BACKENDS as readonly string[]).includes(name);
+}
+
+function threadFor(channel: string, author: Agent, reviewer: Agent): Thread {
   return { lane: join(channel, `${author}-to-${reviewer}`), author, reviewer };
+}
+
+/**
+ * Every lane in the channel, `<author>-to-<reviewer>`, whoever the participants are. Reset asks for
+ * `anyType` too, so it can back up a lane path that became a regular file.
+ */
+function lanesOf(channel: string, anyType = false): Thread[] {
+  return readdirOrEmpty(channel)
+    .filter((entry) => anyType || entry.isDirectory() || entry.isSymbolicLink())
+    .flatMap((entry) => {
+      const match = LANE.exec(entry.name);
+      return match && match[1] !== match[2] ? [threadFor(channel, match[1], match[2])] : [];
+    })
+    .sort((a, b) => a.lane.localeCompare(b.lane));
 }
 
 function readdirOrEmpty(path: string): Dirent[] {
@@ -493,11 +522,11 @@ function writeMessage(dir: string, seq: number, message: Omit<Message, "file" | 
   return finalPath;
 }
 
-function send(channel: string, me: Agent, type: MessageType, body: string, verdict?: Verdict, brainstorm = false): string {
+function send(channel: string, me: Agent, partner: Agent, type: MessageType, body: string, verdict?: Verdict, brainstorm = false): string {
   if (type === "review") {
-    return sendReview(channel, me, body, verdict);
+    return sendReview(channel, me, partner, body, verdict);
   }
-  const thread = threadFor(channel, me);
+  const thread = threadFor(channel, me, partner);
   const messages = listMessages(thread);
   const state = stateOf(messages);
   if (type === "request") {
@@ -519,11 +548,11 @@ function send(channel: string, me: Agent, type: MessageType, body: string, verdi
   return writeMessage(dirname(state.last.file), messages.length + 1, { from: me, type, round, status }, body);
 }
 
-function sendReview(channel: string, me: Agent, body: string, verdict?: Verdict): string {
+function sendReview(channel: string, me: Agent, partner: Agent, body: string, verdict?: Verdict): string {
   if (!verdict) {
     throw new PairError("review needs --verdict approve|changes, or continue|complete in a brainstorm");
   }
-  const thread = threadFor(channel, partnerOf(me));
+  const thread = threadFor(channel, partner, me);
   const messages = listMessages(thread);
   const state = stateOf(messages);
   if (state.kind !== "awaiting-review") {
@@ -565,47 +594,66 @@ interface Pending {
   earlier: Message[]; // from the same snapshot as state, so output never rereads the disk
 }
 
-function pendingFor(channel: string, me: Agent): Pending | undefined {
+/** The lane a managed reviewer's assigned message (PAIR_AUTO_MESSAGE) is in, if it names one of this channel's lanes. */
+function assignedLane(channel: string): Thread | undefined {
+  const file = process.env.PAIR_AUTO_MESSAGE;
+  const match = file && dirname(dirname(dirname(file))) === channel ? LANE.exec(basename(dirname(dirname(file)))) : null;
+  return match ? threadFor(channel, match[1], match[2]) : undefined;
+}
+
+/** When the last message landed: duties are taken oldest first. */
+function landedAt(message: Message): number {
+  return statSync(message.file, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+}
+
+/**
+ * `me`'s next duty. Author duties come first, then reviewer duties, each oldest first, across every
+ * lane, unless `scope` limits it to one (a managed author's own lane). A managed reviewer only ever
+ * sees its assigned message.
+ */
+function pendingFor(channel: string, me: Agent, scope?: Thread): Pending | undefined {
   if (process.env.PAIR_AUTO_ROLE === "reviewer") {
-    const thread = threadFor(channel, partnerOf(me));
+    const thread = assignedLane(channel);
+    if (!thread || thread.reviewer !== me) return undefined;
     const messages = listMessages(thread);
     const state = stateOf(messages);
     return state.kind === "awaiting-review" && state.last.file === process.env.PAIR_AUTO_MESSAGE
       ? { thread, state, earlier: messages.slice(0, -1) } : undefined;
   }
-  const asAuthor = threadFor(channel, me);
-  const authorMessages = listMessages(asAuthor);
-  const authorState = stateOf(authorMessages);
-  if (authorState.kind === "awaiting-response" || authorState.kind === "closed") {
-    return { thread: asAuthor, state: authorState, earlier: authorMessages.slice(0, -1) };
+  const authorDuties: Pending[] = [];
+  const reviewerDuties: Pending[] = [];
+  for (const thread of scope ? [scope] : lanesOf(channel)) {
+    if (thread.author !== me && thread.reviewer !== me) continue;
+    const messages = listMessages(thread);
+    const state = stateOf(messages);
+    if (state.kind === "idle") continue;
+    const pending = { thread, state, earlier: messages.slice(0, -1) };
+    if (thread.author === me && (state.kind === "awaiting-response" || state.kind === "closed")) authorDuties.push(pending);
+    else if (thread.reviewer === me && state.kind === "awaiting-review") reviewerDuties.push(pending);
   }
-  const asReviewer = threadFor(channel, partnerOf(me));
-  const reviewerMessages = listMessages(asReviewer);
-  const reviewerState = stateOf(reviewerMessages);
-  if (reviewerState.kind === "awaiting-review") {
-    return { thread: asReviewer, state: reviewerState, earlier: reviewerMessages.slice(0, -1) };
-  }
-  return undefined;
+  const oldest = (duties: Pending[]) => duties.sort((x, y) => landedAt(x.state.last) - landedAt(y.state.last))[0];
+  return oldest(authorDuties) ?? oldest(reviewerDuties);
 }
 
-function nextStep(me: Agent, state: ActiveState, budget: number): string {
+/** `to`: the delivered lane's counterpart, whom the reply goes to. */
+function nextStep(me: Agent, to: Agent, state: ActiveState, budget: number): string {
   if (kindOf(state.last.status) === "brainstorm") {
     switch (state.kind) {
       case "awaiting-review":
         return state.last.round >= budget
-          ? `this is the brainstorm's last round (budget ${budget}): add your ideas and close it with the options, your recommendation and open decisions: pair send review --verdict complete --as ${me} <file|->`
-          : `add your ideas, then: pair send review --verdict continue|complete --as ${me} <file|->`;
+          ? `this is the brainstorm's last round (budget ${budget}): add your ideas and close it with the options, your recommendation and open decisions: pair send review --verdict complete --as ${me} --to ${to} <file|->`
+          : `add your ideas, then: pair send review --verdict continue|complete --as ${me} --to ${to} <file|->`;
       case "awaiting-response":
-        return `reply with your answers, objections or your own proposal: pair send response --as ${me} <file|->`;
+        return `reply with your answers, objections or your own proposal: pair send response --as ${me} --to ${to} <file|->`;
       case "closed":
         return "brainstorm completed and closed. Nothing to send.";
     }
   }
   switch (state.kind) {
     case "awaiting-review":
-      return `review it, then: pair send review --verdict approve|changes --as ${me} <file|->`;
+      return `review it, then: pair send review --verdict approve|changes --as ${me} --to ${to} <file|->`;
     case "awaiting-response":
-      return `verify each finding yourself, fix or reject it, then: pair send response --as ${me} <file|->`;
+      return `verify each finding yourself, fix or reject it, then: pair send response --as ${me} --to ${to} <file|->`;
     case "closed":
       return state.last.status === "approved"
         ? "thread approved and closed. Nothing to send."
@@ -635,17 +683,18 @@ function formatMessage(me: Agent, pending: Pending): string {
   const header = messageHeader(last, basename(thread.lane));
   const history = historyLine(pending);
   const budget = budgetOf([...pending.earlier, last]);
-  return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, state, budget)} ==`].join("\n");
+  const to = state.kind === "awaiting-review" ? thread.author : thread.reviewer;
+  return [header, ...(history ? [history] : []), last.body.trimEnd(), `== next: ${nextStep(me, to, state, budget)} ==`].join("\n");
 }
 
 /**
  * Prints the message, then archives a closed thread. Archiving last keeps the `== pair:` header on
  * the first line even when cleanup warns on stderr, since agents read stdout and stderr merged.
  */
-async function wait(channel: string, me: Agent, timeoutSeconds: number): Promise<boolean> {
+async function wait(channel: string, me: Agent, timeoutSeconds: number, scope?: Thread): Promise<boolean> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (true) {
-    const pending = channelAccess(channel, () => pendingFor(channel, me));
+    const pending = channelAccess(channel, () => pendingFor(channel, me, scope));
     if (pending) {
       console.log(formatMessage(me, pending));
       if (pending.state.kind === "closed") {
@@ -705,8 +754,49 @@ function writeChannelFile(path: string, text: string, flags: number): void {
   }
 }
 
-function readRegistration(channel: string): Registration | undefined {
-  const path = join(channel, SESSION_FILE);
+/** Where a participant's Codex registration lives: codex keeps codex.session, any other name sessions/NAME.json. */
+function registrationPath(channel: string, name: Agent): string {
+  return name === "codex" ? join(channel, SESSION_FILE) : join(channel, "sessions", `${name}.json`);
+}
+
+/**
+ * The directory of named registrations, or undefined if there is none. Never used through a symlink
+ * or as a file: removing NAME.json through a linked directory could delete someone else's files.
+ */
+function sessionsDir(channel: string): string | undefined {
+  const dir = join(channel, "sessions");
+  const stat = lstatSync(dir, { throwIfNoEntry: false });
+  if (!stat) return undefined;
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new PairError(`refusing to use ${dir}: it must be a real directory, not a symlink or a file`);
+  }
+  return dir;
+}
+
+/** Participants registered under sessions/ (not codex, which has codex.session). Throws on a refused sessions directory. */
+function namedRegistrations(channel: string): Agent[] {
+  const dir = sessionsDir(channel);
+  return (dir ? readdirOrEmpty(dir) : [])
+    .map((entry) => /^([a-z][a-z0-9_]{0,31})\.json$/.exec(entry.name)?.[1])
+    .filter((name): name is Agent => name !== undefined && name !== "codex")
+    .sort();
+}
+
+/** Every participant registered for Codex wake-ups in this channel. Throws on a refused sessions directory. */
+function registeredNames(channel: string): Agent[] {
+  return [...(lstatSync(join(channel, SESSION_FILE), { throwIfNoEntry: false }) ? ["codex"] : []), ...namedRegistrations(channel)];
+}
+
+/** Like registeredNames, but a refused sessions directory goes to `refused` and codex's own registration stays usable. */
+function registeredNamesTolerant(channel: string, refused: (error: unknown) => void): Agent[] {
+  const names: Agent[] = lstatSync(join(channel, SESSION_FILE), { throwIfNoEntry: false }) ? ["codex"] : [];
+  try { names.push(...namedRegistrations(channel)); } catch (error) { refused(error); }
+  return names;
+}
+
+function readRegistration(channel: string, name: Agent = "codex"): Registration | undefined {
+  if (name !== "codex" && !sessionsDir(channel)) return undefined;
+  const path = registrationPath(channel, name);
   let parsed: Partial<Registration>;
   try {
     parsed = JSON.parse(readChannelFile(path)) as Partial<Registration>;
@@ -736,25 +826,33 @@ function codexThreadId(): string | undefined {
 }
 
 /** Runs in Codex's shell, so the worktree comes from the session's real cwd, not from a tool argument. */
-function register(channel: string, root: string): string {
+function register(channel: string, root: string, name: Agent): string {
   const thread = codexThreadId();
   if (!thread) {
     throw new PairError("register must run in a Codex session's shell: CODEX_THREAD_ID is not set");
   }
-  const previous = readRegistration(channel);
-  mkdirSync(channel, { recursive: true });
+  // One session is one participant: pair_listen must know whose messages to watch.
+  const elsewhere = registeredNames(channel).find((other) => other !== name && readRegistration(channel, other)?.thread === thread);
+  if (elsewhere) {
+    throw new PairError(`this codex session is registered here as ${elsewhere}; run pair unregister --as ${elsewhere} first`);
+  }
+  const previous = readRegistration(channel, name);
+  const path = registrationPath(channel, name);
+  mkdirSync(dirname(path), { recursive: true });
+  if (name !== "codex") sessionsDir(channel); // created as a real directory, or refused
   const registration: Registration = { thread, worktree: root, registeredAt: new Date().toISOString() };
-  const tmpPath = join(channel, `.${SESSION_FILE}.${randomBytes(3).toString("hex")}.tmp`);
+  const tmpPath = join(dirname(path), `.${basename(path)}.${randomBytes(3).toString("hex")}.tmp`);
   writeFileSync(tmpPath, `${JSON.stringify(registration)}\n`);
-  renameSync(tmpPath, join(channel, SESSION_FILE));
+  renameSync(tmpPath, path);
   const replaced = previous && previous.thread !== thread ? ` (replaced ${previous.thread})` : "";
-  return `registered codex session ${thread} for ${root}${replaced}. Now call the pair_listen tool.`;
+  const as = name === "codex" ? "" : ` as ${name}`;
+  return `registered codex session ${thread}${as} for ${root}${replaced}. Now call the pair_listen tool.`;
 }
 
-function unregister(channel: string): string {
-  const current = readRegistration(channel);
+function unregister(channel: string, name: Agent): string {
+  const current = readRegistration(channel, name);
   if (!current) {
-    return "no codex session is registered for this worktree";
+    return name === "codex" ? "no codex session is registered for this worktree" : `no codex session is registered as ${name} for this worktree`;
   }
   const caller = codexThreadId();
   // An old session saying "stop" must not silence a newer one. A shell outside Codex is the user.
@@ -762,7 +860,7 @@ function unregister(channel: string): string {
     throw new PairError(`a different codex session (${current.thread}) is registered here; nothing changed`);
   }
   // ponytail: check-then-delete; a re-register in the same instant would be removed too. status shows it.
-  rmSync(join(channel, SESSION_FILE), { force: true });
+  rmSync(registrationPath(channel, name), { force: true });
   return `unregistered codex session ${current.thread}: pair stops notifying it`;
 }
 
@@ -814,6 +912,7 @@ function logListen(channel: string, text: string): void {
 
 interface Watch {
   channel: string;
+  name: Agent; // the participant this Codex session registered as
   codex: string; // pinned executable, see pinnedCodex()
   notified?: string; // the pending message file the last successful nudge was about
   notifiedAt: number;
@@ -878,26 +977,34 @@ function listen(thread: unknown, watches: Map<string, Watch>): string {
   const registered = readdirOrEmpty(home)
     .filter((entry) => entry.isDirectory())
     .map((entry) => join(home, entry.name))
-    .filter((channel) => {
-      try {
-        return readRegistration(channel)?.thread === thread;
-      } catch {
-        return false; // another channel's corrupt registration is that channel's problem; status reports it
-      }
+    // An unreadable channel, or a corrupt or refused registration, is its own problem (status reports
+    // it); it must not hide valid registrations elsewhere or beside it.
+    .flatMap((channel) => {
+      let names: Agent[];
+      try { names = registeredNamesTolerant(channel, () => {}); } catch { return []; }
+      return names.flatMap((name) => {
+        try {
+          return readRegistration(channel, name)?.thread === thread ? [{ channel, name }] : [];
+        } catch {
+          return [];
+        }
+      });
     });
   if (registered.length === 0) {
-    throw new PairError("this session isn't registered: run `pair register` in your shell, then call pair_listen again");
+    throw new PairError("this session isn't registered: run `pair register --as <your name>` in your shell, then call pair_listen again");
   }
   if (registered.length > 1) {
-    throw new PairError(`this session is registered in ${registered.length} channels (${registered.join(", ")}); run \`pair unregister\` in the worktrees you don't want`);
+    const where = registered.map(({ channel, name }) => `${name} in ${channel}`).join(", ");
+    throw new PairError(`this session is registered ${registered.length} times (${where}); run \`pair unregister\` where you don't want it`);
   }
-  const [channel] = registered;
-  if (watches.get(thread)?.channel !== channel) {
-    watches.set(thread, { channel, codex, notifiedAt: 0, stallReported: false, dispatching: false, failures: 0, retryAt: 0 });
-    logListen(channel, `listening for ${thread}`);
+  const [{ channel, name }] = registered;
+  const current = watches.get(thread);
+  if (current?.channel !== channel || current.name !== name) {
+    watches.set(thread, { channel, name, codex, notifiedAt: 0, stallReported: false, dispatching: false, failures: 0, retryAt: 0 });
+    logListen(channel, `listening for ${thread} as ${name}`);
     pruneClaims(channel);
   }
-  return `listening: pair will queue a short "pair:" note into this session when a message for codex arrives in ${channel}. End your turn now.`;
+  return `listening: pair will queue a short "pair:" note into this session when a message for ${name} arrives in ${channel}. End your turn now.`;
 }
 
 /**
@@ -967,7 +1074,7 @@ function markSent(path: string): void {
 
 function dispatch(thread: string, watch: Watch, pending: string): void {
   watch.dispatching = true;
-  const child = execFile(watch.codex, ["queue", "--thread", thread, "--message", NUDGE], { timeout: QUEUE_TIMEOUT_MS }, (error, _stdout, stderr) => {
+  const child = execFile(watch.codex, ["queue", "--thread", thread, "--message", nudge(watch.name)], { timeout: QUEUE_TIMEOUT_MS }, (error, _stdout, stderr) => {
     watch.dispatching = false;
     if (error) {
       rmSync(claimPath(watch.channel, thread, pending), { force: true }); // let the retry, here or in another process, claim it again
@@ -996,12 +1103,12 @@ function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
     return;
   }
   try {
-    if (readRegistration(watch.channel)?.thread !== thread) {
+    if (readRegistration(watch.channel, watch.name)?.thread !== thread) {
       watches.delete(thread);
       logListen(watch.channel, `stopped notifying ${thread}: it is no longer the registered session`);
       return;
     }
-    const pending = pendingFor(watch.channel, "codex")?.state.last.file;
+    const pending = pendingFor(watch.channel, watch.name)?.state.last.file;
     if (pending === undefined) {
       return;
     }
@@ -1118,8 +1225,7 @@ async function serveMcp(): Promise<void> {
   clearInterval(timer); // stdin closed: the session is gone, so stop notifying it
 }
 
-function describe(channel: string, author: Agent): string {
-  const thread = threadFor(channel, author);
+function describe(thread: Thread): string {
   const state = stateOf(listMessages(thread));
   if (state.kind === "idle") {
     return `${basename(thread.lane)}: idle`;
@@ -1151,16 +1257,20 @@ function instructionState(path: string, expected: string, sectionOnly = false): 
 }
 
 function notificationStatus(channel: string): string[] {
-  let registration: string;
-  try {
-    const current = readRegistration(channel);
-    registration = current ? `session ${current.thread}, registered ${current.registeredAt}` : "no session registered";
-  } catch (error) {
-    if (!(error instanceof PairError)) {
-      throw error;
+  const registrations: string[] = [];
+  const report = (error: unknown) => {
+    if (!(error instanceof PairError)) throw error;
+    registrations.push(error.message);
+  };
+  for (const name of registeredNamesTolerant(channel, report)) {
+    try {
+      const current = readRegistration(channel, name);
+      if (current) registrations.push(`session ${current.thread}${name === "codex" ? "" : ` as ${name}`}, registered ${current.registeredAt}`);
+    } catch (error) {
+      report(error);
     }
-    registration = error.message;
   }
+  if (registrations.length === 0) registrations.push("no session registered");
   let lastEvent: string | undefined;
   try {
     lastEvent = readChannelFile(join(stateDir(channel), LISTEN_LOG)).trimEnd().split("\n").at(-1);
@@ -1171,12 +1281,17 @@ function notificationStatus(channel: string): string[] {
       throw error;
     }
   }
-  return [`codex notifications: ${registration}`, ...(lastEvent ? [`  last listener event: ${lastEvent}`] : [])];
+  return [...registrations.map((line) => `codex notifications: ${line}`), ...(lastEvent ? [`  last listener event: ${lastEvent}`] : [])];
 }
 
 /** `served`: another worktree's auto session serves this one, so its agents don't need pair's files here. */
 function status(channel: string, root: string, served = false): string {
-  const lanes = channelAccess(channel, () => AGENTS.map((agent) => describe(channel, agent)));
+  // The default pair's lanes always show; any other lane once it exists.
+  const lanes = channelAccess(channel, () => {
+    const defaults = [threadFor(channel, "claude", "codex"), threadFor(channel, "codex", "claude")];
+    const others = lanesOf(channel).filter((thread) => !defaults.some((each) => each.lane === thread.lane));
+    return [...defaults, ...others].map(describe);
+  });
   const agents = instructionState(join(root, "AGENTS.md"), codexSection(), true);
   const skill = instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill());
   return [
@@ -1352,10 +1467,10 @@ function listArchived(channel: string): ArchivedThread[] {
         return [];
       }
       const [, id, author, reviewer, outcome] = match;
-      const thread = threadFor(channel, author as Agent);
-      if (thread.reviewer !== reviewer) {
+      if (author === reviewer) {
         return [];
       }
+      const thread = threadFor(channel, author, reviewer);
       const dir = join(archiveDir, entry.name);
       const stats = statSync(dir, { throwIfNoEntry: false });
       if (!stats) {
@@ -1459,14 +1574,15 @@ function clean(channel: string, keepValue: string | undefined): string {
 
 /** Back up whole lanes so reset also repairs legacy, corrupt, and partially written requests. */
 function reset(channel: string, root: string, author: Agent | undefined, dryRun: boolean): string {
-  const lanes = (author ? [author] : AGENTS)
-    .flatMap((agent) => {
-      const lane = threadFor(channel, agent).lane;
+  const lanes = lanesOf(channel, true)
+    .filter((thread) => author === undefined || thread.author === author)
+    .flatMap((thread) => {
+      const { lane } = thread;
       const stat = lstatSync(lane, { throwIfNoEntry: false });
       if (!stat || (stat.isDirectory() && readdirSync(lane).length === 0)) return [];
       let label = `${basename(lane)}: ${stat.isSymbolicLink() ? "symlink" : "unparseable"}`;
       if (stat.isDirectory()) {
-        try { label = describe(channel, agent); } catch { /* backup must still work for malformed requests */ }
+        try { label = describe(thread); } catch { /* backup must still work for malformed requests */ }
       }
       return [{ lane, label }];
     });
@@ -1500,13 +1616,14 @@ function reset(channel: string, root: string, author: Agent | undefined, dryRun:
   ].join("\n");
 }
 
-function renderPrompt(agent: Agent): string {
+function renderPrompt(agent: Backend): string {
   const template = readFileSync(join(PACKAGE_ROOT, "prompts", "pair.md"), "utf8");
-  return template.replaceAll("{{AGENT}}", agent).replaceAll("{{PARTNER}}", partnerOf(agent));
+  const cli = agent === "claude" ? "Claude Code" : "Codex";
+  return template.replaceAll("{{AGENT}}", agent).replaceAll("{{PARTNER}}", partnerOf(agent)).replaceAll("{{CLI}}", cli);
 }
 
 /** The reviewer's section of the instructions, for managed prompts: a served worktree may not have the files. */
-function reviewerRules(agent: Agent): string {
+function reviewerRules(agent: Backend): string {
   const text = renderPrompt(agent);
   const start = text.indexOf("## Review for ");
   if (start < 0) throw new PairError("prompts/pair.md has no reviewer section");
@@ -1647,10 +1764,10 @@ function uninit(channel: string, root: string): string {
     }
   }
 
-  const registration = join(channel, SESSION_FILE);
-  if (channelAccess(channel, () => lstatSync(registration, { throwIfNoEntry: false }))) {
-    channelAccess(channel, () => rmSync(registration, { force: true }));
-    removed.push("the codex session registration, so pair stops notifying it");
+  const registrations = channelAccess(channel, () => registeredNamesTolerant(channel, (error) => notes.push(`kept: ${errorMessage(error)}; remove it by hand`)));
+  if (registrations.length > 0) {
+    channelAccess(channel, () => { for (const name of registrations) rmSync(registrationPath(channel, name), { force: true }); });
+    removed.push(registrations.length === 1 ? "the codex session registration, so pair stops notifying it" : `the ${registrations.length} codex session registrations, so pair stops notifying them`);
   }
 
   const history = [channel, stateDir(channel)].filter((dir) => existsSync(dir));
@@ -2054,7 +2171,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -2083,9 +2200,18 @@ async function main(argv: string[]): Promise<number> {
   if (values.brainstorm && (command !== "send" || rest[0] !== "request")) {
     throw new PairError("--brainstorm is only supported by pair send request");
   }
+  if (values.to !== undefined && command !== "send") {
+    throw new PairError("--to is only supported by pair send");
+  }
   const root = worktreeRoot();
   const channel = channelDir(root);
-  const agent = (): Agent => oneOf(values.as ?? process.env.PAIR_AGENT, AGENTS, "--as (or PAIR_AGENT)");
+  const named = (value: string | undefined, what: string): Agent => {
+    if (!value || !NAME.test(value)) {
+      throw new PairError(`${what} must be a participant name: a lowercase letter, then up to 31 lowercase letters, digits or _${value ? ` (got "${value}")` : ""}`);
+    }
+    return value;
+  };
+  const agent = (): Agent => named(values.as ?? process.env.PAIR_AGENT, "--as (or PAIR_AGENT)");
   const managedReviewer = process.env.PAIR_AUTO_ROLE === "reviewer";
   if (managedReviewer && !REVIEWER_COMMANDS.includes(command)) {
     throw new PairError(`a managed reviewer may only run pair ${REVIEWER_COMMANDS.join(", ")}`);
@@ -2095,9 +2221,35 @@ async function main(argv: string[]): Promise<number> {
   const servedChild = owner !== stateDir(channel);
   // Refreshing rewrites files in the worktree, which a reviewer must not modify, nor a served subagent's checkout.
   const refreshNote = REFRESHING_COMMANDS.includes(command) && !managedReviewer && !servedChild ? refreshInstructions(root) : undefined;
+  // A managed author (and its subagents) works only in its session's lane, <author>-to-<reviewer>.
+  const sessionLane = (me: Agent): Thread | undefined => {
+    if (process.env.PAIR_AUTO_ROLE !== "author") return undefined;
+    const partner = process.env.PAIR_PARTNER || defaultPartner(me);
+    return partner === undefined ? undefined : threadFor(channel, me, partner);
+  };
+  // Whom a send goes to. A new request may use the configured partner; a reply goes only where --to says,
+  // or for the default pair to the default partner, so it can't land in another lane.
+  const partnerFor = (me: Agent, type: MessageType): Agent => {
+    const fixed = managedReviewer ? assignedLane(channel)?.author : sessionLane(me)?.reviewer;
+    if (process.env.PAIR_AUTO_ROLE) {
+      if (fixed === undefined) throw new PairError("this auto session has no lane for this message");
+      if (values.to !== undefined && values.to !== fixed) throw new PairError(`this auto session's messages go to ${fixed}, not ${values.to}`);
+      return fixed;
+    }
+    const given = values.to ?? (type === "request" ? process.env.PAIR_PARTNER || undefined : undefined) ?? defaultPartner(me);
+    if (given === undefined) {
+      throw new PairError(type === "request"
+        ? "pass --to NAME, or set PAIR_PARTNER, to say whom the request goes to"
+        : "pass --to with the participant whose message you're answering; the == next: line of pair wait names it");
+    }
+    const partner = named(given, "--to");
+    if (partner === me) throw new PairError("a participant can't pair with itself");
+    return partner;
+  };
   const managedReview = async (me: Agent): Promise<boolean> => {
     if (process.env.PAIR_AUTO_ROLE !== "author" || !process.env.PAIR_AUTO_RUN) return false;
-    const thread = threadFor(channel, me);
+    const thread = sessionLane(me);
+    if (!thread) return false;
     const state = channelAccess(channel, () => stateOf(listMessages(thread)));
     if (state.kind !== "awaiting-review") return false;
     try {
@@ -2119,7 +2271,10 @@ async function main(argv: string[]): Promise<number> {
         await runGuardian();
         return 0;
       case "start": {
-        const me = agent();
+        const name = agent();
+        // Until auto mode takes --cli, its author is one of the default participants, named after its CLI.
+        if (!isBackend(name)) throw new PairError(`pair start --as must be claude or codex (got "${name}")`);
+        const me: Backend = name;
         try {
           if (rest.length !== passthrough.length) {
             throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
@@ -2173,7 +2328,7 @@ async function main(argv: string[]): Promise<number> {
           process.chdir(startRoot); // so pair ps groups this launcher with the worktree it runs
           const startChannel = channelDir(startRoot);
           // Its listener would wake that session for either lane, and its pair wait could take the auto author's reviews.
-          if (readRegistration(startChannel)) {
+          if (registeredNames(startChannel).length > 0) {
             throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
           }
           return await startAuto({
@@ -2186,20 +2341,20 @@ async function main(argv: string[]): Promise<number> {
             graceMs: grace * 1000,
             serveWorktrees, reviewers, reviewerRules: reviewerRules(reviewer),
             target: (laneChannel) => {
-              const state = stateOf(listMessages(threadFor(laneChannel, me)));
+              const state = stateOf(listMessages(threadFor(laneChannel, me, reviewer)));
               return state.kind === "awaiting-review"
                 ? { file: state.last.file, thread: basename(dirname(state.last.file)), brainstorm: kindOf(state.last.status) === "brainstorm" }
                 : undefined;
             },
             reviewed: (laneChannel, file) => {
-              const messages = listMessages(threadFor(laneChannel, me));
+              const messages = listMessages(threadFor(laneChannel, me, reviewer));
               const index = messages.findIndex((message) => message.file === file);
               return index >= 0 && messages[index + 1]?.type === "review";
             },
             // A served worktree's channel sits next to this one, under the same PAIR_HOME, whatever the caller's says.
             channelOf: (childRoot) => join(dirname(startChannel), basename(channelDir(childRoot))),
             stateDirOf: stateDir,
-            registered: (childChannel) => readRegistration(childChannel) !== undefined,
+            registered: (childChannel) => registeredNames(childChannel).length > 0,
           });
         } catch (error) { throw new PairError(errorMessage(error)); }
       }
@@ -2232,8 +2387,9 @@ async function main(argv: string[]): Promise<number> {
           throw new PairError("a managed reviewer may only send its own review verdict");
         }
         const body = readBody(rest[1]);
-        console.log(`sent: ${channelAccess(channel, () => send(channel, me, type, body, verdict, values.brainstorm))}`);
-        if (type !== "review" && await managedReview(me) && !(await wait(channel, me, 1))) {
+        const partner = partnerFor(me, type);
+        console.log(`sent: ${channelAccess(channel, () => send(channel, me, partner, type, body, verdict, values.brainstorm))}`);
+        if (type !== "review" && await managedReview(me) && !(await wait(channel, me, 1, sessionLane(me)))) {
           throw new PairError("the managed review finished, but another pair wait already took it; run pair history to read it");
         }
         return 0;
@@ -2244,7 +2400,7 @@ async function main(argv: string[]): Promise<number> {
         if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError("auto mode agent identity does not match --as");
         const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
         await managedReview(me); // explicit retry after a failed managed round
-        if (!(await wait(channel, me, timeout))) {
+        if (!(await wait(channel, me, timeout, sessionLane(me)))) {
           // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
           // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
           console.log(`pair: no message for ${me} yet.`);
@@ -2264,8 +2420,8 @@ async function main(argv: string[]): Promise<number> {
         console.log(channelAccess(channel, () => clean(channel, values.keep)));
         return 0;
       case "reset": {
-        if (rest.length) throw new PairError("reset accepts no positional arguments; use --as claude|codex to select an author lane");
-        const author = values.as === undefined ? undefined : oneOf(values.as, AGENTS, "--as");
+        if (rest.length) throw new PairError("reset accepts no positional arguments; use --as NAME to select the lanes NAME authored");
+        const author = values.as === undefined ? undefined : named(values.as, "--as");
         const operation = () => channelAccess(channel, () => reset(channel, root, author, values["dry-run"] ?? false));
         try {
           console.log(values["dry-run"] ? operation() : await withAutoStopped(stateDir(channel), operation));
@@ -2282,10 +2438,10 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       case "register":
         if (process.env.PAIR_AUTO_ROLE) throw new PairError("auto mode delivers reviews inline; session registration is unnecessary");
-        console.log(channelAccess(channel, () => register(channel, root)));
+        console.log(channelAccess(channel, () => register(channel, root, named(values.as ?? (process.env.PAIR_AGENT || "codex"), "--as (or PAIR_AGENT)"))));
         return 0;
       case "unregister":
-        console.log(channelAccess(channel, () => unregister(channel)));
+        console.log(channelAccess(channel, () => unregister(channel, named(values.as ?? (process.env.PAIR_AGENT || "codex"), "--as (or PAIR_AGENT)"))));
         return 0;
       case "mcp":
         await serveMcp();

@@ -1,10 +1,16 @@
-# pair: review loop with {{PARTNER}}
+# pair: review loop with your partner
 
-These instructions are for `{{AGENT}}` only. If you are not `{{AGENT}}`, ignore this section.
+These instructions are for {{CLI}} sessions only. If you are not {{CLI}}, ignore this section.
 
-You are `{{AGENT}}`. Your partner `{{PARTNER}}` works on the same repo. In auto mode, pair starts the
-reviewer for each round.
-You talk only through the `pair` CLI. Always pass `--as {{AGENT}}`.
+You pair with a partner, another agent working on the same repo, and talk to it only through the
+`pair` CLI. In auto mode, pair starts the reviewer for each round.
+
+Your pair name is `$PAIR_AGENT` if it is set in your shell, else the name the user gave you, else
+`{{AGENT}}`. Your partner for new requests is `$PAIR_PARTNER` if set, else the name the user gave
+you, else `{{PARTNER}}`. Pass `--as <your name>` on every command and `--to` on every `send`: a new
+request goes `--to` your partner, and a review or response goes `--to` the participant whose message
+you received, exactly as the `== next:` line of `pair wait` says. The examples below use the default
+names, `{{AGENT}}` and `{{PARTNER}}`.
 
 ## Delegating work
 
@@ -66,13 +72,13 @@ model turns:
 - If you are Claude Code in an interactive session: run `pair wait --as {{AGENT}} --timeout 3600` as
   a background command (`run_in_background: true`) and end your turn. You'll be resumed when it exits.
   Then read its output.
-- If you are Codex: run `pair register` in your shell, call the `pair_listen` tool, then end your
-  turn. Never keep a `pair wait` running or poll for messages: each check costs a model call. Do this
-  before your first wait in a session, and again after the session restarts or resumes; repeating it
-  is harmless. When a message arrives, pair queues a short note starting with `pair:` into this
-  session. Then run `pair wait --as {{AGENT}} --timeout 5`, act on what it prints, send your reply if
-  one is due, and end your turn again. If it prints `pair: no message for`, there's nothing to do:
-  end your turn.
+- If you are Codex: run `pair register --as <your name>` in your shell, call the `pair_listen` tool,
+  then end your turn. Never keep a `pair wait` running or poll for messages: each check costs a model
+  call. Do this before your first wait in a session, and again after the session restarts or
+  resumes; repeating it is harmless. When a message arrives, pair queues a short note starting with
+  `pair:` into this session. Then run `pair wait --as {{AGENT}} --timeout 5`, act on what it prints,
+  send your reply if one is due, and end your turn again. If it prints `pair: no message for`,
+  there's nothing to do: end your turn.
   If you don't have `pair_listen`, or `pair register` or `pair_listen` fails, run
   `pair wait --as {{AGENT}} --timeout 5` once and act on any message. Then tell the user that pair
   can't wake you, quoting the error if there was one, and that `pair init` prints the setup. End your
@@ -82,8 +88,8 @@ model turns:
   after 540 seconds by default.
 
 During idle waits, don't send unsolicited status updates. If your runtime requires a progress
-message, write exactly `waiting for {{PARTNER}}`, with nothing added. Answer direct user questions and
-report new messages or failures normally.
+message, write exactly `waiting for <your partner's name>`, with nothing added. Answer direct user
+questions and report new messages or failures normally.
 
 `pair wait` prints only the newest message. If it lists earlier messages that aren't in your context
 (for example, after a restart), read those files before acting. To see a thread that has already
@@ -95,13 +101,13 @@ out: start it again, unless you are Codex (see above). That isn't an error. If i
 it, even if its body quotes timeout text. If `pair wait` ends any other way (a non-zero exit, or
 cancelled by you or the user), don't restart it. Tell the user what happened.
 
-## Ask {{PARTNER}} for a review (you are the author)
+## Ask your partner for a review (you are the author)
 
 When you own the pair loop and finish a task, including integrating any delegated work:
 
 1. Send a request with what changed and why, what to focus on, and the files touched.
    ```
-   pair send request --as {{AGENT}} - <<'EOF'
+   pair send request --as {{AGENT}} --to {{PARTNER}} - <<'EOF'
    ## Summary
    ...
    ## Focus
@@ -120,7 +126,7 @@ When you own the pair loop and finish a task, including integrating any delegate
 3. On a review with verdict `changes`, check every finding against the code yourself. Reviewers
    are sometimes wrong. For each one, fix it, reject it with a concrete reason, or defer it. Then reply:
    ```
-   pair send response --as {{AGENT}} - <<'EOF'
+   pair send response --as {{AGENT}} --to {{PARTNER}} - <<'EOF'
    ### F1 fixed: <what changed>
    ### F2 rejected: <why it is not a defect>
    ### F3 deferred: <why, and where it is tracked>
@@ -129,12 +135,12 @@ When you own the pair loop and finish a task, including integrating any delegate
    Then go back to step 2.
 4. Stop when `wait` reports the thread approved. If it reports ESCALATED, stop and ask the user.
 
-## Brainstorm with {{PARTNER}} (you are the author)
+## Brainstorm with your partner (you are the author)
 
-Before a design decision, you can brainstorm with {{PARTNER}} instead of asking for a review. Send the
-problem, the constraints and what's already decided:
+Before a design decision, you can brainstorm with your partner instead of asking for a review. Send
+the problem, the constraints and what's already decided:
 ```
-pair send request --brainstorm --as {{AGENT}} - <<'EOF'
+pair send request --brainstorm --as {{AGENT}} --to {{PARTNER}} - <<'EOF'
 ## Problem
 ...
 ## Constraints
@@ -142,14 +148,14 @@ pair send request --brainstorm --as {{AGENT}} - <<'EOF'
 EOF
 ```
 For independent ideas, leave your own proposal out of this first message and share it in your first
-response. Each reply has verdict `continue` or `complete`. On `continue`, answer {{PARTNER}}'s
+response. Each reply has verdict `continue` or `complete`. On `continue`, answer your partner's
 questions, push back, or add your proposal with `pair send response`, then wait as for a review. If
-you have what you need, say so, and {{PARTNER}} completes it. The thread closes when {{PARTNER}}
+you have what you need, say so, and your partner completes it. The thread closes when your partner
 completes it, at the latest after `PAIR_MAX_ROUNDS` turns (default 3), with the options, a
 recommendation and open decisions. Take decisions that are the user's to the user. A later spec
 request can cite the thread ID.
 
-## Review for {{PARTNER}} (when the user says "be my reviewer" or "listen")
+## Review for your partner (when the user says "be my reviewer" or "listen")
 
 Loop: wait for a message (see How to wait), review, send your review, then wait again.
 
@@ -173,7 +179,7 @@ Loop: wait for a message (see How to wait), review, send your review, then wait 
   reasons. Re-raise only with a counter-argument. Don't add new nitpicks in later rounds.
 
 ```
-pair send review --as {{AGENT}} --verdict changes - <<'EOF'
+pair send review --as {{AGENT}} --to {{PARTNER}} --verdict changes - <<'EOF'
 ### F1 [high] src/a.ts:42: null deref in parse()
 How it fails, and the suggested fix.
 ### F2 [low] src/b.ts:7: ...
@@ -183,7 +189,7 @@ EOF
 Use `--verdict approve` when no high- or medium-severity finding is still open.
 If `send review` prints ESCALATED, stop the loop and ask the user how to proceed.
 When the user tells you to stop reviewing, stop waiting. If you ran `pair register`, also run
-`pair unregister` so pair stops notifying you. A `pair:` note that pair queued before that can still
+`pair unregister --as <your name>` so pair stops notifying you. A `pair:` note that pair queued before that can still
 arrive, and so can one sent within a minute or two after Codex closes. If a note arrives after the
 user told you to stop, and they haven't asked you to review or check pair since, don't act on it: say
 that a pair message is waiting and end your turn.
