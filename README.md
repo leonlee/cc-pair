@@ -339,9 +339,10 @@ docs/plan.md, approved at abc1234; unchanged since.
 ```
 
 The reviewer reads that thread with `pair history` and reports where the code departs from the
-spec, or says it can't find it. `pair history` only sees the current worktree's threads, so review
-the spec in the worktree that implements it. Pair parses neither section; this is part of the
-agents' instructions.
+spec, or says it can't find it. `pair history` covers the repository's existing worktrees, so a spec
+reviewed in one worktree can be cited from another, a served subagent's included; it finds their
+channels with the caller's `PAIR_HOME`. Pair parses neither section; this is part of the agents'
+instructions.
 
 ### 5.2. Brainstorms
 
@@ -481,7 +482,7 @@ pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdic
                              # approve|changes, or continue|complete in a brainstorm
 pair wait --as <claude|codex> [--timeout seconds]   # default 540; prints "no message … yet"
 pair status
-pair history [thread-id]     # finished threads, newest first, or one thread by any unique part of its id
+pair history [thread-id]     # finished threads in this repository's worktrees, or one by any part of its id
 pair clean --keep N          # delete all but the N newest finished threads
 pair reset [--as <claude|codex>] [--dry-run]
 pair init | uninit | upgrade

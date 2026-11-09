@@ -1338,6 +1338,7 @@ interface ArchivedThread {
   laneName: string;
   outcome: ThreadStatus;
   thread: Thread;
+  worktree?: string; // another worktree of the repository, for history only
 }
 
 /** Finished threads, most recently finished first. Entries that aren't archived threads are ignored. */
@@ -1383,31 +1384,69 @@ function requestSummary(messages: Message[]): string {
   return first.length > 72 ? `${first.slice(0, 71)}…` : first;
 }
 
-function history(channel: string, query: string | undefined): string {
-  const archived = listArchived(channel);
+/** The repository's other existing worktrees, canonical and without `root`; none outside git. */
+function otherWorktrees(root: string): string[] {
+  let listing: string;
+  try {
+    listing = execFileSync("git", ["worktree", "list", "--porcelain", "-z"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return [];
+  }
+  const roots = new Set<string>();
+  for (const field of listing.split("\0")) {
+    if (!field.startsWith("worktree ")) continue;
+    try { roots.add(realpathSync(field.slice("worktree ".length))); } catch { /* removed since */ }
+  }
+  roots.delete(root);
+  return [...roots];
+}
+
+/**
+ * Finished threads of this worktree and, read-only, of the repository's other worktrees, whose
+ * channels are found as an agent there would, with this process's PAIR_HOME. Another worktree's
+ * unreadable channel is skipped with a warning; this worktree's errors stand as before.
+ */
+function repositoryArchived(channel: string, root: string, warn: (text: string) => void): ArchivedThread[] {
+  const others = otherWorktrees(root).flatMap((worktree) => {
+    try { return listArchived(channelDir(worktree)).map((entry) => ({ ...entry, worktree })); }
+    catch (error) { warn(`skipped the finished threads of ${worktree}: ${errorMessage(error)}`); return []; }
+  });
+  return [...listArchived(channel), ...others].sort((a, b) => b.finishedAt - a.finishedAt || b.id.localeCompare(a.id));
+}
+
+function history(channel: string, root: string, query: string | undefined, warn: (text: string) => void): string {
+  const archived = repositoryArchived(channel, root, warn);
+  const where = (entry: ArchivedThread) => entry.worktree ? `  [${entry.worktree}]` : "";
   if (query === undefined) {
     if (archived.length === 0) {
       return "no finished threads yet";
     }
     return archived
       .flatMap((entry) => {
-        const messages = readArchived(entry);
-        return messages ? [`${entry.id}  ${entry.laneName}  ${entry.outcome}  ${messages.length} messages  ${requestSummary(messages)}`] : [];
+        let messages: Message[] | undefined;
+        try { messages = readArchived(entry); }
+        catch (error) {
+          if (!entry.worktree) throw error;
+          warn(`skipped finished thread ${entry.id} of ${entry.worktree}: ${errorMessage(error)}`);
+        }
+        return messages ? [`${entry.id}  ${entry.laneName}  ${entry.outcome}  ${messages.length} messages  ${requestSummary(messages)}${where(entry)}`] : [];
       })
       .join("\n");
   }
   const matches = archived.filter((entry) => entry.id.includes(query));
   if (matches.length !== 1) {
     const found = matches.length === 0 ? "no finished thread matches" : `${matches.length} finished threads match`;
-    throw new PairError(`${found} "${query}"${matches.map((entry) => `\n  ${entry.id}`).join("")}`);
+    throw new PairError(`${found} "${query}"${matches.map((entry) => `\n  ${entry.id}${where(entry)}`).join("")}`);
   }
   const [entry] = matches;
-  const messages = readArchived(entry);
+  // An access error names the sandbox root of the channel it happened in, not this worktree's.
+  const messages = entry.worktree ? channelAccess(channelDir(entry.worktree), () => readArchived(entry)) : readArchived(entry);
   if (!messages) {
     throw new PairError(`finished thread ${entry.id} was removed while reading it`);
   }
   const transcript = messages.map((message) => `${messageHeader(message, entry.laneName)}\n${message.body.trimEnd()}`);
-  return [`== thread ${entry.id} · ${entry.laneName} · ${entry.outcome} ==`, ...transcript].join("\n\n");
+  const worktree = entry.worktree ? ` · worktree ${entry.worktree}` : "";
+  return [`== thread ${entry.id} · ${entry.laneName} · ${entry.outcome}${worktree} ==`, ...transcript].join("\n\n");
 }
 
 function clean(channel: string, keepValue: string | undefined): string {
@@ -1966,7 +2005,9 @@ the worktree or the channel.`,
   history: `usage: pair history [THREAD]
 
 With no argument, list finished threads, newest first. With THREAD (any unique part of a thread
-id), print that thread's messages.`,
+id), print that thread's messages. It covers this worktree and the repository's other existing
+worktrees (git worktree list), whose threads are marked with their path; their channels are found
+with this shell's PAIR_HOME.`,
   clean: `usage: pair clean --keep N
 
 Delete all but the N newest finished threads. Pair also does this whenever a thread finishes,
@@ -2217,7 +2258,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "history":
-        console.log(channelAccess(channel, () => history(channel, rest[0])));
+        console.log(channelAccess(channel, () => history(channel, root, rest[0], (text) => console.error(`pair: warning: ${text}`))));
         return 0;
       case "clean":
         console.log(channelAccess(channel, () => clean(channel, values.keep)));

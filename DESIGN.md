@@ -80,7 +80,11 @@ Archiving is safe against concurrent readers and stale `wait`s. A thread disappe
 counts as closed, and a stale archive can only target its own, already-archived directory, so it
 never touches a newer thread.
 `pair history` lists finished threads, most recently finished first, and
-`pair history <id>` prints one transcript. `pair clean --keep N` deletes all but the N newest right
+`pair history <id>` prints one transcript. It reads this worktree's channel and, read-only, those of
+the repository's other existing worktrees from `git worktree list`, found with the caller's
+PAIR_HOME, so a spec reviewed in one worktree can be cited from another. Their threads are marked
+with their worktree, and an unreadable one is skipped with a warning. Archiving and cleanup stay
+per worktree. `pair clean --keep N` deletes all but the N newest right
 away. The flag is required, so a bare `clean` deletes nothing. Neither kind of cleanup touches
 active threads.
 

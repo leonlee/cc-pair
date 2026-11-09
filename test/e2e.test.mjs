@@ -1170,3 +1170,76 @@ test("upgrade installs only a newer version, then reports just the new init's fi
   assert.equal(failed.code, 3);
   assert.deepEqual(failed.calls, [view, install], "no init after a failed install");
 });
+
+// pair history covers the repository's other worktrees, so a spec reviewed in one can be cited in another.
+function repoWithWorktree(t, extraEnv = {}) {
+  const box = sandbox();
+  Object.assign(box.env, extraEnv);
+  const git = (cwd, ...args) => assert.equal(spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd }).status, 0);
+  git(box.root, "init", "-q");
+  git(box.root, "commit", "-q", "--allow-empty", "-m", "base");
+  const other = `${box.root}-b`;
+  git(box.root, "worktree", "add", "-q", other, "-b", "b");
+  t.after(() => rmSync(other, { recursive: true, force: true }));
+  const runIn = (cwd, args, input) => {
+    const result = spawnSync("node", [CLI, ...args], { cwd, env: box.env, input, encoding: "utf8" });
+    return { code: result.status, out: result.stdout, err: result.stderr };
+  };
+  // A finished thread: request, approve, and the author's wait that archives it.
+  const finish = (cwd, summary) => {
+    assert.equal(runIn(cwd, ["send", "request", "--as", "claude", "-"], `## Summary\n${summary}`).code, 0);
+    assert.equal(runIn(cwd, ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM").code, 0);
+    assert.equal(runIn(cwd, ["wait", "--as", "claude", "--timeout", "1"]).code, 0);
+  };
+  return { ...box, root: realpathSync(box.root), other: realpathSync(other), git, runIn, finish };
+}
+
+test("history covers the repository's other worktrees, marked with their path", (t) => {
+  const { root, other, git, runIn, finish } = repoWithWorktree(t);
+  finish(root, "spec reviewed in the main worktree");
+  const listed = runIn(other, ["history"]);
+  assert.equal(listed.code, 0, listed.err);
+  const id = /^(\S+)\s+claude-to-codex\s+approved\s+2 messages\s+spec reviewed in the main worktree\s+\[(.+)\]$/m.exec(listed.out);
+  assert.ok(id, listed.out);
+  assert.equal(id[2], root);
+  const shown = runIn(other, ["history", id[1]]);
+  assert.match(shown.out, new RegExp(`^== thread ${id[1]} · claude-to-codex · approved · worktree ${root} ==`));
+  assert.match(shown.out, /spec reviewed in the main worktree/);
+  assert.doesNotMatch(runIn(root, ["history"]).out, /\[/, "this worktree's own threads carry no path");
+
+  finish(other, "work in the second worktree");
+  const ambiguous = runIn(root, ["history", "-"]); // every id has dashes
+  assert.equal(ambiguous.code, 1);
+  assert.match(ambiguous.err, new RegExp(`2 finished threads match "-"[\\s\\S]*\\[${other}\\]`));
+
+  git(root, "worktree", "remove", other);
+  const afterRemoval = runIn(root, ["history"]).out;
+  assert.doesNotMatch(afterRemoval, /work in the second worktree/, "a removed worktree's threads aren't found");
+  assert.match(afterRemoval, /spec reviewed in the main worktree/);
+});
+
+test("history finds other worktrees' channels with a relative PAIR_HOME, and skips an unreadable one", (t) => {
+  const { root, other, runIn, finish } = repoWithWorktree(t, { PAIR_HOME: "pair-home" });
+  finish(root, "under a relative home");
+  assert.match(runIn(other, ["history"]).out, new RegExp(`under a relative home\\s+\\[${root}\\]`), "resolved against that worktree's root");
+
+  // An explicit read of the other worktree's unreadable transcript fails, with advice for its own channel.
+  const id = /^(\S+)\s+claude-to-codex\s+approved\s+2 messages\s+under a relative home/m.exec(runIn(other, ["history"]).out)[1];
+  const archive = join(root, "pair-home", readdirSync(join(root, "pair-home"))[0], "archive");
+  const request = join(archive, readdirSync(archive)[0], "001-request.md");
+  chmodSync(request, 0o000);
+  const denied = runIn(other, ["history", id]);
+  chmodSync(request, 0o644);
+  assert.equal(denied.code, 1);
+  assert.match(denied.err, new RegExp(`cannot access channel path ${request}[\\s\\S]*${join(root, "pair-home")}`));
+  assert.doesNotMatch(denied.err, new RegExp(join(other, "pair-home")), "not this worktree's channel root");
+
+  finish(other, "the second worktree's own");
+  chmodSync(archive, 0o000);
+  t.after(() => chmodSync(archive, 0o755));
+  const skipped = runIn(other, ["history"]);
+  assert.equal(skipped.code, 0, skipped.err);
+  assert.match(skipped.err, new RegExp(`pair: warning: skipped the finished threads of ${root}: `));
+  assert.match(skipped.out, /the second worktree's own/);
+  assert.doesNotMatch(skipped.out, /under a relative home/);
+});
