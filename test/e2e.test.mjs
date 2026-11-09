@@ -6,6 +6,12 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { promisify } from "node:util";
+// The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
+for (const name of Object.keys(process.env)) {
+  if (name.startsWith("PAIR_")) {
+    delete process.env[name];
+  }
+}
 
 // These protocol tests create their own agents/channels. Do not inherit an auto author's or
 // reviewer's role when the developer runs npm test from inside a managed session.

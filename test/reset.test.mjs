@@ -7,6 +7,12 @@ import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { withAutoStopped } from "../dist/auto.js";
+// The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
+for (const name of Object.keys(process.env)) {
+  if (name.startsWith("PAIR_")) {
+    delete process.env[name];
+  }
+}
 
 const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
 const exec = promisify(execFile);
