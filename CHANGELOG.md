@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.2 (2026-11-09)
+
+`pair history` now covers the repository's other existing worktrees, so a spec reviewed in one
+worktree can be cited from another. Before, a reviewer's `pair history` saw only its own worktree,
+which broke the natural flow with `--serve-worktrees`: the spec is reviewed in the session's
+worktree, and a subagent's reviewer runs in the subagent's. Threads from other worktrees are read
+only, marked with their worktree's path, and found with the caller's `PAIR_HOME`; an unreadable one
+is skipped with a warning. Archiving, `pair clean` and `PAIR_KEEP` pruning stay per worktree.
+
 ## 0.9.1 (2026-11-08)
 
 An auto session no longer hangs when its terminal goes away. On macOS, a write to a terminal whose
