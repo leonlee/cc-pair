@@ -1068,8 +1068,9 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       ? [
         ...options.authorArgs, ...(options.session.kind === "new" ? ["--session-id", options.session.id] : []),
         "--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] } } }), "--append-system-prompt", authorPrompt,
-        // A new user turn on every launch, so a resumed conversation whose recorded instructions name an old run's path gets the current one.
-        `Act as the pair author described in your system instructions and wait for the user's task. Run pair as "$PAIR_BIN" in this launch; an absolute .../auto-*/bin/pair path from an earlier launch no longer exists.`,
+        // A new user turn on every launch, so a resumed conversation whose recorded instructions name an old run's path,
+        // or another pairing, gets the current ones.
+        `Act as the pair author described in your system instructions and wait for the user's task. Run pair as "$PAIR_BIN" in this launch; an absolute .../auto-*/bin/pair path from an earlier launch no longer exists. In this launch your pair name is ${authorName} and your reviewer is ${reviewerName}: pass --as ${authorName} --to ${reviewerName}, even if earlier instructions in this conversation named others.`,
       ]
       // --cd: a resumed Codex session may otherwise switch to the directory it was recorded in, off this channel.
       : [...options.authorArgs, "--cd", options.root, "--", authorPrompt];

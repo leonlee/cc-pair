@@ -2008,7 +2008,7 @@ environment:
   PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
   PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
 
-const AS_OPTION = "  --as <claude|codex>          who is running the command (default: $PAIR_AGENT)";
+const AS_OPTION = "  --as NAME                    the participant running the command (default: $PAIR_AGENT)";
 
 const REGISTER_HELP = `usage: pair register [--as NAME] | pair unregister [--as NAME]
 
@@ -2107,6 +2107,7 @@ line names it), required except between claude and codex.
 
 options:
 ${AS_OPTION}
+  --to NAME                    the partner the message goes to (see above)
   --brainstorm                 with request: open a brainstorm instead of a review
   --verdict <approve|changes>  required for review; approve closes the thread
   --verdict <continue|complete>
@@ -2115,9 +2116,10 @@ ${AS_OPTION}
 A thread is escalated when changes are still requested after PAIR_MAX_ROUNDS rounds (default 3).
 A brainstorm gets PAIR_MAX_ROUNDS turns from the reviewer, fixed when it opens, and the last one
 must complete it. In auto mode, request and response wait for the managed reply and print it.`,
-  wait: `usage: pair wait --as <claude|codex> [--timeout SECONDS]
+  wait: `usage: pair wait --as NAME [--timeout SECONDS]
 
-Wait until a message for --as arrives, print it with what to do next, and exit. On timeout it prints
+Wait until a message for --as arrives in any of its lanes (replies it owes as an author first, then
+reviews, oldest first), print it with what to do next, and exit. On timeout it prints
 "pair: no message for <agent> yet." and exits 0. In auto mode, the author's wait retries a failed
 review round.
 
@@ -2413,7 +2415,7 @@ async function main(argv: string[]): Promise<number> {
         const type = oneOf(rest[0], MESSAGE_TYPES, "message type");
         const verdict = values.verdict === undefined ? undefined : oneOf(values.verdict, VERDICTS, "--verdict");
         const me = agent();
-        if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError("auto mode agent identity does not match --as");
+        if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError(`this auto session runs you as ${process.env.PAIR_AGENT}: pass --as ${process.env.PAIR_AGENT}`);
         if (managedReviewer && (me !== process.env.PAIR_AGENT || type !== "review")) {
           throw new PairError("a managed reviewer may only send its own review verdict");
         }
@@ -2428,7 +2430,7 @@ async function main(argv: string[]): Promise<number> {
       case "wait": {
         autoKeep(); // reject a bad PAIR_KEEP before touching any thread
         const me = agent();
-        if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError("auto mode agent identity does not match --as");
+        if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError(`this auto session runs you as ${process.env.PAIR_AGENT}: pass --as ${process.env.PAIR_AGENT}`);
         const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
         await managedReview(me); // explicit retry after a failed managed round
         if (!(await wait(channel, me, timeout, sessionLane(me)))) {

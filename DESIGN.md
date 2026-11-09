@@ -276,7 +276,8 @@ author arguments that already select a conversation. A plain `pair start`, or on
 
 Claude records a conversation's system prompt on its first request and reuses it on resume, so the
 author prompt names `"$PAIR_BIN"` rather than the run directory. Every launch also sends a first
-user message naming `"$PAIR_BIN"`, for conversations whose instructions an older pair recorded. The
+user message naming `"$PAIR_BIN"` and the launch's pairing (`--as`, `--to`), for conversations whose
+instructions an older pair, or another pairing, recorded. The
 Claude reviewer keeps the absolute wrapper path, because its `--allowedTools` rules match the literal
 command, and its sessions are resumed only within one run.
 

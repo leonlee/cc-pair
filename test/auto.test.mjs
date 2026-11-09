@@ -815,6 +815,7 @@ test("a resumed Claude author keeps the ID it was given, and its prompts never n
   const prompt = args[args.indexOf("--append-system-prompt") + 1];
   assert.match(prompt, /The pair CLI is "\$PAIR_BIN"/);
   assert.match(args.at(-1), /Run pair as "\$PAIR_BIN" in this launch; an absolute .*bin\/pair path from an earlier launch no longer exists/);
+  assert.match(args.at(-1), /In this launch your pair name is claude and your reviewer is codex: pass --as claude --to codex/, "a recorded prompt may name another pairing");
   for (const text of [prompt, args.at(-1)]) assert.ok(!text.includes(f.stateDir()), "no run-specific path");
   assert.ok(existsSync(f.read("author.bin")), "PAIR_BIN names this run's live wrapper");
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(resumed\\)`));
@@ -1447,7 +1448,10 @@ for (const { author, args, reviewer, cli, restart: pairing } of pairings) {
     // that don't resolve to the same pairing without them.
     const restart = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8")).restart;
     const authorCli = args.includes("--cli") ? args[args.indexOf("--cli") + 1] : author;
-    if (authorCli === "claude") assert.ok(restart, "a new Claude author's restart command is known at launch");
+    if (authorCli === "claude") {
+      assert.ok(restart, "a new Claude author's restart command is known at launch");
+      assert.match(JSON.parse(f.read("author.args.json")).at(-1), new RegExp(`pass --as ${author} --to ${reviewer},`), "each launch restates the pairing");
+    }
     if (restart) {
       assert.match(restart, new RegExp(`pair start --as ${author} `));
       assert.ok(restart.includes(` --grace 0.15 ${pairing} -- `), restart);
