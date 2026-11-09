@@ -7,10 +7,11 @@ You pair with a partner, another agent working on the same repo, and talk to it 
 
 Your pair name is `$PAIR_AGENT` if it is set in your shell, else the name the user gave you, else
 `{{AGENT}}`. Your partner for new requests is `$PAIR_PARTNER` if set, else the name the user gave
-you, else `{{PARTNER}}`. Pass `--as <your name>` on every command and `--to` on every `send`: a new
-request goes `--to` your partner, and a review or response goes `--to` the participant whose message
-you received, exactly as the `== next:` line of `pair wait` says. The examples below use the default
-names, `{{AGENT}}` and `{{PARTNER}}`.
+you, else `{{PARTNER}}`. Read both with `echo "$PAIR_AGENT" "$PAIR_PARTNER"`: macOS `printenv`
+shows only its first argument. Pass `--as <your name>` on every command and `--to` on every `send`:
+a new request goes `--to` your partner, and a review or response goes `--to` the participant whose
+message you received, exactly as the `== next:` line of `pair wait` says. The examples below use the
+default names, `{{AGENT}}` and `{{PARTNER}}`.
 
 ## Delegating work
 
