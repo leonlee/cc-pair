@@ -90,7 +90,8 @@ export interface AutoOptions {
   reviewed(channel: string, file: string): boolean;
   channelOf(root: string): string;
   stateDirOf(channel: string): string;
-  registered(channel: string): boolean;
+  /** The refusal when manual Codex sessions are registered in the channel, naming how to clear them. */
+  registered(channel: string): string | undefined;
 }
 
 export function errorMessage(error: unknown): string {
@@ -756,7 +757,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       .map((line) => { try { return realpathSync(line.slice("worktree ".length)); } catch { return ""; } });
     if (!listed.includes(root)) throw refuse("git worktree list doesn't include it");
     const channel = options.channelOf(root);
-    if (options.registered(channel)) throw refuse("a manual Codex session is registered there; run pair unregister in it first");
+    const registered = options.registered(channel);
+    if (registered) throw refuse(`${registered} in it first`);
     const { dev, ino } = statSync(root);
     const stateDir = options.stateDirOf(channel);
     const socketPath = autoSocketPath(stateDir, true);

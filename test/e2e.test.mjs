@@ -1403,6 +1403,13 @@ test("a corrupt registration doesn't hide a valid one from pair_listen", async (
     await server.stop();
   }
   assert.match(ok(["status"]), /codex notifications: corrupt registration .*bob\.json/);
+  // Nor does it block registering, or re-registering, a healthy participant.
+  const register = (name, thread) => spawnSync("node", [CLI, "register", "--as", name], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread }, encoding: "utf8" });
+  for (const [name, thread] of [["alice", alice], ["codex", "01a13927-59e7-74b1-8f59-306c2811e2b5"], ["codex", "01a13927-59e7-74b1-8f59-306c2811e2b5"]]) {
+    const result = register(name, thread);
+    assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+  }
+  assert.match(register("codex", alice).stderr, /registered here as alice; run pair unregister --as alice first/, "a readable duplicate is still refused");
 });
 
 test("an unreadable unrelated channel doesn't stop a valid session from listening", async (t) => {

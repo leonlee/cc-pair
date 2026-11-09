@@ -511,7 +511,15 @@ for (const author of ["claude", "codex"]) {
       assert.equal(run(["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
       const result = run(["start", "--as", author, "--claude", process.execPath, "--codex", process.execPath]);
       assert.equal(result.status, 1);
-      assert.match(result.stderr, /a manual Codex session is registered here/);
+      assert.match(result.stderr, /a manual Codex session is registered here as codex; stop it and run pair unregister --as codex before starting auto mode/);
+      // The command names its participant, so it works even with PAIR_AGENT set to someone else.
+      assert.equal(run(["unregister", "--as", "codex"], { PAIR_AGENT: "bob" }).status, 0);
+      assert.match(run(["status"]).stdout, /codex notifications: no session registered/, "the suggested command cleared codex");
+      assert.equal(run(["register", "--as", "bob"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
+      const named = run(["start", "--as", author, "--claude", process.execPath, "--codex", process.execPath]);
+      assert.match(named.stderr, /registered here as bob; stop it and run pair unregister --as bob before starting auto mode/);
+      assert.equal(run(["unregister", "--as", "bob"]).status, 0);
+      assert.match(run(["status"]).stdout, /codex notifications: no session registered/, "the suggested command cleared it");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1413,7 +1421,7 @@ test("--serve-worktrees: enrollment refuses what it can't validate", { timeout: 
   mkdirSync(channel, { recursive: true });
   writeFileSync(join(channel, "codex.session"), JSON.stringify({ thread: "11111111-1111-4111-8111-111111111111", worktree: c1, registeredAt: "x" }));
   const registered = await asSubagent(f, owner, c1, ["send", "request", "-"], "x");
-  assert.match(registered.out, /a manual Codex session is registered there/);
+  assert.match(registered.out, /a manual Codex session is registered there as codex; stop it and run pair unregister --as codex in it first/);
 
   // Another owner (or a reset) already holds the second worktree's socket.
   const c2 = addChild(f, "c2");

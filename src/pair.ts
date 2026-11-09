@@ -832,7 +832,15 @@ function register(channel: string, root: string, name: Agent): string {
     throw new PairError("register must run in a Codex session's shell: CODEX_THREAD_ID is not set");
   }
   // One session is one participant: pair_listen must know whose messages to watch.
-  const elsewhere = registeredNames(channel).find((other) => other !== name && readRegistration(channel, other)?.thread === thread);
+  // A corrupt peer is that peer's problem (status reports it), as in pair_listen: it can't block this registration.
+  const sameThread = (other: Agent): boolean => {
+    try {
+      return readRegistration(channel, other)?.thread === thread;
+    } catch {
+      return false;
+    }
+  };
+  const elsewhere = registeredNames(channel).find((other) => other !== name && sameThread(other));
   if (elsewhere) {
     throw new PairError(`this codex session is registered here as ${elsewhere}; run pair unregister --as ${elsewhere} first`);
   }
@@ -847,6 +855,17 @@ function register(channel: string, root: string, name: Agent): string {
   const replaced = previous && previous.thread !== thread ? ` (replaced ${previous.thread})` : "";
   const as = name === "codex" ? "" : ` as ${name}`;
   return `registered codex session ${thread}${as} for ${root}${replaced}. Now call the pair_listen tool.`;
+}
+
+/** A refusal naming each manual Codex registration in the channel and the command that clears it. */
+function registrationRefusal(channel: string, where: string): string | undefined {
+  const names = registeredNames(channel);
+  if (names.length === 0) {
+    return undefined;
+  }
+  // Always --as: unregister otherwise defaults to PAIR_AGENT, which may name someone else.
+  const commands = names.map((name) => `pair unregister --as ${name}`).join(" and ");
+  return `a manual Codex session is registered ${where} as ${names.join(", ")}; stop it and run ${commands}`;
 }
 
 function unregister(channel: string, name: Agent): string {
@@ -2365,8 +2384,9 @@ async function main(argv: string[]): Promise<number> {
           process.chdir(startRoot); // so pair ps groups this launcher with the worktree it runs
           const startChannel = channelDir(startRoot);
           // Its listener would wake that session for either lane, and its pair wait could take the auto author's reviews.
-          if (registeredNames(startChannel).length > 0) {
-            throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
+          const refusal = registrationRefusal(startChannel, "here");
+          if (refusal) {
+            throw new PairError(`${refusal} before starting auto mode`);
           }
           return await startAuto({
             ...choices, authorName, reviewerName, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
@@ -2391,7 +2411,7 @@ async function main(argv: string[]): Promise<number> {
             // A served worktree's channel sits next to this one, under the same PAIR_HOME, whatever the caller's says.
             channelOf: (childRoot) => join(dirname(startChannel), basename(channelDir(childRoot))),
             stateDirOf: stateDir,
-            registered: (childChannel) => registeredNames(childChannel).length > 0,
+            registered: (childChannel) => registrationRefusal(childChannel, "there"),
           });
         } catch (error) { throw new PairError(errorMessage(error)); }
       }
