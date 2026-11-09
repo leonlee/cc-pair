@@ -1,33 +1,36 @@
 # cc-pair
 
-**Abstract.** `pair` lets Claude Code and Codex review each other's work. One agent authors a change,
-the other reviews it, and they exchange messages through files in a shared directory. Roles are
-symmetric. In auto mode, `pair start` opens the author and runs the other agent as the reviewer for
-each round. In manual mode, you run both agents yourself.
+**Abstract.** `pair` lets Claude Code and Codex review each other's work, or their own: Claude can
+review Claude, and Codex can review Codex. One agent authors a change, the other reviews it, and they
+exchange messages through files in a shared directory. Roles are symmetric. In auto mode,
+`pair start` opens the author and runs a reviewer for each round. In manual mode, you run both
+agents yourself.
 
 Features:
 
 - **Two modes.** Auto mode runs the author and starts the reviewer for each round, returning the
   review inline ([Auto mode](#3-auto-mode)). In manual mode you run both agents, and an MCP server
-  wakes Codex without polling ([Manual mode](#4-manual-mode)).
+  wakes Codex without polling ([Manual mode](#5-manual-mode)).
+- **Any pairing.** Cross-vendor by default; same-vendor pairs and any named participants, such as
+  `alice` and `bob`, in either mode ([Participants](#4-participants)).
 - **Code review.** Numbered findings with severity and an `approve` or `changes` verdict. Findings
-  still open at the round cap escalate to you ([Workflows](#5-workflows)).
+  still open at the round cap escalate to you ([Workflows](#6-workflows)).
 - **Spec review.** Plans and design docs in any format, such as a Markdown plan or an OpenSpec
-  change; a later code review can cite the approved spec ([Spec review](#51-spec-review)).
+  change; a later code review can cite the approved spec ([Spec review](#61-spec-review)).
 - **Brainstorms.** Ideas before there's a design, with a fixed turn budget and a closing summary of
-  options and open decisions ([Brainstorms](#52-brainstorms)).
+  options and open decisions ([Brainstorms](#62-brainstorms)).
 - **Parallel work.** Subagents in their own worktrees, each with its own review loop, up to N
-  reviews at once ([Parallel work](#53-parallel-work)).
+  reviews at once ([Parallel work](#63-parallel-work)).
 - **Live reviewer settings.** `pair reviewer` changes the reviewer's model or effort without a
   restart ([Changing the reviewer](#35-changing-the-reviewer)).
 - **Worktrees.** One channel per worktree, so pairs run side by side; `pair start --worktree`
-  creates or reuses one ([Worktrees](#6-worktrees)).
+  creates or reuses one ([Worktrees](#7-worktrees)).
 - **Recovery.** Resumable author conversations, failed rounds that keep the request on disk for a
   retry, history, and reset ([Author conversations](#33-author-conversations),
-  [Maintenance](#8-maintenance)).
+  [Maintenance](#9-maintenance)).
 - **Guard rails.** Reviewers are read-only by instruction, nothing loosens their permissions, and
   the author can't pick its reviewer's model
-  ([Security considerations](#10-security-considerations)).
+  ([Security considerations](#11-security-considerations)).
 - **Small.** One Node CLI with no runtime dependencies; the agents learn it from a Claude skill and
   an `AGENTS.md` section, and you ask in your own words.
 
@@ -53,12 +56,15 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as described in RFC 2119.
 
 - **Channel**: the directory `~/.pair/<repo>-<hash>/` (under `$PAIR_HOME` if set). Each git
   worktree has its own channel, derived from its root.
-- **Lane**: one direction within a channel, `claude-to-codex/` or `codex-to-claude/`, named by
-  the author.
+- **Participant**: a name for one side of a pair, such as `claude`, `codex` or `alice`. The CLI
+  that runs it, Claude Code or Codex, is a property of the session, not of the name
+  ([Participants](#4-participants)).
+- **Lane**: one direction between two participants, `<author>-to-<reviewer>/`, such as
+  `claude-to-codex/`.
 - **Thread**: one exchange in a lane, stored as numbered messages: `request`, then alternating
   `review` and `response`. A review closes when the reviewer approves; if findings remain open after
   `PAIR_MAX_ROUNDS` rounds (default 3), it is **escalated** and both agents stop and ask the user. A
-  [brainstorm](#52-brainstorms) closes as **completed**.
+  [brainstorm](#62-brainstorms) closes as **completed**.
 - **Auto session**: one `pair start` run: the interactive author, the reviewer it starts for each
   round, and the processes that supervise them.
 
@@ -99,14 +105,17 @@ sessions that were open before setup.
 <a id="5-auto-mode"></a>
 ## 3. Auto mode
 
-Auto mode runs on macOS and Linux. Both CLIs MUST be installed and signed in, and `pair start`
-MUST be run in your own terminal, outside an agent session. On Windows, or to run both agents
-yourself, use [manual mode](#4-manual-mode).
+Auto mode runs on macOS and Linux. The CLIs it runs MUST be installed and signed in, and
+`pair start` MUST be run in your own terminal, outside an agent session. On Windows, or to run both
+agents yourself, use [manual mode](#5-manual-mode).
 
 ```sh
-pair start --as claude    # interactive Claude, automatic Codex reviewer
-pair start --as codex     # interactive Codex, automatic Claude reviewer
+pair start --as claude                        # interactive Claude, automatic Codex reviewer
+pair start --as codex                         # interactive Codex, automatic Claude reviewer
+pair start --as claude --reviewer-cli claude  # Claude reviewed by Claude (claude_reviewer)
 ```
+
+Other pairings, and the options that choose them, are in [Participants](#4-participants).
 
 Give the author a task as usual. Each request or response it sends starts the other agent as a
 non-interactive reviewer for one round, and the review comes back inline to the author's
@@ -133,13 +142,14 @@ started. `-y` starts without waiting.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--worktree NAME` | current worktree | Run in the worktree `../<repo>-NAME` ([Worktrees](#6-worktrees)) |
+| `--cli`, `--reviewer NAME`, `--reviewer-cli` | from `--as` | The author's CLI, and the reviewer's name and CLI ([Participants](#4-participants)) |
+| `--worktree NAME` | current worktree | Run in the worktree `../<repo>-NAME` ([Worktrees](#7-worktrees)) |
 | `--resume` | new conversation | Resume the author conversation pair last recorded for the session's worktree ([Author conversations](#33-author-conversations)) |
 | `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias, passed as given (Codex IDs are case-sensitive) |
 | `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
 | `--reviewer-args="ARGS"` | none | More reviewer options, space-separated ([Forwarded arguments](#32-forwarded-arguments)) |
-| `--serve-worktrees` | off | Also review subagents' own worktrees of this repository ([Parallel work](#53-parallel-work)) |
+| `--serve-worktrees` | off | Also review subagents' own worktrees of this repository ([Parallel work](#63-parallel-work)) |
 | `--reviewers N` | 1 (max 8) | Review rounds at once, across all served worktrees; needs `--serve-worktrees` |
 | `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
 | `--timeout SECONDS` | 900 (max 86400) | Limit per review round; the author has none |
@@ -175,7 +185,7 @@ The lists are allowlists because unlisted options can turn the author into a pri
 session (`-p`, `--bg`), select a Codex subcommand, move the author away from its channel (`--cd`,
 `--worktree`; use pair's `--worktree` instead), or replace settings pair passes. The reviewer list
 excludes everything that changes its tools, permissions or sandbox
-([Security considerations](#10-security-considerations)). Codex reviewer options must also work with
+([Security considerations](#11-security-considerations)). Codex reviewer options must also work with
 `exec resume`.
 
 ### 3.3. Author conversations
@@ -227,13 +237,13 @@ pair stop      # stop the author, its reviewers and their tools
 ```
 
 - At most one launcher owns a worktree. A registered manual Codex session blocks `pair start`
-  until `pair unregister`.
+  until `pair unregister --as NAME`.
 - A reviewer that fails to start, ends without a verdict or times out keeps the request, and the
   error includes the reviewer's own message. The author retries the round with
   `pair wait --as <author>`, with the same reviewer settings; to change them first, see
   [Changing the reviewer](#35-changing-the-reviewer).
 - With `--serve-worktrees`, `pair stop` in the session's worktree also stops reviews queued or
-  running for subagent worktrees; their requests stay on disk ([Parallel work](#53-parallel-work)).
+  running for subagent worktrees; their requests stay on disk ([Parallel work](#63-parallel-work)).
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
   stale socket can remain; `pair status` names it, and it MUST be inspected and removed by hand.
 - The author has the terminal's streams but no controlling terminal: programs that need `/dev/tty`,
@@ -261,20 +271,71 @@ change applies to new threads and to the restart command that `pair stop` prints
 example after a mistyped model. Its next round starts a new reviewer conversation that reads the
 thread so far. Then tell the author to retry.
 
-## 4. Manual mode
+## 4. Participants
+
+A pair is two participants: one authors, the other reviews. `claude` and `codex` are the default
+names, each partnered with the other, so nothing changes unless you name others. A name is lowercase
+letters, digits and underscores, up to 32 characters, starting with a letter. Each pair of names has
+its own lane, so a participant can have one open thread with each partner.
+
+**Auto mode.** `--as` names the author; the options below choose its CLI and its reviewer:
+
+| Option | Default |
+|---|---|
+| `--cli claude\|codex` | The author's name, if it is `claude` or `codex`; required otherwise |
+| `--reviewer-cli claude\|codex` | Without `--reviewer`, the CLI the author doesn't use; with `--reviewer claude` or `codex`, that CLI; required for other reviewer names |
+| `--reviewer NAME` | With one CLI on both sides, `<cli>_reviewer`; otherwise the author's default partner (`claude` for `codex`, `codex` for `claude`); required for other authors |
+
+```sh
+pair start --as codex --reviewer-cli codex                              # codex reviewed by codex_reviewer
+pair start --as alice --cli claude --reviewer bob --reviewer-cli claude  # two Claude participants
+```
+
+Only the CLIs the pairing uses must be installed. A same-CLI reviewer gets its own conversation per
+thread, never the author's. The summary, `pair status` and the restart command show the pairing; it
+can't change while the session runs.
+
+**Manual mode.** Each session needs its name and partner. Set them when you start the agent:
+
+```sh
+PAIR_AGENT=alice PAIR_PARTNER=bob claude     # terminal A: the author
+PAIR_AGENT=bob PAIR_PARTNER=alice claude     # terminal B: "be my reviewer"
+```
+
+A Codex session may run its commands in Codex's shared background service, which doesn't see the
+terminal's environment, so give Codex its variables as configuration instead:
+
+```sh
+codex -c 'shell_environment_policy.set.PAIR_AGENT="alice"' -c 'shell_environment_policy.set.PAIR_PARTNER="bob"'
+```
+
+Or tell the agent in words: "you are bob; your partner is alice". Without either, a Claude session is
+`claude` and a Codex session `codex`, as before. The agents pass `--as` on every command and `--to`
+on every `send`; a reply goes to whoever sent the message, as the `== next:` line of `pair wait`
+says. A Codex participant other than `codex` registers for wake-ups with `pair register --as NAME`.
+
+**Compatibility.** Nothing on disk is renamed: existing lanes, history and registrations work as
+they are. Names other than `claude` and `codex` need this version on both sides: an older pair
+refuses them, its `status`, `history` and `reset` don't see their lanes, and an older `pair mcp`
+wakes only `codex`, so restart Codex after upgrading.
+
+<a id="4-manual-mode"></a>
+## 5. Manual mode
 
 Start Claude Code and Codex in separate terminals in the same worktree, after `pair init`.
 
 1. In the reviewer's terminal, say **"be my reviewer"**. Claude waits on `pair wait` in a background
-   command; Codex registers and ends its turn until woken ([Waking Codex](#41-waking-codex)).
-2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude").
+   command; Codex registers and ends its turn until woken ([Waking Codex](#51-waking-codex)).
+2. In the author's terminal, finish a task and say **"ask codex for a review"** (or "ask claude",
+   or the partner's name).
 3. The author verifies each finding, then fixes it or rejects it with a reason, and replies.
 4. The thread ends on approval or escalation.
 
-Spec reviews and brainstorms work the same way ([Workflows](#5-workflows)).
+Spec reviews and brainstorms work the same way ([Workflows](#6-workflows)).
 
 <a id="31-waking-codex-manual-mode"></a>
-### 4.1. Waking Codex
+<a id="41-waking-codex"></a>
+### 5.1. Waking Codex
 
 A finished background command does not resume Codex, and a polling `pair wait` costs a model call
 per check. Codex therefore never polls: pair's MCP server wakes it when a message arrives. Register
@@ -284,7 +345,7 @@ the server once; `init` prints the command with your paths:
 codex mcp add --env 'PAIR_CODEX=/opt/homebrew/bin/codex' pair -- '/path/to/node_modules/claude-codex-pair/dist/pair.js' mcp
 ```
 
-Codex then runs `pair register` and calls the `pair_listen` tool before waiting. When a message for
+Codex then runs `pair register --as <its name>` and calls the `pair_listen` tool before waiting. When a message for
 it is pending, the server runs `codex queue` with a fixed note that never contains message text.
 
 - The command SHOULD point at the installed package, not at a checkout you edit.
@@ -296,7 +357,7 @@ it is pending, the server runs `codex queue` with a fixed note that never contai
   the server again.
 - `pair_listen` needs MCP tool approval: the `never` approval policy is unsupported. With
   `on-request`, approve the first call.
-- Notifications stop after `pair unregister` ("stop as reviewer"), or when Codex's background service
+- Notifications stop after `pair unregister --as <its name>` ("stop as reviewer"), or when Codex's background service
   unloads the session, about 1–2 minutes after its last window closes. A message in that gap still
   starts a turn with no window attached.
 - Without the server, Codex checks once, says it cannot be woken, and checks again only when asked
@@ -305,11 +366,13 @@ it is pending, the server runs `codex queue` with a fixed note that never contai
   `$XDG_STATE_HOME` if absolute), rotated at 256 KB. `pair status` shows the registration and the
   last listener event.
 
-## 5. Workflows
+<a id="5-workflows"></a>
+## 6. Workflows
 
 Ask the author in your own words; it runs the pair commands. In Claude Code, `/pair <request>`
 loads pair's instructions explicitly; Codex always has them in `AGENTS.md`. The examples name codex
-as the reviewer; with a Codex author, say claude. Every workflow works in both modes.
+as the reviewer; with a Codex author, say claude, or use your partner's name. Every workflow works in
+both modes.
 
 | Ask the author | The reviewer | The thread ends |
 |---|---|---|
@@ -321,7 +384,8 @@ as the reviewer; with a Codex author, say claude. Every workflow works in both m
 For a larger change, chain them: brainstorm the approach, write a plan and have it reviewed, then
 implement it and cite the spec review in the code review.
 
-### 5.1. Spec review
+<a id="51-spec-review"></a>
+### 6.1. Spec review
 
 A spec, plan or design doc is reviewed like code, in any format: a Markdown plan, an OpenSpec
 change, an ADR. The request names the document's paths and the commit they're at, or says they're
@@ -344,7 +408,8 @@ reviewed in one worktree can be cited from another, a served subagent's included
 channels with the caller's `PAIR_HOME`. Pair parses neither section; this is part of the agents'
 instructions.
 
-### 5.2. Brainstorms
+<a id="52-brainstorms"></a>
+### 6.2. Brainstorms
 
 A brainstorm is for ideas before there's a design. The author opens it with
 `pair send request --brainstorm`, giving the problem, the constraints and what's decided, and may
@@ -366,7 +431,8 @@ the reviewer to complete. A brainstorm never escalates, and `pair history` lists
 Both agents MUST run pair 0.8.0 or later: an older pair rejects a brainstorm as a corrupt message
 instead of reviewing it as code.
 
-### 5.3. Parallel work
+<a id="53-parallel-work"></a>
+### 6.3. Parallel work
 
 An author MAY split work across subagents, in one of three shapes:
 
@@ -379,7 +445,7 @@ An author MAY split work across subagents, in one of three shapes:
 - **Separate PRs, reviewed in turn.** The author checks out each branch in the session's worktree
   and finishes that PR's review loop before the next.
 - **Separate PRs, reviewed in parallel.** Run one `pair start --worktree NAME` session per PR
-  ([Worktrees](#6-worktrees)), or let one session serve its subagents' worktrees (below).
+  ([Worktrees](#7-worktrees)), or let one session serve its subagents' worktrees (below).
 
 Approval of separate pieces doesn't cover a later merge of their work; review the integrated result
 as well.
@@ -432,7 +498,8 @@ and lock them. After the session, check each one's base and changes before openi
 <a id="5-worktrees"></a>
 <a id="52-worktrees"></a>
 <a id="6-worktrees-in-manual-mode"></a>
-## 6. Worktrees
+<a id="6-worktrees"></a>
+## 7. Worktrees
 
 Each worktree has its own channel, so pairs in different worktrees run in parallel without seeing
 each other's messages. The author and reviewer MUST run in the same worktree, since the reviewer
@@ -468,32 +535,34 @@ If messages do not arrive, compare the `channel:` line of `pair status` in each 
 worktree leaves its channel; delete the directory that `pair status` reports.
 
 <a id="6-commands"></a>
-## 7. Commands
+<a id="7-commands"></a>
+## 8. Commands
 
 Agents run `send` and `wait`; users mostly run `start`, `stop`, `status`, `reviewer`, `history` and
 `upgrade`.
 `pair help <command>` describes each command and its options.
 
 ```
-pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]     # auto mode
+pair start --as NAME [--cli CLI] [--reviewer NAME] [--reviewer-cli CLI] [options] [-- AUTHOR_ARGS...]
 pair stop
 pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
-pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict VERDICT] <file|->
+pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict VERDICT] <file|->
                              # approve|changes, or continue|complete in a brainstorm
-pair wait --as <claude|codex> [--timeout seconds]   # default 540; prints "no message … yet"
+pair wait --as NAME [--timeout seconds]   # default 540; prints "no message … yet"
 pair status
 pair history [thread-id]     # finished threads in this repository's worktrees, or one by any part of its id
 pair clean --keep N          # delete all but the N newest finished threads
-pair reset [--as <claude|codex>] [--dry-run]
+pair reset [--as NAME] [--dry-run]
 pair init | uninit | upgrade
-pair register | unregister   # run by Codex: let pair_listen notify this session
+pair register | unregister [--as NAME]   # run by Codex: let pair_listen notify this session
 pair mcp                     # MCP server for Codex (manual mode)
 pair ps [-v]
 pair help [command]          # same as pair <command> --help
 ```
 
-`pair status` reports the channel, the worktree, the version, each lane's state, the instruction
-files on disk, the Codex registration and the auto session:
+`pair status` reports the channel, the worktree, the version, each lane's state (the two default
+lanes, and any other lane in the channel), the instruction files on disk, the Codex registrations and
+the auto session:
 
 ```
 channel: /Users/you/.pair/your-repo-12345678
@@ -522,18 +591,20 @@ and `init` also report a newer npm release, checked at most daily.
 A channel access failure (`EACCES`, `EPERM`) names the path and prints the sandbox snippets for it.
 
 <a id="7-maintenance"></a>
-## 8. Maintenance
+<a id="8-maintenance"></a>
+## 9. Maintenance
 
 <a id="71-reset"></a>
-### 8.1. Reset
+<a id="81-reset"></a>
+### 9.1. Reset
 
 `pair reset` clears stale pending requests by moving whole lanes to
 `<channel>/resets/<reset-id>/` and printing the path.
 
 ```sh
 pair reset --dry-run      # preview
-pair reset                # both lanes
-pair reset --as claude    # only requests Claude authored
+pair reset                # every lane
+pair reset --as claude    # only lanes claude authored
 ```
 
 Manual sessions SHOULD be stopped first. Reset refuses while an auto session owns the worktree
@@ -543,7 +614,8 @@ registrations are unchanged. `history` and `clean` ignore backups; delete them b
 failure names the backup already written.
 
 <a id="72-upgrade"></a>
-### 8.2. Upgrade
+<a id="82-upgrade"></a>
+### 9.2. Upgrade
 
 Run `pair upgrade` in your own terminal; agent sandboxes block the network and global installs. It
 installs the latest release and refreshes this worktree's instructions. Other worktrees refresh
@@ -553,10 +625,11 @@ an auto session in the same conversation, run `pair stop`, then `pair start --re
 ([Author conversations](#33-author-conversations)).
 
 <a id="73-uninstall"></a>
-### 8.3. Uninstall
+<a id="83-uninstall"></a>
+### 9.3. Uninstall
 
 Run `pair uninit` in each worktree. It removes the skill (unless edited), the pair section of
-`AGENTS.md` (or the file, if nothing else remains) and the Codex registration, and prints the
+`AGENTS.md` (or the file, if nothing else remains) and the Codex registrations, and prints the
 command to delete message history. Then:
 
 ```sh
@@ -567,19 +640,25 @@ npm uninstall -g claude-codex-pair
 and remove `~/.pair` from the sandbox settings.
 
 <a id="8-environment"></a>
-## 9. Environment
+<a id="9-environment"></a>
+## 10. Environment
+
+For Codex, set these with `-c 'shell_environment_policy.set.NAME="value"'` rather than in the
+terminal ([Participants](#4-participants)); `pair start` does this for the agents it launches.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PAIR_HOME` | `~/.pair` | Channel root. Relative paths resolve against the worktree root |
-| `PAIR_AGENT` | none | Default for `--as` |
+| `PAIR_AGENT` | none | Your participant name: the default for `--as` |
+| `PAIR_PARTNER` | the default partner | Whom a new request goes to without `--to` ([Participants](#4-participants)) |
 | `PAIR_MAX_ROUNDS` | `3` | Review rounds before escalation; a brainstorm's turns, fixed when it opens |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
 | `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
 | `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |
 
 <a id="9-security-considerations"></a>
-## 10. Security considerations
+<a id="10-security-considerations"></a>
+## 11. Security considerations
 
 - **Managed reviewers.** Codex runs with its `workspace-write` sandbox plus channel access; source
   edits are forbidden by its instructions, not by the OS. Claude runs with `dontAsk`, so beyond your

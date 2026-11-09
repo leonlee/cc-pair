@@ -7,6 +7,12 @@ import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { withAutoStopped } from "../dist/auto.js";
+// The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
+for (const name of Object.keys(process.env)) {
+  if (name.startsWith("PAIR_")) {
+    delete process.env[name];
+  }
+}
 
 const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
 const exec = promisify(execFile);
@@ -163,6 +169,17 @@ test("reset recovers legacy, corrupt, hidden, and older requests without parsing
   f.request("claude", "Recovered");
 });
 
+test("reset backs up a lane path that became a regular file", (t) => {
+  const f = fixture(t);
+  mkdirSync(f.channel, { recursive: true });
+  writeFileSync(join(f.channel, "claude-to-codex"), "not a lane");
+  assert.equal(f.run(["send", "request", "--as", "claude", "-"], "x").code, 1);
+  assert.match(f.ok(["reset", "--as", "claude", "--dry-run"]), /claude-to-codex: unparseable/);
+  const saved = f.backup(f.ok(["reset", "--as", "claude"]));
+  assert.equal(readFileSync(join(saved, "claude-to-codex"), "utf8"), "not a lane");
+  f.request("claude", "Recovered");
+});
+
 test("reset preserves lane symlinks themselves instead of following them", (t) => {
   const f = fixture(t);
   const outside = join(f.root, "outside");
@@ -228,11 +245,14 @@ test("auto startup cannot bind while the manual reset owns the socket", async (t
 test("invalid reset arguments do not move requests", (t) => {
   const f = fixture(t);
   const request = f.request("claude");
-  for (const args of [["reset", "--as", "unknown"], ["reset", "unexpected-id"]]) {
+  for (const args of [["reset", "--as", "Not-A-Name"], ["reset", "unexpected-id"]]) {
     assert.equal(f.run(args).code, 1);
     assert.ok(existsSync(request));
     assert.ok(!existsSync(join(f.channel, "resets")));
   }
+  // A valid name with no lanes resets nothing, and leaves claude's lane alone.
+  assert.match(f.ok(["reset", "--as", "alice"]), /nothing to reset/);
+  assert.ok(existsSync(request));
   assert.match(f.ok(["reset", "--help"]), /pair reset/);
 });
 
