@@ -8,6 +8,12 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { autoCall, FAILED_REVIEW_RULE } from "../dist/auto.js";
+// The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
+for (const name of Object.keys(process.env)) {
+  if (name.startsWith("PAIR_")) {
+    delete process.env[name];
+  }
+}
 
 const exec = promisify(execFile);
 const CLI = join(import.meta.dirname, "..", "dist", "pair.js");
@@ -117,6 +123,7 @@ if (reviewer) {
   }
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
+  write('author.env.json', JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('PAIR_')))));
   if (process.env.TEST_AUTHOR_SESSION) process.env[cli === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
   write('author.cwd', process.cwd());
   write('author.bin', process.env.PAIR_BIN);
@@ -859,7 +866,14 @@ test("a codex author resumes by ID, and pair stop can resume it again", { timeou
   const f = fixture(t, { author: "codex", scenario: "hold", authorArgs: ["resume", id, "-m", "fixture-model"] });
   await until(() => existsSync(f.file("author.args.json")), "author started");
   const args = JSON.parse(f.read("author.args.json"));
-  assert.deepEqual(args.slice(0, 7), ["resume", id, "-m", "fixture-model", "--cd", realpathSync(f.root), "--"], "--cd keeps a resumed session in this worktree; the prompt is its new message");
+  assert.deepEqual(args.slice(0, 6), ["resume", id, "-m", "fixture-model", "--cd", realpathSync(f.root)], "--cd keeps a resumed session in this worktree");
+  assert.equal(args.at(-2), "--", "the prompt is its new message");
+  // A session on Codex's shared app-server daemon doesn't get the author's environment: pair's variables also go in as config.
+  const config = Object.fromEntries(args.slice(6, -2).map((arg, i, all) => i % 2 ? [] : (assert.equal(arg, "-c"), all[i + 1].split(/=(.*)/s).slice(0, 2))).filter((pair) => pair.length));
+  const env = JSON.parse(f.read("author.env.json"));
+  for (const name of ["PAIR_AGENT", "PAIR_PARTNER", "PAIR_AUTO_ROLE", "PAIR_AUTO_RUN", "PAIR_AUTO_OWNER", "PAIR_BIN", "PAIR_HOME"]) {
+    assert.equal(config[`shell_environment_policy.set.${name}`], JSON.stringify(env[name]), name);
+  }
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(resumed\\)`));
   assert.match((await f.command(["stop"])).stdout, new RegExp(` -- resume ${id} -m fixture-model$`, "m"));
 });

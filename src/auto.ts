@@ -216,6 +216,13 @@ export function autoCall(stateDir: string, request: object, timeoutMs = 3000): P
   });
 }
 
+/** Codex options that set pair's variables for the commands a Codex session runs, wherever it runs them. */
+function codexShellEnv(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
+    .filter(([name, value]) => name.startsWith("PAIR_") && value !== undefined)
+    .flatMap(([name, value]) => ["-c", `shell_environment_policy.set.${name}=${JSON.stringify(value)}`]);
+}
+
 /** A participant as status shows it: just the CLI when the name is the CLI's own. */
 function who(name: string | undefined, cli: Agent): string {
   return !name || name === cli ? cli : `${name} (${cli})`;
@@ -1064,6 +1071,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     // No run-specific path: Claude records the system prompt and reuses it when the conversation is resumed in a later run.
     const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewerName} (${reviewer === "claude" ? "Claude Code" : "Codex"}) as your automatically managed reviewer. Your pair name is ${authorName}. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${authorName} --to ${reviewerName} -. Follow-up replies use pair send response --as ${authorName} --to ${reviewerName} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. To brainstorm a design with ${reviewerName} before a task, use pair send request --brainstorm: each contribution comes back inline the same way, and you answer with pair send response until ${reviewerName} completes it. If you delegate implementation, tell subagents not to run pair commands and to return their changes and validation results; you own the review loop, integrate their work here (or, for separate PRs, review each branch here in turn), and keep this checkout stable during each review round.${options.serveWorktrees ? ` This session serves subagent worktrees: a subagent working in its own git worktree of this repository runs its own review loop there. Give each such subagent these rules in its task: from your worktree, send requests and responses with "$PAIR_BIN" send request --as ${authorName} --to ${reviewerName} - and "$PAIR_BIN" send response --as ${authorName} --to ${reviewerName} -, each as a background command; each returns the review inline, possibly after waiting its turn. Keep your worktree unchanged while a review is queued or running, fix between rounds, and finish the loop. Don't remove the worktree. Report the outcome to the parent: approved, escalated, or the failure as printed. Subagents working in this checkout still return their work without running pair.` : ""} Do not register, call pair_listen, or start idle waits in auto mode. ${FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", authorName)} For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
     // The user's options go first; codex gets -- before the prompt so a multi-value option like --image can't take it.
+    const authorEnv = childEnv("author");
     const authorArgs = options.author === "claude"
       ? [
         ...options.authorArgs, ...(options.session.kind === "new" ? ["--session-id", options.session.id] : []),
@@ -1073,9 +1081,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         `Act as the pair author described in your system instructions and wait for the user's task. Run pair as "$PAIR_BIN" in this launch; an absolute .../auto-*/bin/pair path from an earlier launch no longer exists. In this launch your pair name is ${authorName} and your reviewer is ${reviewerName}: pass --as ${authorName} --to ${reviewerName}, even if earlier instructions in this conversation named others.`,
       ]
       // --cd: a resumed Codex session may otherwise switch to the directory it was recorded in, off this channel.
-      : [...options.authorArgs, "--cd", options.root, "--", authorPrompt];
+      // The Codex TUI may run its session on Codex's shared app-server daemon, whose commands get the daemon's
+      // environment instead of this one; pair's variables also go in as config, which reaches the session's commands.
+      : [...options.authorArgs, "--cd", options.root, ...codexShellEnv(authorEnv), "--", authorPrompt];
     if (options.author === "claude") console.error(`pair: Claude sandbox.network.allowUnixSockets includes ${path} for this session only`);
-    sendGuardian({ type: "launch", job: { id: "author", executable: paths[options.author]!, args: authorArgs, cwd: options.root, env: childEnv("author"), interactive: true, timeoutMs: 0 } satisfies Job });
+    sendGuardian({ type: "launch", job: { id: "author", executable: paths[options.author]!, args: authorArgs, cwd: options.root, env: authorEnv, interactive: true, timeoutMs: 0 } satisfies Job });
     state.phase = "idle";
     update();
     await guardianDone;

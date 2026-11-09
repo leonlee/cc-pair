@@ -302,7 +302,14 @@ PAIR_AGENT=alice PAIR_PARTNER=bob claude     # terminal A: the author
 PAIR_AGENT=bob PAIR_PARTNER=alice claude     # terminal B: "be my reviewer"
 ```
 
-or tell the agent in words: "you are bob; your partner is alice". Without either, a Claude session is
+A Codex session may run its commands in Codex's shared background service, which doesn't see the
+terminal's environment, so give Codex its variables as configuration instead:
+
+```sh
+codex -c 'shell_environment_policy.set.PAIR_AGENT="alice"' -c 'shell_environment_policy.set.PAIR_PARTNER="bob"'
+```
+
+Or tell the agent in words: "you are bob; your partner is alice". Without either, a Claude session is
 `claude` and a Codex session `codex`, as before. The agents pass `--as` on every command and `--to`
 on every `send`; a reply goes to whoever sent the message, as the `== next:` line of `pair wait`
 says. A Codex participant other than `codex` registers for wake-ups with `pair register --as NAME`.
@@ -635,6 +642,9 @@ and remove `~/.pair` from the sandbox settings.
 <a id="8-environment"></a>
 <a id="9-environment"></a>
 ## 10. Environment
+
+For Codex, set these with `-c 'shell_environment_policy.set.NAME="value"'` rather than in the
+terminal ([Participants](#4-participants)); `pair start` does this for the agents it launches.
 
 | Variable | Default | Meaning |
 |---|---|---|
