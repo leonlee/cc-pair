@@ -208,7 +208,7 @@ test("help explains each command and its options", () => {
   assert.equal(ok(["help", "help"]), ok(["--help"]));
   assert.match(ok(["start", "-h"]), /--reviewer-effort LEVEL[\s\S]*--grace SECONDS/);
   assert.match(ok(["help", "send"]), /--verdict <approve\|changes>/);
-  assert.match(ok(["help", "unregister"]), /usage: pair register \| pair unregister/);
+  assert.match(ok(["help", "unregister"]), /usage: pair register \[--as NAME\] \| pair unregister \[--as NAME\]/);
   const unknown = run(["help", "nope"]);
   assert.equal(unknown.code, 1);
   assert.match(unknown.out, /unknown command "nope"/);

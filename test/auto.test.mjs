@@ -27,7 +27,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false, codexPath } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -61,6 +61,8 @@ const call = (args, input = '') => new Promise((resolve, reject) => {
   child.stdin.end(input);
 });
 const reviewer = process.env.PAIR_AUTO_ROLE === 'reviewer';
+// The CLI this fake plays: the owner says (PAIR_AUTO_CLI); an older owner named the agent after it.
+const cli = process.env.PAIR_AUTO_CLI || process.env.PAIR_AGENT;
 // The test creates the named file when the author may go on.
 const gate = async (name) => { while (!existsSync(join(root, name))) await new Promise((resolve) => setTimeout(resolve, 40)); };
 write(reviewer ? 'worker.pid' : 'author.pid', process.pid);
@@ -76,7 +78,7 @@ if (reviewer) {
   const session = '11111111-1111-4111-8111-' + String(count).padStart(12, '0');
   // Corrupt the lane before announcing the session, so recording the session must not read the lane.
   if (process.env.TEST_WORKER === 'corrupt') writeFileSync(join(dirname(process.env.PAIR_AUTO_MESSAGE), '002-review.md'), '---\\nfrom: nobody\\n---\\njunk\\n');
-  console.log(JSON.stringify(process.env.PAIR_AGENT === 'codex' ? {type:'thread.started', thread_id:session} : {type:'system',subtype:'init',session_id:session}));
+  console.log(JSON.stringify(cli === 'codex' ? {type:'thread.started', thread_id:session} : {type:'system',subtype:'init',session_id:session}));
   const hangs = process.env.TEST_WORKER === 'hang' || (process.env.TEST_WORKER === 'hang-c1' && inC1);
   if (hangs || process.env.TEST_WORKER === 'leaky') {
     const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], {stdio:'inherit'});
@@ -89,7 +91,7 @@ if (reviewer) {
   }
   if (process.env.TEST_WORKER === 'model-error' || process.env.TEST_WORKER === 'noisy') {
     const line = JSON.stringify(process.env.TEST_WORKER === 'noisy' ? {type:'error', message:'stream hiccup, retrying'}
-      : process.env.PAIR_AGENT === 'claude' ? {type:'result', subtype:'error_during_execution', is_error:true, errors:['No conversation found with session ID: x', 7, ' ']}
+      : cli === 'claude' ? {type:'result', subtype:'error_during_execution', is_error:true, errors:['No conversation found with session ID: x', 7, ' ']}
       : {type:'turn.failed', error:{message:"The 'X' model is not supported\u001b[31m" + 'a'.repeat(5000)}});
     process.stdout.write(line.slice(0, 20));
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -115,7 +117,7 @@ if (reviewer) {
   }
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
-  if (process.env.TEST_AUTHOR_SESSION) process.env[process.env.PAIR_AGENT === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
+  if (process.env.TEST_AUTHOR_SESSION) process.env[cli === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
   write('author.cwd', process.cwd());
   write('author.bin', process.env.PAIR_BIN);
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
@@ -172,7 +174,7 @@ if (reviewer) {
     if (initRoot) assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
   }
   setup?.({ root, env });
-  const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+  const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", codexPath ?? fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   launcher.stdout.on("data", (data) => { output += data; });
   launcher.stderr.on("data", (data) => { output += data; });
@@ -1409,4 +1411,83 @@ test("--serve-worktrees: enrollment refuses what it can't validate", { timeout: 
     await new Promise((resolve) => taken.close(resolve)); // before the fixture checks that every socket is gone
   }
   assert.equal(reviewerCalls(f).length, 0);
+});
+
+// Named participants in auto mode: any CLI on either side, with names independent of CLIs.
+const pairings = [
+  { author: "claude", args: ["--reviewer-cli", "claude"], reviewer: "claude_reviewer", cli: "claude", restart: "--reviewer claude_reviewer --reviewer-cli claude" },
+  { author: "codex", args: ["--reviewer-cli", "codex"], reviewer: "codex_reviewer", cli: "codex", restart: "--reviewer codex_reviewer --reviewer-cli codex" },
+  { author: "alice", args: ["--cli", "claude", "--reviewer", "bob", "--reviewer-cli", "codex"], reviewer: "bob", cli: "codex", restart: "--cli claude --reviewer bob --reviewer-cli codex" },
+  { author: "alice", args: ["--cli", "codex", "--reviewer", "bob", "--reviewer-cli", "codex"], reviewer: "bob", cli: "codex", restart: "--cli codex --reviewer bob --reviewer-cli codex" },
+  // A default participant on the other CLI: the name stays the author's default partner.
+  { author: "claude", args: ["--cli", "codex", "--reviewer-cli", "claude"], reviewer: "codex", cli: "claude", restart: "--cli codex" },
+  { author: "codex", args: ["--cli", "claude", "--reviewer-cli", "codex"], reviewer: "claude", cli: "codex", restart: "--cli claude" },
+  // A custom author reviewed by a default name: its restart must keep --reviewer.
+  { author: "alice", args: ["--cli", "claude", "--reviewer", "codex"], reviewer: "codex", cli: "codex", restart: "--cli claude --reviewer codex --reviewer-cli codex" },
+];
+for (const { author, args, reviewer, cli, restart: pairing } of pairings) {
+  test(`auto ${author} with ${args.join(" ")}: a full loop under the reviewer's name and CLI`, { timeout: 20_000 }, async (t) => {
+    const f = fixture(t, { author, pairArgs: args });
+    assert.equal((await f.completed).code, 0, f.output());
+    assert.match(f.read("first.out"), new RegExp(`review from ${reviewer} · ${author}-to-${reviewer} · round 1 · verdict changes`));
+    assert.match(f.read("second.out"), /verdict approve/);
+    assert.match(f.read("third.out"), /verdict approve/);
+    const calls = JSON.parse(f.read("calls.json"));
+    assert.equal(calls.length, 3);
+    for (const call of calls) {
+      assert.equal(call.agent, reviewer);
+      assert.ok(cli === "codex" ? call.args.includes("exec") : call.args.includes("-p"), `launched as ${cli}`);
+      assert.match(call.args.at(-1), new RegExp(`You are ${reviewer}, a ${cli === "codex" ? "Codex" : "Claude Code"} reviewer[^\\n]*reviewing for ${author}`));
+    }
+    const resume = cli === "codex" ? "resume" : "--resume";
+    assert.equal(calls[1].args[calls[1].args.indexOf(resume) + 1], "11111111-1111-4111-8111-000000000001", "a thread's later round resumes its reviewer");
+    assert.ok(!calls[2].args.includes(resume), "a new thread gets a fresh reviewer conversation");
+    assert.match((await f.command(["history"])).stdout, new RegExp(`${author}-to-${reviewer}\\s+approved`));
+    // The restart command (known once the author's conversation is) repeats exactly the options
+    // that don't resolve to the same pairing without them.
+    const restart = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8")).restart;
+    const authorCli = args.includes("--cli") ? args[args.indexOf("--cli") + 1] : author;
+    if (authorCli === "claude") assert.ok(restart, "a new Claude author's restart command is known at launch");
+    if (restart) {
+      assert.match(restart, new RegExp(`pair start --as ${author} `));
+      assert.ok(restart.includes(` --grace 0.15 ${pairing} -- `), restart);
+    }
+  });
+}
+
+test("auto mode with two Claude CLIs needs no Codex install", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { pairArgs: ["--reviewer-cli", "claude"], codexPath: "/nonexistent/codex" });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(f.read("third.out"), /verdict approve/);
+});
+
+test("pair start refuses an incomplete or self pairing", () => {
+  const cases = [
+    [["--as", "alice"], /pass --cli claude\|codex: the CLI that runs the author alice/],
+    [["--as", "claude", "--reviewer", "bob"], /pass --reviewer-cli claude\|codex: the CLI that runs the reviewer bob/],
+    [["--as", "alice", "--cli", "claude"], /pass --reviewer NAME: the participant that reviews alice/],
+    [["--as", "alice", "--cli", "claude", "--reviewer", "alice", "--reviewer-cli", "codex"], /must be a different participant/],
+    [["--as", "claude", "--cli", "gemini"], /--cli must be one of: claude, codex/],
+  ];
+  for (const [args, pattern] of cases) {
+    const result = spawnSync(process.execPath, [CLI, "start", ...args, "-y"], { cwd: tmpdir(), env: { ...process.env, CLAUDECODE: "", CODEX_THREAD_ID: "", PAIR_AUTO_ROLE: "" }, encoding: "utf8" });
+    assert.equal(result.status, 1, args.join(" "));
+    assert.match(result.stderr, pattern, args.join(" "));
+  }
+  const elsewhere = spawnSync(process.execPath, [CLI, "status", "--reviewer", "bob"], { cwd: tmpdir(), encoding: "utf8" });
+  assert.match(elsewhere.stderr, /--cli, --reviewer and --reviewer-cli are only supported by pair start/);
+});
+
+test("an auto session ignores unrelated lanes: an older unread approval elsewhere isn't its verdict", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, {
+    setup: ({ root, env }) => {
+      const run = (args, input) => assert.equal(spawnSync(process.execPath, [CLI, ...args], { cwd: root, env, input, encoding: "utf8" }).status, 0);
+      run(["send", "request", "--as", "claude", "--to", "carol", "-"], "for carol");
+      run(["send", "review", "--as", "carol", "--to", "claude", "--verdict", "approve", "-"], "carol approves");
+    },
+  });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(f.read("first.out"), /review from codex · claude-to-codex · round 1 · verdict changes/);
+  assert.doesNotMatch(f.read("first.out"), /carol/);
+  assert.match((await f.command(["wait", "--as", "claude", "--timeout", "1"])).stdout, /review from carol · claude-to-carol[\s\S]*approved and closed/, "still there for a manual wait");
 });

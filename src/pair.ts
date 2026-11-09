@@ -1977,14 +1977,15 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 }
 
 const USAGE = `usage:
-  pair start --as <claude|codex> [--worktree NAME] [--resume] [-y] [--reviewer-model MODEL]
-             [--reviewer-effort LEVEL] [--reviewer-args="ARGS"] [--serve-worktrees [--reviewers N]]
-             [--claude /path] [--codex /path] [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
+  pair start --as NAME [--cli claude|codex] [--reviewer NAME] [--reviewer-cli claude|codex]
+             [--worktree NAME] [--resume] [-y] [--reviewer-model MODEL] [--reviewer-effort LEVEL]
+             [--reviewer-args="ARGS"] [--serve-worktrees [--reviewers N]] [--claude /path] [--codex /path]
+             [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
                                                       (change a running auto session's reviewer, without a restart)
-  pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict approve|changes|continue|complete] <file|->
-  pair wait --as <claude|codex> [--timeout seconds]   (prints "no message … yet" on timeout)
+  pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict approve|changes|continue|complete] <file|->
+  pair wait --as NAME [--timeout seconds]             (prints "no message … yet" on timeout)
   pair status
   pair history [thread-id]                            (list finished threads, or show one)
   pair clean --keep N                                 (delete all but the N newest finished threads)
@@ -2009,24 +2010,29 @@ environment:
 
 const AS_OPTION = "  --as <claude|codex>          who is running the command (default: $PAIR_AGENT)";
 
-const REGISTER_HELP = `usage: pair register | pair unregister
+const REGISTER_HELP = `usage: pair register [--as NAME] | pair unregister [--as NAME]
 
-Run by Codex in its own shell. register records this Codex session so the pair_listen tool from
-pair mcp wakes it when a message arrives. unregister stops the notifications; run it before
-pair start in this worktree.`;
+Run by Codex in its own shell. register records this Codex session as participant NAME (default
+codex) so the pair_listen tool from pair mcp wakes it when a message for NAME arrives. One session
+is one participant. unregister stops the notifications; run it before pair start in this worktree.`;
 
 const COMMAND_HELP: Record<string, string> = {
-  start: `usage: pair start --as <claude|codex> [options] [-- AUTHOR_ARGS...]
+  start: `usage: pair start --as NAME [options] [-- AUTHOR_ARGS...]
 
-Auto mode (macOS and Linux). Opens the --as agent interactively as the author. Each review request
-starts the other agent as a non-interactive reviewer for one round, and the review comes back
+Auto mode (macOS and Linux). Opens the --as participant interactively as the author. Each review
+request starts the reviewer participant non-interactively for one round, and the review comes back
 inline to the author's pair send. Run it in your own terminal, outside Claude or Codex. It first
 prints where it will run, the author's conversation and the reviewer's settings, and in a terminal
 waits for Enter; it runs pair init there if pair's instructions are missing. A Codex session
 registered with pair register blocks it; run pair unregister first.
 
 options:
-  --as <claude|codex>          the interactive author (default: $PAIR_AGENT)
+  --as NAME                    the interactive author (default: $PAIR_AGENT)
+  --cli claude|codex           the author's CLI (default: NAME, when NAME is claude or codex)
+  --reviewer NAME              the reviewer participant (default: the other of claude and codex;
+                               <cli>_reviewer when both use the same CLI)
+  --reviewer-cli claude|codex  the reviewer's CLI (default: the other CLI, or NAME when the reviewer
+                               is claude or codex). Same as --cli for a same-CLI pair.
   --worktree NAME              run everything in the git worktree ../<repo>-NAME. The first run
                                creates it on branch NAME (a new branch from HEAD, so uncommitted
                                changes stay here, or one tracking a remote NAME). Later runs reuse
@@ -2088,9 +2094,13 @@ options:
 Stop this worktree's auto session (pair start): the author, its managed reviewers, and their tools.
 When pair knows the author's conversation ID, it prints a command that starts the session again in
 this worktree and resumes that conversation; pair start --resume does the same with new options.`,
-  send: `usage: pair send <request|review|response> --as <claude|codex> [--brainstorm] [--verdict VERDICT] <FILE|->
+  send: `usage: pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict VERDICT] <FILE|->
 
 Send a message on this worktree's channel. The body is read from FILE, or from stdin with -.
+NAME is a participant: claude and codex are the defaults, any lowercase name (letters, digits, _)
+works. --to names the partner: for a request, else PAIR_PARTNER, else claude's or codex's default
+partner; for a review or response, the participant whose message pair wait delivered (its == next:
+line names it), required except between claude and codex.
   request    as the author, open a review thread (fails while your previous thread is still open)
   review     as the reviewer, reply to the waiting request or response; needs --verdict
   response   as the author, answer a review: what you fixed, rejected or deferred, and why
@@ -2171,7 +2181,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, cli: { type: "string" }, reviewer: { type: "string" }, "reviewer-cli": { type: "string" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -2202,6 +2212,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (values.to !== undefined && command !== "send") {
     throw new PairError("--to is only supported by pair send");
+  }
+  if ((values.cli !== undefined || values.reviewer !== undefined || values["reviewer-cli"] !== undefined) && command !== "start") {
+    throw new PairError("--cli, --reviewer and --reviewer-cli are only supported by pair start");
   }
   const root = worktreeRoot();
   const channel = channelDir(root);
@@ -2255,7 +2268,8 @@ async function main(argv: string[]): Promise<number> {
     try {
       // The author's own conversation ID, which its CLI sets for the commands it runs; the owner records it for pair stop.
       // A served subagent never reports one: the session's resume record is its root author's.
-      const author = servedChild ? undefined : me === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : process.env.CODEX_THREAD_ID;
+      const cli = process.env.PAIR_AUTO_CLI || me; // an older owner sets no PAIR_AUTO_CLI; its author is named after its CLI
+      const author = servedChild ? undefined : cli === "claude" ? process.env.CLAUDE_CODE_SESSION_ID : process.env.CODEX_THREAD_ID;
       await autoCall(owner, { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file, root, author }, 24 * 60 * 60 * 1000);
     } catch (error) {
       if (hasCode(error, "EPERM", "EACCES")) {
@@ -2271,10 +2285,28 @@ async function main(argv: string[]): Promise<number> {
         await runGuardian();
         return 0;
       case "start": {
-        const name = agent();
-        // Until auto mode takes --cli, its author is one of the default participants, named after its CLI.
-        if (!isBackend(name)) throw new PairError(`pair start --as must be claude or codex (got "${name}")`);
-        const me: Backend = name;
+        // The author and reviewer are participants; each has the CLI that runs it. The defaults keep
+        // today's command lines: --as claude means a Claude author reviewed by codex on Codex.
+        const authorName = agent();
+        const cliOf = (value: string, what: string): Backend => oneOf(value, BACKENDS, what);
+        const me: Backend = values.cli !== undefined ? cliOf(values.cli, "--cli")
+          : isBackend(authorName) ? authorName
+          : (() => { throw new PairError(`pass --cli claude|codex: the CLI that runs the author ${authorName}`); })();
+        const reviewer: Backend = values["reviewer-cli"] !== undefined ? cliOf(values["reviewer-cli"], "--reviewer-cli")
+          : values.reviewer === undefined ? partnerOf(me)
+          : isBackend(values.reviewer) ? values.reviewer
+          : (() => { throw new PairError(`pass --reviewer-cli claude|codex: the CLI that runs the reviewer ${values.reviewer}`); })();
+        const reviewerName = values.reviewer !== undefined ? named(values.reviewer, "--reviewer")
+          : reviewer === me ? `${reviewer}_reviewer`
+          : defaultPartner(authorName) ?? (() => { throw new PairError(`pass --reviewer NAME: the participant that reviews ${authorName}`); })();
+        if (reviewerName === authorName) throw new PairError("the reviewer must be a different participant from the author");
+        // Names and CLIs beyond the defaults, for the restart command: an option is left out only
+        // when the resolution above gives back the same value without it.
+        const pairing = [
+          ...(authorName === me ? [] : ["--cli", me]),
+          ...(reviewer === partnerOf(me) && reviewerName === defaultPartner(authorName) ? [] : ["--reviewer", reviewerName, "--reviewer-cli", reviewer]),
+        ];
+        const who = (name: string, cli: Backend) => name === cli ? cli : `${name} (${cli})`;
         try {
           if (rest.length !== passthrough.length) {
             throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
@@ -2291,7 +2323,7 @@ async function main(argv: string[]): Promise<number> {
             throw new PairError(`--reviewers must be a whole number from 1 to 8 (got "${values.reviewers}")`);
           }
           const choices = {
-            author: me, claude: values.claude, codex: values.codex, reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
+            author: me, reviewerCli: reviewer, claude: values.claude, codex: values.codex, reviewerModel: values["reviewer-model"], reviewerEffort: values["reviewer-effort"],
             authorArgs: passthrough, reviewerArgs: values["reviewer-args"]?.split(/\s+/).filter(Boolean) ?? [],
           };
           checkStart(choices);
@@ -2308,11 +2340,10 @@ async function main(argv: string[]): Promise<number> {
             recorded = `${found.id} (resumed: the last author conversation here, recorded ${found.at})`;
           }
           const session = authorSession(me, authorArgs);
-          const reviewer = me === "claude" ? "codex" : "claude";
           console.error([
             `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
-            `pair:   author ${me} · session ${session.kind === "resume" && recorded ? recorded : describeSession(session)}`,
-            `pair:   reviewer ${reviewer} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
+            `pair:   author ${who(authorName, me)} · session ${session.kind === "resume" && recorded ? recorded : describeSession(session)}`,
+            `pair:   reviewer ${who(reviewerName, reviewer)} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
             ...(serveWorktrees ? [`pair:   serves subagent worktrees · ${reviewers} reviewer${reviewers === 1 ? "" : "s"} at a time`] : []),
           ].join("\n"));
           // Before anything is created: a worktree, instruction files, the author record, the socket, any agent.
@@ -2332,22 +2363,22 @@ async function main(argv: string[]): Promise<number> {
             throw new PairError("a manual Codex session is registered here; stop it and run pair unregister before starting auto mode");
           }
           return await startAuto({
-            ...choices, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
+            ...choices, authorName, reviewerName, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
             restartOptions: [
-              ["--as", me], ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
-            ].flatMap(([name, value]) => value === undefined ? [] : [name!, value]).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`])
+              ["--as", authorName], ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
+            ].flatMap(([name, value]) => value === undefined ? [] : [name!, value]).concat(pairing).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`])
               .concat(serveWorktrees ? ["--serve-worktrees", ...(values.reviewers === undefined ? [] : ["--reviewers", values.reviewers])] : []),
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,
             serveWorktrees, reviewers, reviewerRules: reviewerRules(reviewer),
             target: (laneChannel) => {
-              const state = stateOf(listMessages(threadFor(laneChannel, me, reviewer)));
+              const state = stateOf(listMessages(threadFor(laneChannel, authorName, reviewerName)));
               return state.kind === "awaiting-review"
                 ? { file: state.last.file, thread: basename(dirname(state.last.file)), brainstorm: kindOf(state.last.status) === "brainstorm" }
                 : undefined;
             },
             reviewed: (laneChannel, file) => {
-              const messages = listMessages(threadFor(laneChannel, me, reviewer));
+              const messages = listMessages(threadFor(laneChannel, authorName, reviewerName));
               const index = messages.findIndex((message) => message.file === file);
               return index >= 0 && messages[index + 1]?.type === "review";
             },
