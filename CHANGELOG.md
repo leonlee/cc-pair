@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.0 (2026-11-09)
+
+Any two participants can pair, whatever CLI runs them: Claude can review Claude, Codex can review
+Codex, or you can name participants such as `alice` and `bob`, in manual and auto mode. A
+participant is a name; the CLI that runs it belongs to the session. Without new names nothing
+changes: `claude` and `codex` are the defaults and each other's partner, and existing channels,
+history and registrations work as they are.
+
+- **Auto mode.** `pair start --as NAME [--cli claude|codex] [--reviewer NAME] [--reviewer-cli
+  claude|codex]`. `pair start --as claude --reviewer-cli claude` pairs Claude with
+  `claude_reviewer`; only the CLIs a pairing uses must be installed. The restart command keeps the
+  pairing, and every launch restates it to a resumed Claude author.
+- **Manual mode.** Give each agent its name and partner with `PAIR_AGENT` and `PAIR_PARTNER` (for
+  Codex, as `-c 'shell_environment_policy.set.PAIR_AGENT="alice"'`), or in words. `send` takes
+  `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers
+  every lane, replies owed first. `pair register --as NAME` wakes a named Codex participant.
+- **Lanes** are `<author>-to-<reviewer>/`; `status`, `history`, `reset` and `clean` cover them all.
+
+Fixes found while testing with the real CLIs:
+
+- A Codex author in auto mode got none of pair's variables, so its review requests failed. A Codex
+  TUI started without config overrides can run its session on Codex's shared app-server, whose
+  commands don't see the launcher's environment. `pair start` now also passes them as
+  `-c shell_environment_policy.set.NAME=…`. Earlier versions were affected too.
+- The instructions tell agents to read their names with `echo`: macOS `printenv` shows only its
+  first argument, which led agents to the default name.
+- A corrupt registration no longer stops others from registering, and when registrations block
+  `pair start`, it names each one with `pair unregister --as NAME`.
+
+Names other than `claude` and `codex` need 0.10.0 on both sides. An older pair refuses them, its
+`status`, `history` and `reset` don't see their lanes, and an older `pair mcp` wakes only `codex`,
+so restart Codex after upgrading.
+
 ## 0.9.2 (2026-11-09)
 
 `pair history` now covers the repository's other existing worktrees, so a spec reviewed in one
