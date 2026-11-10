@@ -15,6 +15,18 @@ history and registrations work as they are.
   command keeps the pairing, and every launch restates it to a resumed Claude author.
 - **Shorter `pair help start`**: everyday options first, the rest under advanced options, with the
   details in the README.
+- **Guided `pair start`.** In a terminal, `pair start` without a CLI asks whether to resume the
+  recorded conversation (first, and only when there is one; resuming reuses that session's settings
+  and asks nothing else), then
+  for the CLIs, where to run, and the reviewer's model and effort. The model menu lists Claude's
+  aliases or the models in Codex's own picker, and any other model ID can be typed; one that Codex
+  doesn't list for your account asks for confirmation. For a Codex model, the effort menu lists
+  only that model's efforts. Enter takes each default. It then prints the equivalent command and
+  runs it, with the usual summary and `Start? [Y/n]`. Options given on the command line are kept and not
+  asked again; scripts and `-y` see no change.
+- **`pair status` shows what the reviewer actually ran with**, such as
+  `model CLI default (ran gpt-6.1-sol) · effort CLI default (ran xhigh)`, read after each round from
+  the reviewer CLI's own session file.
 - **Manual mode.** Give each agent its name and partner with `PAIR_AGENT` and `PAIR_PARTNER` (for
   Codex, as `-c 'shell_environment_policy.set.PAIR_AGENT="alice"'`), or in words. `send` takes
   `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers

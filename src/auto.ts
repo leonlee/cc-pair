@@ -1,7 +1,8 @@
 import { spawn, fork, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { isatty } from "node:tty";
@@ -40,8 +41,10 @@ interface RecordState {
   session?: string;
   authorSession: string;
   error?: string;
-  /** The reviewer settings of the thread most recently launched or corrected. */
-  thread?: { id: string } & ReviewerSettings;
+  /** The reviewer settings of the thread most recently launched or corrected, and what its reviewer last ran with. */
+  thread?: { id: string; ran?: ReviewerSettings } & ReviewerSettings;
+  /** What the latest round's reviewer ran with, and the settings it was given. */
+  lastRan?: { requested: ReviewerSettings; ran: ReviewerSettings };
   /** With --serve-worktrees: the capacity, the worktrees served, and the reviews running, queued or failed. */
   served?: ServedState;
 }
@@ -252,11 +255,12 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
     const reply = await autoCall(stateDir, { action: "status" });
     if (reply.served) return claimLines(reply.served);
     const { state } = reply;
+    const defaults = { model: state.reviewerModel, effort: state.reviewerEffort };
     return [
       `auto mode: ${who(state.authorName, state.author)} author, ${who(state.reviewerName, state.reviewer)} reviewer · ${state.phase} · owner ${state.pid}`,
       ...(state.authorSession ? [`  author session: ${state.authorSession}`] : []), // an older owner has none
-      `  reviewer for new threads: ${describeSettings({ model: state.reviewerModel, effort: state.reviewerEffort })}`,
-      ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread)}`] : []),
+      `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
+      ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
       ...(state.served ? servingLines(state.served) : []),
       ...(state.workerPid ? [`  reviewer pid: ${state.workerPid}`] : []),
       ...(state.session ? [`  reviewer session: ${state.session}`] : []),
@@ -280,8 +284,111 @@ export async function stopAuto(stateDir: string, root: string): Promise<string> 
   }
 }
 
-function describeSettings(settings: ReviewerSettings): string {
-  return `model ${settings.model ?? "CLI default"} · effort ${settings.effort ?? "CLI default"}`;
+/** The requested settings, each followed by what the reviewer actually ran with when that differs. */
+function describeSettings(settings: ReviewerSettings, ran?: ReviewerSettings, label = "ran"): string {
+  const one = (requested: string | undefined, actual: string | undefined) => `${requested ?? "CLI default"}${actual && actual !== requested ? ` (${label} ${actual})` : ""}`;
+  return `model ${one(settings.model, ran?.model)} · effort ${one(settings.effort, ran?.effort)}`;
+}
+
+function sameSettings(a: ReviewerSettings | undefined, b: ReviewerSettings): boolean {
+  return a !== undefined && a.model === b.model && a.effort === b.effort;
+}
+
+/** A string at path in parsed JSON. */
+function stringAt(value: unknown, ...path: string[]): string | undefined {
+  let at = value;
+  for (const key of path) {
+    if (typeof at !== "object" || at === null) return undefined;
+    at = (at as Record<string, unknown>)[key];
+  }
+  return typeof at === "string" && at ? at : undefined;
+}
+
+/** Codex keeps a conversation in $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl, under the day it started. */
+function codexSessionFile(session: string, env: NodeJS.ProcessEnv): string | undefined {
+  const root = join(env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
+  const newest = (dir: string) => readdirSync(dir).filter((name) => /^\d+$/.test(name)).sort().reverse().map((name) => join(dir, name));
+  let days = 0;
+  for (const year of newest(root)) {
+    for (const month of newest(year)) {
+      for (const day of newest(month)) {
+        const file = readdirSync(day).find((name) => name.endsWith(`-${session}.jsonl`));
+        if (file) return join(day, file);
+        if (++days >= 62) return undefined; // ponytail: two months back; a review thread older than that shows only its requested settings
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Claude keeps a conversation in $CLAUDE_CONFIG_DIR/projects/<cwd, non-alphanumerics as ->/<id>.jsonl. */
+function claudeSessionFile(session: string, cwd: string, env: NodeJS.ProcessEnv): string | undefined {
+  const root = join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+  const named = join(root, cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
+  if (existsSync(named)) return named;
+  return readdirSync(root).map((dir) => join(root, dir, `${session}.jsonl`)).find((file) => existsSync(file)); // a long path is shortened
+}
+
+/**
+ * The model and effort a reviewer conversation last ran with, from its CLI's own session file: Codex's
+ * last turn_context, Claude's last main-thread assistant message from a model. Those files are the CLIs' internals,
+ * so this is for display only, and undefined when it can't tell.
+ */
+export function ranSettings(cli: Agent, session: string, cwd: string, env: NodeJS.ProcessEnv = process.env): ReviewerSettings | undefined {
+  try {
+    const file = cli === "codex" ? codexSessionFile(session, env) : claudeSessionFile(session, cwd, env);
+    if (!file) return undefined;
+    const lines = readFileSync(file, "utf8").split("\n");
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index]!;
+      if (!line.includes(cli === "codex" ? '"turn_context"' : '"assistant"')) continue;
+      let entry: unknown;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const ran = cli === "codex"
+        ? stringAt(entry, "type") === "turn_context" ? { model: stringAt(entry, "payload", "model"), effort: stringAt(entry, "payload", "effort") } : undefined
+        : stringAt(entry, "type") === "assistant" && (entry as Record<string, unknown>).isSidechain !== true
+          && !/^<.*>$/.test(stringAt(entry, "message", "model") ?? "") // Claude's own messages, such as "<synthetic>", ran no model
+          ? { model: stringAt(entry, "message", "model"), effort: stringAt(entry, "effort") } : undefined;
+      if (ran && (ran.model || ran.effort)) return ran;
+    }
+  } catch { /* no session file, or one pair can't read: show only the requested settings */ }
+  return undefined;
+}
+
+/** A model guided pair start knows, with the efforts it supports when its CLI says. A hidden one isn't offered. */
+export interface KnownModel {
+  id: string;
+  efforts?: string[];
+  hidden?: true;
+}
+
+/** The models a reviewer CLI is known to accept; complete when it accepts no others. */
+export interface ModelList {
+  models: KnownModel[];
+  complete: boolean;
+}
+
+/**
+ * The models guided pair start knows for a reviewer CLI: Claude's aliases for its latest models (it accepts many
+ * other IDs), or every model Codex has for the account, from the $CODEX_HOME/models_cache.json it fetches, with the
+ * ones its own picker hides marked. That file is Codex's internals, so this only offers choices and questions an
+ * unknown one, never rejects one; without it, nothing is known.
+ */
+export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): ModelList {
+  if (cli === "claude") return { models: ["fable", "opus", "sonnet", "haiku"].map((id) => ({ id })), complete: false };
+  try {
+    const models: unknown = (JSON.parse(readFileSync(join(env.CODEX_HOME || join(homedir(), ".codex"), "models_cache.json"), "utf8")) as { models?: unknown }).models;
+    if (!Array.isArray(models)) return { models: [], complete: false };
+    const priority = (model: unknown) => { const value = (model as { priority?: unknown }).priority; return typeof value === "number" ? value : Number.MAX_SAFE_INTEGER; };
+    const known = (models as unknown[]).sort((a, b) => priority(a) - priority(b)).flatMap((model): KnownModel[] => {
+      const id = stringAt(model, "slug");
+      if (!id) return [];
+      const levels = (model as { supported_reasoning_levels?: unknown }).supported_reasoning_levels;
+      const efforts = Array.isArray(levels) ? levels.flatMap((level) => stringAt(level, "effort") ?? []) : [];
+      return [{ id, ...(efforts.length ? { efforts } : {}), ...(stringAt(model, "visibility") === "list" ? {} : { hidden: true as const }) }];
+    });
+    return { models: known, complete: known.length > 0 };
+  } catch { return { models: [], complete: false }; }
 }
 
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */
@@ -341,7 +448,7 @@ function listenOn(server: Server, path: string): Promise<void> {
   });
 }
 
-function executable(name: Agent, override?: string): string {
+export function executable(name: Agent, override?: string): string {
   const candidates = override ? [override] : (process.env.PATH ?? "").split(delimiter).filter(isAbsolute).map((dir) => join(dir, name));
   for (const path of candidates) {
     if (!isAbsolute(path)) throw new Error(`${name} executable must be an absolute path`);
@@ -476,7 +583,7 @@ export function describeSession(session: AuthorSession): string {
 }
 
 /** A shell word: bare when that's safe, else single-quoted. */
-function shellWord(text: string): string {
+export function shellWord(text: string): string {
   return /^[\w@%+=:,./-]+$/.test(text) ? text : quote(text);
 }
 
@@ -489,6 +596,8 @@ interface AuthorRecord {
   note: string | null;
   at: string;
   restart: string | null;
+  /** pair start's arguments for the same pairing and settings, without the conversation; older records lack it. */
+  start?: string[];
 }
 
 function writeAuthorRecord(stateDir: string, record: AuthorRecord): void {
@@ -505,16 +614,17 @@ function readAuthorRecord(stateDir: string, root: string): AuthorRecord | undefi
   if (typeof record !== "object" || record === null) {
     return undefined;
   }
-  const { backend, worktree, session, learned, note, at, restart } = record as Record<string, unknown>;
+  const { backend, worktree, session, learned, note, at, restart, start } = record as Record<string, unknown>;
   const valid = (backend === "claude" || backend === "codex") && worktree === root && typeof at === "string"
     && (session === null || (typeof session === "string" && UUID.test(session)))
     && (learned === null || learned === "generated" || learned === "resume-arg" || learned === "author-env")
-    && (note === null || typeof note === "string") && (restart === null || typeof restart === "string");
+    && (note === null || typeof note === "string") && (restart === null || typeof restart === "string")
+    && (start === undefined || (Array.isArray(start) && start.every((arg) => typeof arg === "string")));
   return valid ? record as AuthorRecord : undefined;
 }
 
 /** pair start --resume: the author arguments that resume the conversation last recorded for root. */
-export function withRecordedSession(author: Agent, args: string[], stateDir: string, root: string): { args: string[]; id: string; at: string } {
+export function withRecordedSession(author: Agent, args: string[], stateDir: string, root: string): { args: string[]; id: string; at: string; start?: string[] } {
   const selected = author === "claude" ? args.some((arg) => ["-c", "--continue", "-r", "--resume"].includes(splitOption(arg).name)) : args[0] === "resume";
   if (selected) {
     throw new Error(`pair start --resume picks the conversation; drop the ${author === "claude" ? "--continue or --resume" : "resume"} after --`);
@@ -530,7 +640,7 @@ export function withRecordedSession(author: Agent, args: string[], stateDir: str
     throw new Error(`the last ${author} author in ${root} has no known conversation ID (${record.note ?? "unknown"}); start without --resume`);
   }
   const id = record.session;
-  return { args: author === "claude" ? [...args, "--resume", id] : ["resume", id, ...args], id, at: record.at };
+  return { args: author === "claude" ? [...args, "--resume", id] : ["resume", id, ...args], id, at: record.at, ...(record.start ? { start: record.start } : {}) };
 }
 
 /** For pair status and pair stop once the session is gone. */
@@ -550,23 +660,32 @@ export const FAILED_REVIEW_RULE = "If a managed review fails, the request stays 
 
 export type StartChoices = Pick<AutoOptions, "author" | "reviewerCli" | "claude" | "codex" | "reviewerModel" | "reviewerEffort" | "authorArgs" | "reviewerArgs">;
 
-function checkSettings(reviewer: Agent, settings: ReviewerSettings): void {
+/** The --reviewer-effort values each reviewer CLI accepts. */
+export const EFFORTS: Record<Agent, readonly string[]> = {
+  codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+  claude: ["low", "medium", "high", "xhigh", "max", "ultracode"],
+};
+
+export function checkSettings(reviewer: Agent, settings: ReviewerSettings): void {
   const { model, effort } = settings;
   if (model !== undefined && (!model.trim() || model !== model.trim() || /[\x00-\x1f\x7f]/.test(model))) {
     throw new Error("--reviewer-model must be a nonempty model ID or alias without surrounding whitespace or control characters");
   }
-  const efforts = reviewer === "codex"
-    ? ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-    : ["low", "medium", "high", "xhigh", "max", "ultracode"];
+  const efforts = EFFORTS[reviewer];
   if (effort !== undefined && !efforts.includes(effort)) {
     throw new Error(`--reviewer-effort for ${reviewer} must be one of: ${efforts.join(", ")}. Availability also depends on the installed CLI and selected model.`);
   }
 }
 
-/** Everything pair start can check before it changes anything, such as creating a worktree. */
-export function checkStart(options: StartChoices): void {
+/** Before pair start asks or checks anything else. */
+export function checkOwnTerminal(): void {
   if (process.platform === "win32") throw new Error("auto mode currently supports macOS and Linux");
   if (process.env.CODEX_THREAD_ID || process.env.CLAUDECODE) throw new Error("run pair start in your own terminal, outside Claude or Codex");
+}
+
+/** Everything pair start can check before it changes anything, such as creating a worktree. */
+export function checkStart(options: StartChoices): void {
+  checkOwnTerminal();
   const reviewer = options.reviewerCli;
   checkSettings(reviewer, { model: options.reviewerModel, effort: options.reviewerEffort });
   let authorArgs = options.authorArgs;
@@ -607,6 +726,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const running = new Map<string, Entry>(); // by guardian job ID
   const failures = new Map<Target, Failure>(); // a target's last failed round, until its next launch
   const sessions = new Map<string, string>(); // reviewer conversations, by target and thread
+  const ranBy = new Map<string, ReviewerSettings>(); // what each conversation last ran with, by target and thread
   // pair reviewer changes the defaults for new threads; a thread keeps what it had at its first launch.
   let defaults: ReviewerSettings = { model: options.reviewerModel, effort: options.reviewerEffort };
   const threadSettings = new Map<string, ReviewerSettings>(); // by target and thread
@@ -841,7 +961,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     running.set(id, entry);
     failures.delete(target);
     if (target === rootTarget) delete state.error;
-    state.thread = { id: entry.thread, ...settings };
+    state.thread = { id: entry.thread, ...settings, ran: ranBy.get(key) };
     const session = sessions.get(key);
     state.session = session;
     const bin = join(runDir, "bin", "pair");
@@ -913,6 +1033,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const after = change(before);
     threadSettings.set(key, after);
     sessions.delete(key); // a saved conversation may not resume under another model
+    ranBy.delete(key); // and what it ran with is no longer this thread's
     delete state.session;
     state.thread = { id: failure.thread, ...after };
     publish();
@@ -938,16 +1059,17 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   let learned: AuthorRecord["learned"] = session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null;
   const recordAuthor = (report: (problem: string) => void) => {
     const selector = (id: string) => options.author === "claude" ? [...session.rest, "--resume", id] : ["resume", id, ...session.rest];
+    const start = [
+      ...options.restartOptions,
+      ...(defaults.model === undefined ? [] : ["--reviewer-model", defaults.model]),
+      ...(defaults.effort === undefined ? [] : ["--reviewer-effort", defaults.effort]),
+    ];
     try {
       writeAuthorRecord(options.stateDir, {
         backend: options.author, worktree: options.root, session: authorId ?? null, learned,
         note: session.kind === "unknown" ? session.why : null, at: new Date().toISOString(),
-        restart: authorId ? `cd ${shellWord(options.root)} && pair start ${[
-          ...options.restartOptions,
-          ...(defaults.model === undefined ? [] : ["--reviewer-model", defaults.model]),
-          ...(defaults.effort === undefined ? [] : ["--reviewer-effort", defaults.effort]),
-          "--", ...selector(authorId),
-        ].map(shellWord).join(" ")}` : null,
+        restart: authorId ? `cd ${shellWord(options.root)} && pair start ${[...start, "--", ...selector(authorId)].map(shellWord).join(" ")}` : null,
+        start,
       });
     } catch (error) { report(`couldn't save the author's session for pair stop to report: ${errorMessage(error)}`); }
   };
@@ -1046,6 +1168,15 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             catch (readError) { error = `cannot check the verdict: ${errorMessage(readError)}`; } // e.g. a corrupt lane: fail this round only
           }
           lastFailed = !success;
+          const key = keyOf(target, entry.thread);
+          const session = sessions.get(key);
+          const ran = session ? ranSettings(reviewer, session, target.root) : undefined;
+          if (ran) {
+            ranBy.set(key, ran);
+            if (state.thread?.id === entry.thread) state.thread.ran = ran;
+            state.lastRan = { requested: entry.settings ?? {}, ran };
+            log(`pair: reviewer for thread ${entry.thread} ran ${describeSettings(ran)}\n`);
+          }
           // The verdict on disk decides: a reviewer may report an error it recovered from.
           const reason = success ? error : [
             error ?? "reviewer exited without sending a verdict",

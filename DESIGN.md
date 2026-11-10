@@ -195,6 +195,23 @@ pairing in any shell.
 
 ### Startup
 
+When the command doesn't name the author's CLI and stdin and stdout are terminals (no `--yes`),
+pair asks first: a resume when this checkout (or the given `--worktree`) has a usable record. The
+record keeps its session's pair start arguments (`start`, as in its restart command, with the reviewer
+settings it last had), and resuming adds them with `--resume`, asking nothing else. An added option
+that the command line also gives, on either side of `start`, is left out, so the command line's
+wins. Those arguments may name a CLI's path, so such a record is offered even when its CLI isn't on
+PATH. A record written by an older pair fixes only the author's CLI and the location. Otherwise pair asks for the CLIs, the location with a resume for that
+worktree's record, and the reviewer's model and effort, skipping whatever the command line gave. Its answers become ordinary
+arguments inserted after the `start` word. Pair prints the resulting command and runs `main` again
+with it, so a guided start is parsed, validated, summarized and confirmed exactly like a typed one.
+The questions use only read-only facts (installed CLIs, `planWorktree`, the author record, the
+models to offer), and cancelling one stops before anything else runs. The models are Claude's aliases,
+or the ones Codex's picker lists in its `$CODEX_HOME/models_cache.json`. That file is Codex's internals, so
+pair uses it only to offer choices and to question a typed Codex model that it doesn't list,
+hidden ones included: any model ID can still be used, and without the file the question is free
+text.
+
 The checks run first: options and the pairing, the forwarded argument allowlists, the executables, the
 `--worktree` name and target, and the `--resume` record. The only thing prepared before
 confirmation is the private socket directory, which is created if missing so its ownership and
@@ -235,7 +252,13 @@ resumed only within the same review thread; no `--last` lookup is used. `--revie
 `--reviewer-effort` apply to every launch, including resume: Codex receives `--model` and
 `--config model_reasoning_effort="LEVEL"`, Claude `--model` and `--effort`. They never reach the
 author or either CLI's config. Status shows the requested values, with `CLI default` for omitted
-ones, since the launcher does not resolve inherited settings. Effort names are checked per backend
+ones, since the launcher does not resolve inherited settings. After each round it reads what the
+reviewer actually ran with from the CLI's own session file and shows it where it differs:
+Codex's last `turn_context` in `$CODEX_HOME/sessions/…/rollout-…-<id>.jsonl`, and Claude's last
+main-thread assistant entry in `$CLAUDE_CONFIG_DIR/projects/<cwd>/<id>.jsonl`. These files are
+the CLIs' internals, so this is display only: nothing depends on it, and a missing or changed file
+just leaves the requested values. The line for new threads shows the latest round's values only
+when that round was given the same settings. Effort names are checked per backend
 before startup and on every change; each CLI decides whether it supports the combination.
 
 `pair reviewer` changes the settings on the live owner, over the control socket, without a restart.

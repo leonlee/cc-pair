@@ -8,7 +8,8 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, setReviewer, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
 // The two CLIs pair runs, and the two default participants, named after them.
 const BACKENDS = ["claude", "codex"] as const;
@@ -2044,8 +2045,10 @@ pair init first if pair's instructions are missing.
 
 Each CLI is claude or codex; the reviewer's defaults to the other one. Each participant is named
 after its CLI unless you name it; a reviewer that would get the author's name is <cli>_reviewer.
-Without CLIs, as before 0.10, --as (default: $PAIR_AGENT) must be claude or codex and also picks
-the author's CLI.
+Without CLIs, as before 0.10, --as claude|codex (default: $PAIR_AGENT) also picks the author's CLI.
+Otherwise, in a terminal, pair start asks whether to resume the recorded conversation (if any, with
+its session's settings), else for the CLIs, where to run, and the reviewer's model and effort, and
+shows the command it runs.
 
   pair start claude                                   claude, reviewed by codex
   pair start codex                                    codex, reviewed by claude
@@ -2058,7 +2061,7 @@ options:
   --reviewer NAME              the reviewer's participant name
   --worktree NAME              run in the git worktree ../<repo>-NAME, created on branch NAME (new
                                from HEAD, or tracking a remote NAME) on the first run
-  --resume                     resume the author conversation pair last recorded for the session's checkout
+  --resume                     resume the conversation pair last recorded for the session's checkout
   --reviewer-model MODEL       the reviewer's model (default: its CLI's)
   --reviewer-effort LEVEL      the reviewer's reasoning effort, such as high (default: its CLI's).
                                pair reviewer changes the model and effort while the session runs.
@@ -2182,12 +2185,14 @@ options:
   -v, --verbose                show full command lines`,
 };
 
+const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } } as const;
+
 async function main(argv: string[]): Promise<number> {
   const { values, positionals, tokens } = parseArgs({
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } },
+    options: OPTIONS,
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -2304,6 +2309,45 @@ async function main(argv: string[]): Promise<number> {
           if (isBackend(value)) return value;
           throw new PairError(`${index === 0 ? "the author's" : "the reviewer's"} CLI must be claude or codex (got "${value}"); participant names go in --as and --reviewer`);
         });
+        const guided = async (envName: string | undefined): Promise<string[] | undefined> => {
+          try { checkOwnTerminal(); } catch (error) { throw new PairError(errorMessage(error)); }
+          const facts: StartFacts = {
+            installed: BACKENDS.filter((cli) => { try { executable(cli, values[cli]); return true; } catch { return false; } }),
+            git: gitPath("--show-toplevel") !== undefined,
+            repo: basename(root),
+            checkWorktree: (name) => { planWorktree(root, name); },
+            recorded: (cli, worktree) => {
+              try { // the same record --resume would use, in the checkout the session would run in
+                const plan = worktree === undefined ? undefined : planWorktree(root, worktree);
+                if (plan?.add) return undefined;
+                const target = plan ? realpathSync(plan.path) : root;
+                return withRecordedSession(cli, passthrough, stateDir(channelDir(target)), target);
+              } catch { return undefined; }
+            },
+            checkModel: (model) => checkSettings("claude", { model }),
+            models: (cli) => knownModels(cli),
+            efforts: EFFORTS,
+          };
+          const prompter = linePrompter(process.stdin, process.stdout);
+          try {
+            return await guideStart(prompter, facts, { worktree: values.worktree, resume: Boolean(values.resume), model: values["reviewer-model"], effort: values["reviewer-effort"] !== undefined, envName });
+          } catch (error) {
+            throw new PairError(errorMessage(error));
+          } finally {
+            prompter.close();
+          }
+        };
+        // In a terminal, a start that doesn't name the author's CLI asks, then runs the command it shows.
+        const given = values.as ?? (process.env.PAIR_AGENT || undefined);
+        if (authorCli === undefined && (given === undefined || (NAME.test(given) && !isBackend(given))) && !values.yes && process.stdin.isTTY && process.stdout.isTTY) {
+          const added = await guided(given === values.as ? undefined : given);
+          if (!added) {
+            throw new PairError("pair start cancelled; nothing was started");
+          }
+          const next = guidedArgv(argv, tokens.find((token) => token.kind === "positional")!.index, added, OPTIONS);
+          console.error(`pair: command: pair ${next.map(shellWord).join(" ")}`);
+          return await main(next);
+        }
         if (authorCli === undefined && values.as === undefined && !process.env.PAIR_AGENT) {
           throw new PairError("name the author's CLI: pair start claude|codex (see pair help start)");
         }
