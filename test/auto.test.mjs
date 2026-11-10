@@ -1530,6 +1530,11 @@ test("pair start refuses an incomplete, unknown or self pairing", () => {
     assert.equal(result.status, 1, args.join(" "));
     assert.match(result.stderr, pattern, args.join(" "));
   }
+  // Without a terminal, nothing asks: a custom PAIR_AGENT without a CLI is refused as before.
+  const piped = spawnSync(process.execPath, [CLI, "start"], { cwd: tmpdir(), env: { ...process.env, CLAUDECODE: "", CODEX_THREAD_ID: "", PAIR_AUTO_ROLE: "", PAIR_AGENT: "alice" }, input: "1\n", encoding: "utf8" });
+  assert.equal(piped.status, 1);
+  assert.match(piped.stderr, /name the CLI that runs alice/);
+  assert.doesNotMatch(piped.stdout, /Author CLI/);
   const elsewhere = spawnSync(process.execPath, [CLI, "status", "--reviewer", "bob"], { cwd: tmpdir(), encoding: "utf8" });
   assert.match(elsewhere.stderr, /--reviewer is only supported by pair start/);
 });

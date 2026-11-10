@@ -341,7 +341,7 @@ function listenOn(server: Server, path: string): Promise<void> {
   });
 }
 
-function executable(name: Agent, override?: string): string {
+export function executable(name: Agent, override?: string): string {
   const candidates = override ? [override] : (process.env.PATH ?? "").split(delimiter).filter(isAbsolute).map((dir) => join(dir, name));
   for (const path of candidates) {
     if (!isAbsolute(path)) throw new Error(`${name} executable must be an absolute path`);
@@ -476,7 +476,7 @@ export function describeSession(session: AuthorSession): string {
 }
 
 /** A shell word: bare when that's safe, else single-quoted. */
-function shellWord(text: string): string {
+export function shellWord(text: string): string {
   return /^[\w@%+=:,./-]+$/.test(text) ? text : quote(text);
 }
 
@@ -550,23 +550,32 @@ export const FAILED_REVIEW_RULE = "If a managed review fails, the request stays 
 
 export type StartChoices = Pick<AutoOptions, "author" | "reviewerCli" | "claude" | "codex" | "reviewerModel" | "reviewerEffort" | "authorArgs" | "reviewerArgs">;
 
-function checkSettings(reviewer: Agent, settings: ReviewerSettings): void {
+/** The --reviewer-effort values each reviewer CLI accepts. */
+export const EFFORTS: Record<Agent, readonly string[]> = {
+  codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+  claude: ["low", "medium", "high", "xhigh", "max", "ultracode"],
+};
+
+export function checkSettings(reviewer: Agent, settings: ReviewerSettings): void {
   const { model, effort } = settings;
   if (model !== undefined && (!model.trim() || model !== model.trim() || /[\x00-\x1f\x7f]/.test(model))) {
     throw new Error("--reviewer-model must be a nonempty model ID or alias without surrounding whitespace or control characters");
   }
-  const efforts = reviewer === "codex"
-    ? ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-    : ["low", "medium", "high", "xhigh", "max", "ultracode"];
+  const efforts = EFFORTS[reviewer];
   if (effort !== undefined && !efforts.includes(effort)) {
     throw new Error(`--reviewer-effort for ${reviewer} must be one of: ${efforts.join(", ")}. Availability also depends on the installed CLI and selected model.`);
   }
 }
 
-/** Everything pair start can check before it changes anything, such as creating a worktree. */
-export function checkStart(options: StartChoices): void {
+/** Before pair start asks or checks anything else. */
+export function checkOwnTerminal(): void {
   if (process.platform === "win32") throw new Error("auto mode currently supports macOS and Linux");
   if (process.env.CODEX_THREAD_ID || process.env.CLAUDECODE) throw new Error("run pair start in your own terminal, outside Claude or Codex");
+}
+
+/** Everything pair start can check before it changes anything, such as creating a worktree. */
+export function checkStart(options: StartChoices): void {
+  checkOwnTerminal();
   const reviewer = options.reviewerCli;
   checkSettings(reviewer, { model: options.reviewerModel, effort: options.reviewerEffort });
   let authorArgs = options.authorArgs;

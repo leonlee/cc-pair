@@ -195,6 +195,14 @@ pairing in any shell.
 
 ### Startup
 
+When the command doesn't name the author's CLI and stdin and stdout are terminals (no `--yes`),
+pair asks first: the CLIs, the location, a resume when the target has a usable record, and the
+reviewer's model and effort, skipping whatever the command line gave. Its answers become ordinary
+arguments inserted after the `start` word. Pair prints the resulting command and runs `main` again
+with it, so a guided start is parsed, validated, summarized and confirmed exactly like a typed one.
+The questions use only read-only facts (installed CLIs, `planWorktree`, the author record), and
+cancelling one stops before anything else runs.
+
 The checks run first: options and the pairing, the forwarded argument allowlists, the executables, the
 `--worktree` name and target, and the `--resume` record. The only thing prepared before
 confirmation is the private socket directory, which is created if missing so its ownership and

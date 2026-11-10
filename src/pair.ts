@@ -8,7 +8,8 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkStart, describeSession, errorMessage, autoStatus, hasCode, runGuardian, setReviewer, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
 // The two CLIs pair runs, and the two default participants, named after them.
 const BACKENDS = ["claude", "codex"] as const;
@@ -2044,8 +2045,9 @@ pair init first if pair's instructions are missing.
 
 Each CLI is claude or codex; the reviewer's defaults to the other one. Each participant is named
 after its CLI unless you name it; a reviewer that would get the author's name is <cli>_reviewer.
-Without CLIs, as before 0.10, --as (default: $PAIR_AGENT) must be claude or codex and also picks
-the author's CLI.
+Without CLIs, as before 0.10, --as claude|codex (default: $PAIR_AGENT) also picks the author's CLI.
+Otherwise, in a terminal, pair start asks for the CLIs, where to run, whether to resume, and the
+reviewer's model and effort, then shows the command and runs it.
 
   pair start claude                                   claude, reviewed by codex
   pair start codex                                    codex, reviewed by claude
@@ -2304,6 +2306,43 @@ async function main(argv: string[]): Promise<number> {
           if (isBackend(value)) return value;
           throw new PairError(`${index === 0 ? "the author's" : "the reviewer's"} CLI must be claude or codex (got "${value}"); participant names go in --as and --reviewer`);
         });
+        const guided = async (envName: string | undefined): Promise<string[] | undefined> => {
+          try { checkOwnTerminal(); } catch (error) { throw new PairError(errorMessage(error)); }
+          const facts: StartFacts = {
+            installed: BACKENDS.filter((cli) => { try { executable(cli, values[cli]); return true; } catch { return false; } }),
+            git: gitPath("--show-toplevel") !== undefined,
+            checkWorktree: (name) => { planWorktree(root, name); },
+            recorded: (cli, worktree) => {
+              try { // the same record --resume would use, in the checkout the session would run in
+                const plan = worktree === undefined ? undefined : planWorktree(root, worktree);
+                if (plan?.add) return undefined;
+                const target = plan ? realpathSync(plan.path) : root;
+                return withRecordedSession(cli, passthrough, stateDir(channelDir(target)), target);
+              } catch { return undefined; }
+            },
+            checkModel: (model) => checkSettings("claude", { model }),
+            efforts: EFFORTS,
+          };
+          const prompter = linePrompter(process.stdin, process.stdout);
+          try {
+            return await guideStart(prompter, facts, { worktree: values.worktree, resume: Boolean(values.resume), model: values["reviewer-model"] !== undefined, effort: values["reviewer-effort"] !== undefined, envName });
+          } catch (error) {
+            throw new PairError(errorMessage(error));
+          } finally {
+            prompter.close();
+          }
+        };
+        // In a terminal, a start that doesn't name the author's CLI asks, then runs the command it shows.
+        const given = values.as ?? (process.env.PAIR_AGENT || undefined);
+        if (authorCli === undefined && (given === undefined || (NAME.test(given) && !isBackend(given))) && !values.yes && process.stdin.isTTY && process.stdout.isTTY) {
+          const added = await guided(given === values.as ? undefined : given);
+          if (!added) {
+            throw new PairError("pair start cancelled; nothing was started");
+          }
+          const next = guidedArgv(argv, tokens.find((token) => token.kind === "positional")!.index, added);
+          console.error(`pair: command: pair ${next.map(shellWord).join(" ")}`);
+          return await main(next);
+        }
         if (authorCli === undefined && values.as === undefined && !process.env.PAIR_AGENT) {
           throw new PairError("name the author's CLI: pair start claude|codex (see pair help start)");
         }

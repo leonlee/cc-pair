@@ -119,6 +119,18 @@ The first word is the author's CLI, the second the reviewer's (default: the othe
 participants are in [Participants](#4-participants). `pair start --as claude` and `--as codex` work
 as before 0.10.
 
+In a terminal, `pair start` without a CLI asks instead. The questions are:
+
+1. the CLIs;
+2. where to run: this checkout, or a `--worktree` branch name;
+3. whether to resume the conversation pair recorded there, asked only when there is one;
+4. the reviewer's model and effort.
+
+Enter takes each default. It then prints the command it chose, such as
+`pair: command: pair start claude --worktree feat`, and goes on as if you had typed it, with the
+same summary and `Start? [Y/n]`. Options you give are kept and not asked again. Ctrl-C or end of
+input cancels. Without a terminal, or with `-y`, nothing is asked.
+
 Give the author a task as usual. Each request or response it sends starts the other agent as a
 non-interactive reviewer for one round, and the review comes back inline to the author's
 `pair send`. Follow-up rounds resume the reviewer's session; a new thread starts a fresh one.
@@ -299,8 +311,9 @@ named after its CLI, unless that would give the reviewer the author's name: then
 
 Names don't choose CLIs: `pair start claude --reviewer claude` is refused (the same participant
 twice), and `pair start claude codex --as alice --reviewer claude` runs a Codex reviewer named
-claude. The exception is the form without CLIs, as before 0.10: `--as` (default: `PAIR_AGENT`) must
-then be `claude` or `codex`, and also chooses the author's CLI. When a CLI is given, `PAIR_AGENT` is
+claude. The exception is the form without CLIs, as before 0.10: `--as claude` or `codex` (default:
+`PAIR_AGENT`) also chooses the author's CLI. For any other name, pair start asks for the CLIs in a
+terminal ([Auto mode](#5-auto-mode)) and refuses without one. When a CLI is given, `PAIR_AGENT` is
 ignored, so the command means the same in every shell.
 
 Only the CLIs the pairing uses must be installed. A same-CLI reviewer gets its own conversation per
