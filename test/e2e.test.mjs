@@ -552,10 +552,25 @@ test("history lists and shows finished threads, and clean keeps only the newest"
   const oldestId = lines[2].split("  ")[0];
   const transcript = ok(["history", oldestId.slice(-6)]);
   assert.match(transcript, /== thread .* approved ==[\s\S]*request from claude[\s\S]*change 1[\s\S]*verdict approve[\s\S]*LGTM 1/);
-  assert.match(run(["history", "nope"]).out, /no finished thread matches "nope"/);
-  assert.match(run(["history", "Z-"]).out, /3 finished threads match/);
+  assert.match(run(["history", "nope"]).out, /no thread matches "nope"/);
+  assert.match(run(["history", "Z-"]).out, /3 threads match/);
 
   ok(["send", "request", "--as", "codex", "-"], "still open");
+  // pair status shows an open thread's ID, so history shows that thread too.
+  const listed = run(["history", "Z-"]).out;
+  assert.match(listed, /4 threads match/);
+  const openId = /\n {2}(\S+) {2}\(open\)/.exec(listed)?.[1];
+  assert.ok(openId, listed);
+  assert.match(ok(["history", openId]), /^== thread \S+ · codex-to-claude · open: awaiting-review \(round 1, claude's turn\) ==\n\n== pair: request from codex · codex-to-claude · round 1 ==\nstill open\n$/);
+  // A lane pair can't read, here one in the old flat layout, doesn't hide the other threads.
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  mkdirSync(join(channel, "bob-to-alice"), { recursive: true });
+  writeFileSync(join(channel, "bob-to-alice", "001-request.md"), "---\nfrom: bob\n---\nold");
+  const despite = ok(["history", oldestId]);
+  assert.match(despite, /skipped the open thread of bob-to-alice: .*old flat layout/);
+  assert.match(despite, /== thread .* approved ==[\s\S]*change 1/);
+  assert.match(ok(["history", openId]), /still open/);
+  rmSync(join(channel, "bob-to-alice"), { recursive: true });
   assert.match(run(["clean"]).out, /clean needs --keep N/);
   for (const bad of ["--keep=-1", "--keep=", "--keep= ", "--keep=1.5", "--keep=Infinity"]) {
     assert.match(run(["clean", bad]).out, /--keep must be a whole number/, bad);
@@ -1216,7 +1231,7 @@ test("history covers the repository's other worktrees, marked with their path", 
   finish(other, "work in the second worktree");
   const ambiguous = runIn(root, ["history", "-"]); // every id has dashes
   assert.equal(ambiguous.code, 1);
-  assert.match(ambiguous.err, new RegExp(`2 finished threads match "-"[\\s\\S]*\\[${other}\\]`));
+  assert.match(ambiguous.err, new RegExp(`2 threads match "-"[\\s\\S]*\\[${other}\\]`));
 
   git(root, "worktree", "remove", other);
   const afterRemoval = runIn(root, ["history"]).out;

@@ -27,6 +27,8 @@ history and registrations work as they are.
 - **`pair status` shows what the reviewer actually ran with**, such as
   `model CLI default (ran gpt-6.1-sol) · effort CLI default (ran xhigh)`, read after each round from
   the reviewer CLI's own session file.
+- **`pair history <ID>` also shows a thread that is still open** in this worktree, such as the one
+  `pair status` names, with where it stands.
 - **Manual mode.** Give each agent its name and partner with `PAIR_AGENT` and `PAIR_PARTNER` (for
   Codex, as `-c 'shell_environment_policy.set.PAIR_AGENT="alice"'`), or in words. `send` takes
   `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers

@@ -1246,13 +1246,18 @@ async function serveMcp(): Promise<void> {
 }
 
 function describe(thread: Thread): string {
-  const state = stateOf(listMessages(thread));
+  return `${basename(thread.lane)}: ${openState(thread, listMessages(thread))}`;
+}
+
+/** Where an open thread stands, as pair status shows it. */
+function openState(thread: Thread, messages: Message[]): string {
+  const state = stateOf(messages);
   if (state.kind === "idle") {
-    return `${basename(thread.lane)}: idle`;
+    return "idle";
   }
   const turn = state.kind === "awaiting-review" ? thread.reviewer : thread.author;
   const kind = kindOf(state.last.status) === "brainstorm" ? "brainstorm " : "";
-  return `${basename(thread.lane)}: ${kind}${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
+  return `${kind}${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
 }
 
 function instructionState(path: string, expected: string, sectionOnly = false): string {
@@ -1569,9 +1574,33 @@ function history(channel: string, root: string, query: string | undefined, warn:
       .join("\n");
   }
   const matches = archived.filter((entry) => entry.id.includes(query));
-  if (matches.length !== 1) {
-    const found = matches.length === 0 ? "no finished thread matches" : `${matches.length} finished threads match`;
-    throw new PairError(`${found} "${query}"${matches.map((entry) => `\n  ${entry.id}${where(entry)}`).join("")}`);
+  // This worktree's open threads too: pair status shows their IDs. A lane pair can't read doesn't hide the others.
+  const open = lanesOf(channel).flatMap((thread) => {
+    let dir: string | undefined;
+    try { dir = currentThreadDir(thread); }
+    catch (error) {
+      warn(`skipped the open thread of ${basename(thread.lane)}: ${errorMessage(error)}`);
+      return [];
+    }
+    return dir !== undefined && basename(dir).includes(query) ? [{ id: basename(dir), dir, thread }] : [];
+  });
+  if (matches.length + open.length !== 1) {
+    const count = matches.length + open.length;
+    const found = count === 0 ? "no thread matches" : `${count} threads match`;
+    const listed = [...open.map((each) => `\n  ${each.id}  (open)`), ...matches.map((entry) => `\n  ${entry.id}${where(entry)}`)];
+    throw new PairError(`${found} "${query}"${listed.join("")}`);
+  }
+  if (open[0]) {
+    const { id, dir, thread } = open[0];
+    let messages: Message[];
+    try { messages = readThread(dir, thread); }
+    catch (error) {
+      if (isMissing(error)) throw new PairError(`thread ${id} finished while reading it; run pair history ${id} again`);
+      throw error;
+    }
+    const laneName = basename(thread.lane);
+    const transcript = messages.map((message) => `${messageHeader(message, laneName)}\n${message.body.trimEnd()}`);
+    return [`== thread ${id} · ${laneName} · open: ${openState(thread, messages)} ==`, ...transcript].join("\n\n");
   }
   const [entry] = matches;
   // An access error names the sandbox root of the channel it happened in, not this worktree's.
@@ -2005,7 +2034,7 @@ const USAGE = `usage:
   pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict approve|changes|continue|complete] <file|->
   pair wait --as NAME [--timeout seconds]             (prints "no message … yet" on timeout)
   pair status
-  pair history [thread-id]                            (list finished threads, or show one)
+  pair history [thread-id]                            (list finished threads, or show any thread)
   pair clean --keep N                                 (delete all but the N newest finished threads)
   pair reset [--as NAME] [--dry-run]                  (back up pending lanes; --as selects their author, default: all)
   pair init
@@ -2141,7 +2170,7 @@ the worktree or the channel.`,
   history: `usage: pair history [THREAD]
 
 With no argument, list finished threads, newest first. With THREAD (any unique part of a thread
-id), print that thread's messages. It covers this worktree and the repository's other existing
+id), print that thread's messages, including a thread still open in this worktree. It covers this worktree and the repository's other existing
 worktrees (git worktree list), whose threads are marked with their path; their channels are found
 with this shell's PAIR_HOME.`,
   clean: `usage: pair clean --keep N
