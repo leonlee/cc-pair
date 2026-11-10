@@ -1706,7 +1706,7 @@ function autoModeNote(channel: string): string[] {
     return [];
   }
   try {
-    return [`Auto mode: pair start --as claude adds sandbox.network.allowUnixSockets for ${autoSocketPath(stateDir(channel))} to that Claude session only. No persistent socket setting is needed.`, ""];
+    return [`Auto mode: pair start adds sandbox.network.allowUnixSockets for ${autoSocketPath(stateDir(channel))} to the Claude sessions it starts, and nowhere else. No persistent socket setting is needed.`, ""];
   } catch (error) {
     return [`Auto mode is unavailable until this is fixed: ${errorMessage(error)}`, ""];
   }
@@ -1996,10 +1996,8 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 }
 
 const USAGE = `usage:
-  pair start --as NAME [--cli claude|codex] [--reviewer NAME] [--reviewer-cli claude|codex]
-             [--worktree NAME] [--resume] [-y] [--reviewer-model MODEL] [--reviewer-effort LEVEL]
-             [--reviewer-args="ARGS"] [--serve-worktrees [--reviewers N]] [--claude /path] [--codex /path]
-             [--timeout seconds] [--grace seconds] [-- AUTHOR_ARGS...]
+  pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME] [--worktree NAME] [--resume]
+             [--reviewer-model MODEL] [--reviewer-effort LEVEL] [advanced options] [-- AUTHOR_ARGS...]
   pair stop                                           (stop this worktree's auto session and its managed agents)
   pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
                                                       (change a running auto session's reviewer, without a restart)
@@ -2021,7 +2019,7 @@ const HELP = `${USAGE}
 
 environment:
   PAIR_HOME              root directory for channels (default ~/.pair)
-  PAIR_AGENT             your participant name: the default for --as
+  PAIR_AGENT             your participant name: the default for --as (pair start: only without CLIs)
   PAIR_PARTNER           whom a new request goes to without --to (default: claude's or codex's partner)
   PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
@@ -2037,62 +2035,48 @@ codex) so the pair_listen tool from pair mcp wakes it when a message for NAME ar
 is one participant. unregister stops the notifications; run it before pair start in this worktree.`;
 
 const COMMAND_HELP: Record<string, string> = {
-  start: `usage: pair start --as NAME [options] [-- AUTHOR_ARGS...]
+  start: `usage: pair start [AUTHOR_CLI [REVIEWER_CLI]] [options] [-- AUTHOR_ARGS...]
 
-Auto mode (macOS and Linux). Opens the --as participant interactively as the author. Each review
-request starts the reviewer participant non-interactively for one round, and the review comes back
-inline to the author's pair send. Run it in your own terminal, outside Claude or Codex. It first
-prints where it will run, the author's conversation and the reviewer's settings, and in a terminal
-waits for Enter; it runs pair init there if pair's instructions are missing. A Codex session
-registered with pair register blocks it; run pair unregister first.
+Auto mode (macOS and Linux). Opens the author interactively; each review request starts the
+reviewer for one round, and the review comes back inline to the author's pair send. Run it in your
+own terminal, outside Claude or Codex. It prints what it will run and waits for Enter, and runs
+pair init first if pair's instructions are missing.
+
+Each CLI is claude or codex; the reviewer's defaults to the other one. Each participant is named
+after its CLI unless you name it; a reviewer that would get the author's name is <cli>_reviewer.
+Without CLIs, as before 0.10, --as (default: $PAIR_AGENT) must be claude or codex and also picks
+the author's CLI.
+
+  pair start claude                                   claude, reviewed by codex
+  pair start codex                                    codex, reviewed by claude
+  pair start claude claude                            claude, reviewed by claude_reviewer
+  pair start claude claude --as alice --reviewer bob  alice, reviewed by bob, both on Claude
+  pair start codex --worktree feature/login --resume
 
 options:
-  --as NAME                    the interactive author (default: $PAIR_AGENT)
-  --cli claude|codex           the author's CLI (default: NAME, when NAME is claude or codex)
-  --reviewer NAME              the reviewer participant (default: the other of claude and codex;
-                               <cli>_reviewer when both use the same CLI)
-  --reviewer-cli claude|codex  the reviewer's CLI (default: the other CLI, or NAME when the reviewer
-                               is claude or codex). Same as --cli for a same-CLI pair.
-  --worktree NAME              run everything in the git worktree ../<repo>-NAME. The first run
-                               creates it on branch NAME (a new branch from HEAD, so uncommitted
-                               changes stay here, or one tracking a remote NAME). Later runs reuse
-                               it with whatever it has checked out (a branch or a detached HEAD).
-  --resume                     resume the author conversation pair last recorded for the checkout
-                               the session runs in (pair status shows it)
+  --as NAME                    the author's participant name
+  --reviewer NAME              the reviewer's participant name
+  --worktree NAME              run in the git worktree ../<repo>-NAME, created on branch NAME (new
+                               from HEAD, or tracking a remote NAME) on the first run
+  --resume                     resume the author conversation pair last recorded for the session's checkout
+  --reviewer-model MODEL       the reviewer's model (default: its CLI's)
+  --reviewer-effort LEVEL      the reviewer's reasoning effort, such as high (default: its CLI's).
+                               pair reviewer changes the model and effort while the session runs.
+  -- AUTHOR_ARGS...            options for the interactive claude or codex, such as --model, or the
+                               conversation to continue: claude --resume ID or --continue, codex
+                               resume ID (first). Only options from an allowlist are accepted.
+
+advanced options:
   -y, --yes                    start without waiting for Enter
-  --reviewer-model MODEL       the reviewer CLI's model ID or alias (default: that CLI's default)
-  --reviewer-effort LEVEL      reviewer reasoning effort (default: that CLI's default)
-                               codex: none, minimal, low, medium, high, xhigh, max, ultra
-                               claude: low, medium, high, xhigh, max, ultracode
-                               pair reviewer changes the model and effort later.
-  --reviewer-args="ARGS"       more reviewer options, split on spaces. A claude reviewer accepts
-                               --fallback-model, --max-budget-usd and --strict-mcp-config; a codex
-                               reviewer -c/--config model_*=VALUE (effort: --reviewer-effort).
-                               Nothing that changes its tools or sandbox. Use = since the value
-                               starts with a dash.
-  --serve-worktrees            also review subagents working in other git worktrees of this
-                               repository: each runs its own review loop there, in one queue with
-                               this worktree's. pair status lists them. See README, Parallel work.
-  --reviewers N                review rounds that may run at once with --serve-worktrees (default 1,
-                               max 8)
-  --claude /ABSOLUTE/PATH      claude executable (default: first claude on PATH)
-  --codex /ABSOLUTE/PATH       codex executable (default: first codex on PATH)
+  --reviewer-args="ARGS"       more reviewer options from an allowlist, split on spaces (use =)
+  --serve-worktrees            also review subagents in other worktrees of this repository
+  --reviewers N                review rounds at once with --serve-worktrees (default 1, max 8)
+  --claude PATH, --codex PATH  absolute path of each CLI (default: the first on PATH)
   --timeout SECONDS            limit for each review round (default 900, max 86400)
   --grace SECONDS              wait between terminating and killing a process (default 2, max 30)
-  -- AUTHOR_ARGS...            pass the rest to the interactive claude or codex. Only options that
-                               keep it an interactive session in this worktree are accepted, each
-                               with at most one value; others are refused with the supported list.
-                               To continue a conversation: claude --resume ID or --continue, codex
-                               resume ID (first). See README, Author conversations.
 
-  pair start --as claude --reviewer-effort high -- --model opus --permission-mode acceptEdits
-  pair start --as codex --worktree feature/login
-  pair start --as codex --worktree feature/login --resume
-  pair start --as claude --reviewer-args="-c model_verbosity=low" -- --model opus
-  pair start --as codex --reviewer-args="--fallback-model sonnet" -- --model MODEL --search
-
-Inspect it from another terminal in the same worktree (with --worktree, the new one) with
-pair status or pair ps -v; stop it with pair stop.`,
+README, Auto mode, has the details. From another terminal in the session's worktree, pair status and
+pair ps -v show it, and pair stop stops it.`,
   reviewer: `usage: pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
 
 Change the reviewer settings of this worktree's running auto session without restarting it. Run it
@@ -2101,7 +2085,7 @@ first review round, so by default the change applies to new threads only. pair s
 
 options:
   --reviewer-model MODEL       the reviewer CLI's model ID or alias; default: that CLI's default
-  --reviewer-effort LEVEL      reviewer reasoning effort (values as for pair start); default: the CLI's
+  --reviewer-effort LEVEL      reviewer reasoning effort, such as high; default: the CLI's
   --thread current|ID          change only the pending thread whose last review round failed, for
                                example over a mistyped model. Its next round starts a new reviewer
                                conversation, which reads the thread so far; the author's pair wait
@@ -2203,7 +2187,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, cli: { type: "string" }, reviewer: { type: "string" }, "reviewer-cli": { type: "string" } },
+    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } },
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -2235,8 +2219,8 @@ async function main(argv: string[]): Promise<number> {
   if (values.to !== undefined && command !== "send") {
     throw new PairError("--to is only supported by pair send");
   }
-  if ((values.cli !== undefined || values.reviewer !== undefined || values["reviewer-cli"] !== undefined) && command !== "start") {
-    throw new PairError("--cli, --reviewer and --reviewer-cli are only supported by pair start");
+  if (values.reviewer !== undefined && command !== "start") {
+    throw new PairError("--reviewer is only supported by pair start");
   }
   const root = worktreeRoot();
   const channel = channelDir(root);
@@ -2298,7 +2282,7 @@ async function main(argv: string[]): Promise<number> {
       await autoCall(owner, { action: "review", run: process.env.PAIR_AUTO_RUN, file: state.last.file, root, author }, 24 * 60 * 60 * 1000);
     } catch (error) {
       if (hasCode(error, "EPERM", "EACCES")) {
-        throw new PairError(`managed review cannot connect to ${autoSocketPath(owner)}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start --as claude supplies it through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
+        throw new PairError(`managed review cannot connect to ${autoSocketPath(owner)}. Claude needs sandbox.network.allowUnixSockets for this exact socket. pair start supplies it to Claude through --settings; check managed sandbox policy if access is still denied. The request remains on disk.`);
       }
       throw new PairError(`managed review failed: ${errorMessage(error)}. The request remains on disk.`);
     }
@@ -2310,32 +2294,36 @@ async function main(argv: string[]): Promise<number> {
         await runGuardian();
         return 0;
       case "start": {
-        // The author and reviewer are participants; each has the CLI that runs it. The defaults keep
-        // today's command lines: --as claude means a Claude author reviewed by codex on Codex.
-        const authorName = agent();
-        const cliOf = (value: string, what: string): Backend => oneOf(value, BACKENDS, what);
-        const me: Backend = values.cli !== undefined ? cliOf(values.cli, "--cli")
-          : isBackend(authorName) ? authorName
-          : (() => { throw new PairError(`pass --cli claude|codex: the CLI that runs the author ${authorName}`); })();
-        const reviewer: Backend = values["reviewer-cli"] !== undefined ? cliOf(values["reviewer-cli"], "--reviewer-cli")
-          : values.reviewer === undefined ? partnerOf(me)
-          : isBackend(values.reviewer) ? values.reviewer
-          : (() => { throw new PairError(`pass --reviewer-cli claude|codex: the CLI that runs the reviewer ${values.reviewer}`); })();
-        const reviewerName = values.reviewer !== undefined ? named(values.reviewer, "--reviewer")
-          : reviewer === me ? `${reviewer}_reviewer`
-          : defaultPartner(authorName) ?? (() => { throw new PairError(`pass --reviewer NAME: the participant that reviews ${authorName}`); })();
+        // pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME]: the words choose CLIs,
+        // the flags names. The 0.9 form, --as claude|codex without CLIs, still names the author's CLI.
+        const clis = rest.slice(0, rest.length - passthrough.length);
+        if (clis.length > 2) {
+          throw new PairError("pair start takes at most two CLIs, the author's and the reviewer's; put the author's own options after --");
+        }
+        const [authorCli, reviewerCli] = clis.map((value, index): Backend => {
+          if (isBackend(value)) return value;
+          throw new PairError(`${index === 0 ? "the author's" : "the reviewer's"} CLI must be claude or codex (got "${value}"); participant names go in --as and --reviewer`);
+        });
+        if (authorCli === undefined && values.as === undefined && !process.env.PAIR_AGENT) {
+          throw new PairError("name the author's CLI: pair start claude|codex (see pair help start)");
+        }
+        // With a CLI given, the author's name defaults to it, not to $PAIR_AGENT, so the command means the same in every shell.
+        const authorName = authorCli !== undefined && values.as === undefined ? authorCli : agent();
+        const me: Backend = authorCli ?? (isBackend(authorName) ? authorName
+          : (() => { throw new PairError(`name the CLI that runs ${authorName}: pair start claude|codex --as ${authorName}`); })());
+        const reviewer: Backend = reviewerCli ?? partnerOf(me);
+        const defaultReviewer = reviewer === authorName ? `${reviewer}_reviewer` : reviewer;
+        const reviewerName = values.reviewer !== undefined ? named(values.reviewer, "--reviewer") : defaultReviewer;
         if (reviewerName === authorName) throw new PairError("the reviewer must be a different participant from the author");
-        // Names and CLIs beyond the defaults, for the restart command: an option is left out only
-        // when the resolution above gives back the same value without it.
+        // The restart command's pairing: the author's CLI always, then what the defaults wouldn't give back.
         const pairing = [
-          ...(authorName === me ? [] : ["--cli", me]),
-          ...(reviewer === partnerOf(me) && reviewerName === defaultPartner(authorName) ? [] : ["--reviewer", reviewerName, "--reviewer-cli", reviewer]),
+          me,
+          ...(reviewer === partnerOf(me) ? [] : [reviewer]),
+          ...(authorName === me ? [] : ["--as", authorName]),
+          ...(reviewerName === defaultReviewer ? [] : ["--reviewer", reviewerName]),
         ];
         const who = (name: string, cli: Backend) => name === cli ? cli : `${name} (${cli})`;
         try {
-          if (rest.length !== passthrough.length) {
-            throw new PairError("pair start takes no arguments of its own; put the author's claude or codex options after --");
-          }
           const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
           if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
@@ -2390,9 +2378,9 @@ async function main(argv: string[]): Promise<number> {
           }
           return await startAuto({
             ...choices, authorName, reviewerName, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
-            restartOptions: [
-              ["--as", authorName], ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
-            ].flatMap(([name, value]) => value === undefined ? [] : [name!, value]).concat(pairing).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`])
+            restartOptions: pairing.concat([
+              ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
+            ].flatMap(([name, value]) => value === undefined ? [] : [name!, value])).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`])
               .concat(serveWorktrees ? ["--serve-worktrees", ...(values.reviewers === undefined ? [] : ["--reviewers", values.reviewers])] : []),
             timeoutMs: timeout * 1000,
             graceMs: grace * 1000,

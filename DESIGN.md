@@ -8,7 +8,7 @@ auto mode, `pair start` runs the author interactively and starts the reviewer fo
 
 | Topic | Choice |
 |---|---|
-| Topology | Manual mode uses two live sessions. Opt-in `pair start --as <author>` owns an interactive author and starts a headless reviewer for each round. |
+| Topology | Manual mode uses two live sessions. Opt-in `pair start <author-cli> [<reviewer-cli>]` owns an interactive author and starts a headless reviewer for each round. |
 | Roles | Symmetric. Either agent can author or review. |
 | Participants | A participant is a name (`^[a-z][a-z0-9_]{0,31}$`, no dashes, so lane names parse); the CLI that runs it is a property of the session, never stored in a message or lane. `claude` and `codex` are the default names and each other's default partner, so existing channels and commands are unchanged. Self comes from `--as`/`PAIR_AGENT`; a new request's partner from `--to`, `PAIR_PARTNER` or the default partner; a reply's from `--to`, as the `== next:` line names it, never guessed. Specified in [docs/specs/participants.md](docs/specs/participants.md). |
 | Interface | One `pair` CLI (Node/TS). The agents learn it from a thin prompt: a Claude skill and an AGENTS.md section for Codex. |
@@ -182,12 +182,16 @@ control socket for the worktree and forks an IPC guardian, which owns the intera
 each bounded reviewer.
 
 The session's pairing is fixed at startup: the author's name and CLI, and the reviewer's name and
-CLI, resolved from `--as`, `--cli`, `--reviewer` and `--reviewer-cli`. Each agent gets its own name
-as `PAIR_AGENT`, the other's as `PAIR_PARTNER`, and its CLI as `PAIR_AUTO_CLI`, which picks the
-session-ID variable it reports. Launch arguments, tool allowlist, output parsing and effort names
+CLI. The words after `start` choose the CLIs (the reviewer's defaults to the other one), and `--as`
+and `--reviewer` the names. Each name defaults to its CLI's, or to `<cli>_reviewer` for a reviewer
+that would get the author's. Names never choose CLIs, except in the 0.9 form without CLIs, where
+`--as claude|codex` (or `PAIR_AGENT`) is also the author's CLI; with a CLI, `PAIR_AGENT` is
+ignored. Each agent gets its own name as `PAIR_AGENT`, the other's as `PAIR_PARTNER`, and its CLI
+as `PAIR_AUTO_CLI`, which picks the session-ID variable it reports. Launch arguments, tool allowlist, output parsing and effort names
 follow each side's CLI, so a same-CLI reviewer is launched like any other, with its own
-conversation per thread. Only the CLIs the pairing uses are resolved. The restart command repeats
-each pairing option the defaults wouldn't reproduce.
+conversation per thread. Only the CLIs the pairing uses are resolved. The restart command starts
+with the author's CLI and adds only what the defaults wouldn't give back, so it reproduces the
+pairing in any shell.
 
 ### Startup
 

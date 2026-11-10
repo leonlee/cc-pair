@@ -93,6 +93,13 @@ name is validated, so the note still carries no channel content. `unregister --a
 
 ## Auto mode
 
+> **Revised before 0.10.0 shipped** (brainstorm thread `2026-11-09T23-52-41-797Z-06665a`): the
+> CLIs became words, `pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME]`, and
+> `--cli` and `--reviewer-cli` were dropped. A name defaults to its CLI's (`<cli>_reviewer` for a
+> reviewer that would get the author's) and never chooses a CLI, except `--as claude|codex` in the
+> form without CLIs. README §4 and DESIGN.md describe the current rules; the text below is the
+> original spec.
+
 ```sh
 pair start --as alice --cli claude --reviewer bob --reviewer-cli claude
 pair start --as claude                     # as today: reviewer codex, CLI codex

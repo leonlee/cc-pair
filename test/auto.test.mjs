@@ -545,7 +545,7 @@ for (const remoteBranch of [false, true]) test(`auto start --worktree runs the w
   assert.match(f.read("first.out"), /verdict changes/, "the review reached the author through the worktree's channel");
   const status = spawnSync(process.execPath, [CLI, "status"], { cwd: worktree, env: f.env, encoding: "utf8" }).stdout;
   const restart = /restart it: (.*)/.exec(status)?.[1] ?? "";
-  assert.ok(restart.startsWith(`cd ${worktree} && pair start --as claude `), status);
+  assert.ok(restart.startsWith(`cd ${worktree} && pair start claude --claude `), status);
   assert.doesNotMatch(restart, /--worktree/, "after cd, --worktree would name a second worktree");
 });
 
@@ -639,7 +639,7 @@ test("auto start refuses agent arguments outside its allowlists", () => {
   try {
     const refused = (name, agent) => new RegExp(`can't pass "${name}" to the ${agent}`);
     for (const [args, message] of [
-      [["--as", "claude", "stray"], /takes no arguments of its own/],
+      [["--as", "claude", "stray"], /the author's CLI must be claude or codex \(got "stray"\)/],
       // Print and background modes, settings that replace pair's, directory switches, and a second terminator.
       ...["-p", "--print", "--output-format", "--settings=x.json", "--bg", "--background", "--desktop", "-w", "--worktree", "--"]
         .map((arg) => [["--as", "claude", "--", "--model", "opus", arg], refused(arg.split("=")[0], "claude author")]),
@@ -768,7 +768,7 @@ test("heartbeat expiry cleans a hung launcher's workers", { timeout: 20_000 }, a
 test("standard help describes auto mode", () => {
   const result = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /pair start --as/);
+  assert.match(result.stdout, /pair start \[AUTHOR_CLI \[REVIEWER_CLI\]\]/);
   assert.match(result.stdout, /pair stop/);
   assert.match(result.stdout, /--reviewer-model MODEL/);
   assert.match(result.stdout, /--reviewer-effort LEVEL/);
@@ -813,7 +813,7 @@ test("a new Claude author gets an ID that pair start, status and stop report, wi
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(new\\)`));
   const stopped = (await f.command(["stop"])).stdout;
   assert.match(stopped, new RegExp(`last author session: ${id} \\(picked by pair, .*; pair doesn't check that it still exists\\)`));
-  assert.equal(/restart it: (.*)/.exec(stopped)?.[1], `cd ${realpathSync(f.root)} && pair start --as claude --claude ${f.fake} --codex ${f.fake} --timeout 5 --grace 0.15 --reviewer-model m1 -- --model opus --resume ${id}`);
+  assert.equal(/restart it: (.*)/.exec(stopped)?.[1], `cd ${realpathSync(f.root)} && pair start claude --claude ${f.fake} --codex ${f.fake} --timeout 5 --grace 0.15 --reviewer-model m1 -- --model opus --resume ${id}`);
   await f.completed;
   assert.match((await f.command(["status"])).stdout, new RegExp(`auto mode: stopped\n  last author session: ${id}`), "the record outlives the run");
 });
@@ -1436,17 +1436,18 @@ test("--serve-worktrees: enrollment refuses what it can't validate", { timeout: 
   assert.equal(reviewerCalls(f).length, 0);
 });
 
-// Named participants in auto mode: any CLI on either side, with names independent of CLIs.
+// Named participants in auto mode: the words choose CLIs, the flags names. The fixture always passes --as.
 const pairings = [
-  { author: "claude", args: ["--reviewer-cli", "claude"], reviewer: "claude_reviewer", cli: "claude", restart: "--reviewer claude_reviewer --reviewer-cli claude" },
-  { author: "codex", args: ["--reviewer-cli", "codex"], reviewer: "codex_reviewer", cli: "codex", restart: "--reviewer codex_reviewer --reviewer-cli codex" },
-  { author: "alice", args: ["--cli", "claude", "--reviewer", "bob", "--reviewer-cli", "codex"], reviewer: "bob", cli: "codex", restart: "--cli claude --reviewer bob --reviewer-cli codex" },
-  { author: "alice", args: ["--cli", "codex", "--reviewer", "bob", "--reviewer-cli", "codex"], reviewer: "bob", cli: "codex", restart: "--cli codex --reviewer bob --reviewer-cli codex" },
-  // A default participant on the other CLI: the name stays the author's default partner.
-  { author: "claude", args: ["--cli", "codex", "--reviewer-cli", "claude"], reviewer: "codex", cli: "claude", restart: "--cli codex" },
-  { author: "codex", args: ["--cli", "claude", "--reviewer-cli", "codex"], reviewer: "claude", cli: "codex", restart: "--cli claude" },
-  // A custom author reviewed by a default name: its restart must keep --reviewer.
-  { author: "alice", args: ["--cli", "claude", "--reviewer", "codex"], reviewer: "codex", cli: "codex", restart: "--cli claude --reviewer codex --reviewer-cli codex" },
+  { author: "claude", args: ["claude", "claude"], reviewer: "claude_reviewer", cli: "claude", restart: "claude claude" },
+  { author: "codex", args: ["codex", "codex"], reviewer: "codex_reviewer", cli: "codex", restart: "codex codex" },
+  { author: "alice", args: ["claude"], reviewer: "codex", cli: "codex", restart: "claude --as alice" },
+  { author: "alice", args: ["claude", "--reviewer", "bob"], reviewer: "bob", cli: "codex", restart: "claude --as alice --reviewer bob" },
+  { author: "alice", args: ["codex", "codex", "--reviewer", "bob"], reviewer: "bob", cli: "codex", restart: "codex codex --as alice --reviewer bob" },
+  // A built-in name on the other CLI: names never pick a CLI once one is given.
+  { author: "claude", args: ["codex"], reviewer: "claude_reviewer", cli: "claude", restart: "codex --as claude" },
+  { author: "alice", args: ["claude", "codex", "--reviewer", "claude"], reviewer: "claude", cli: "codex", restart: "claude --as alice --reviewer claude" },
+  // Explicit defaults are left out.
+  { author: "codex", args: ["codex", "claude", "--reviewer", "claude"], reviewer: "claude", cli: "claude", restart: "codex" },
 ];
 for (const { author, args, reviewer, cli, restart: pairing } of pairings) {
   test(`auto ${author} with ${args.join(" ")}: a full loop under the reviewer's name and CLI`, { timeout: 20_000 }, async (t) => {
@@ -1466,34 +1467,63 @@ for (const { author, args, reviewer, cli, restart: pairing } of pairings) {
     assert.equal(calls[1].args[calls[1].args.indexOf(resume) + 1], "11111111-1111-4111-8111-000000000001", "a thread's later round resumes its reviewer");
     assert.ok(!calls[2].args.includes(resume), "a new thread gets a fresh reviewer conversation");
     assert.match((await f.command(["history"])).stdout, new RegExp(`${author}-to-${reviewer}\\s+approved`));
-    // The restart command (known once the author's conversation is) repeats exactly the options
-    // that don't resolve to the same pairing without them.
+    // The restart command (known once the author's conversation is) starts with the pairing: the
+    // author's CLI, then only what the defaults wouldn't give back.
     const restart = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8")).restart;
-    const authorCli = args.includes("--cli") ? args[args.indexOf("--cli") + 1] : author;
-    if (authorCli === "claude") {
+    if (args[0] === "claude") {
       assert.ok(restart, "a new Claude author's restart command is known at launch");
       assert.match(JSON.parse(f.read("author.args.json")).at(-1), new RegExp(`pass --as ${author} --to ${reviewer},`), "each launch restates the pairing");
     }
     if (restart) {
-      assert.match(restart, new RegExp(`pair start --as ${author} `));
-      assert.ok(restart.includes(` --grace 0.15 ${pairing} -- `), restart);
+      assert.ok(restart.includes(` && pair start ${pairing} --claude `), restart);
     }
   });
 }
 
+test("each pairing's restart form resolves to the same participants, whatever PAIR_AGENT says", () => {
+  const root = mkdtempSync(join(tmpdir(), "pair-auto-pairing-"));
+  const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AGENT: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_NO_UPDATE_CHECK: "1" };
+  const run = (args, extra = {}) => spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
+  // A registered Codex session stops pair start right after it prints the pairing, before anything starts.
+  const summary = (args, extra) => {
+    const result = run(["start", "--claude", process.execPath, "--codex", process.execPath, ...args], extra);
+    assert.match(result.stderr, /registered here as codex/, result.stderr);
+    return result.stderr.split("\n").filter((line) => /^pair: {3}(author|reviewer) /.test(line)).map((line) => line.split(" · ")[0]);
+  };
+  try {
+    assert.equal(run(["register"], { CODEX_THREAD_ID: "11111111-2222-4333-8444-555555555555" }).status, 0);
+    for (const { author, args, reviewer, cli, restart } of pairings) {
+      const authorCli = args[0];
+      const who = (name, of) => name === of ? of : `${name} (${of})`;
+      const expected = [`pair:   author ${who(author, authorCli)}`, `pair:   reviewer ${who(reviewer, cli)}`];
+      assert.deepEqual(summary(["--as", author, ...args]), expected, args.join(" "));
+      assert.deepEqual(summary(restart.split(" "), { PAIR_AGENT: "zed", PAIR_PARTNER: "yan" }), expected, restart);
+    }
+    // The form without CLIs keeps its 0.9 meaning, PAIR_AGENT included.
+    assert.deepEqual(summary(["--as", "codex"]), ["pair:   author codex", "pair:   reviewer claude"]);
+    assert.deepEqual(summary([], { PAIR_AGENT: "codex" }), ["pair:   author codex", "pair:   reviewer claude"]);
+    assert.deepEqual(summary(["--as", "claude", "--reviewer", "bob"]), ["pair:   author claude", "pair:   reviewer bob (codex)"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("auto mode with two Claude CLIs needs no Codex install", { timeout: 20_000 }, async (t) => {
-  const f = fixture(t, { pairArgs: ["--reviewer-cli", "claude"], codexPath: "/nonexistent/codex" });
+  const f = fixture(t, { pairArgs: ["claude", "claude"], codexPath: "/nonexistent/codex" });
   assert.equal((await f.completed).code, 0, f.output());
   assert.match(f.read("third.out"), /verdict approve/);
 });
 
-test("pair start refuses an incomplete or self pairing", () => {
+test("pair start refuses an incomplete, unknown or self pairing", () => {
   const cases = [
-    [["--as", "alice"], /pass --cli claude\|codex: the CLI that runs the author alice/],
-    [["--as", "claude", "--reviewer", "bob"], /pass --reviewer-cli claude\|codex: the CLI that runs the reviewer bob/],
-    [["--as", "alice", "--cli", "claude"], /pass --reviewer NAME: the participant that reviews alice/],
-    [["--as", "alice", "--cli", "claude", "--reviewer", "alice", "--reviewer-cli", "codex"], /must be a different participant/],
-    [["--as", "claude", "--cli", "gemini"], /--cli must be one of: claude, codex/],
+    [[], /name the author's CLI: pair start claude\|codex/],
+    [["--as", "alice"], /name the CLI that runs alice: pair start claude\|codex --as alice/],
+    [["alice"], /the author's CLI must be claude or codex \(got "alice"\); participant names go in --as and --reviewer/],
+    [["claude", "gemini"], /the reviewer's CLI must be claude or codex \(got "gemini"\)/],
+    [["claude", "codex", "claude"], /at most two CLIs, the author's and the reviewer's/],
+    [["claude", "--as", "alice", "--reviewer", "alice"], /must be a different participant/],
+    [["claude", "--reviewer", "claude"], /must be a different participant/],
+    [["--as", "claude", "--cli", "codex"], /Unknown option '--cli'/],
   ];
   for (const [args, pattern] of cases) {
     const result = spawnSync(process.execPath, [CLI, "start", ...args, "-y"], { cwd: tmpdir(), env: { ...process.env, CLAUDECODE: "", CODEX_THREAD_ID: "", PAIR_AUTO_ROLE: "" }, encoding: "utf8" });
@@ -1501,7 +1531,7 @@ test("pair start refuses an incomplete or self pairing", () => {
     assert.match(result.stderr, pattern, args.join(" "));
   }
   const elsewhere = spawnSync(process.execPath, [CLI, "status", "--reviewer", "bob"], { cwd: tmpdir(), encoding: "utf8" });
-  assert.match(elsewhere.stderr, /--cli, --reviewer and --reviewer-cli are only supported by pair start/);
+  assert.match(elsewhere.stderr, /--reviewer is only supported by pair start/);
 });
 
 test("an auto session ignores unrelated lanes: an older unread approval elsewhere isn't its verdict", { timeout: 20_000 }, async (t) => {
