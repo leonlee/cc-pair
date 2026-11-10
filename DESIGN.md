@@ -86,7 +86,8 @@ Archiving is safe against concurrent readers and stale `wait`s. A thread disappe
 counts as closed, and a stale archive can only target its own, already-archived directory, so it
 never touches a newer thread.
 `pair history` lists finished threads, most recently finished first, and
-`pair history <id>` prints one transcript. It reads this worktree's channel and, read-only, those of
+`pair history <id>` prints one transcript, also of a thread still open in this worktree, whose ID
+`pair status` shows. It reads this worktree's channel and, read-only, those of
 the repository's other existing worktrees from `git worktree list`, found with the caller's
 PAIR_HOME, so a spec reviewed in one worktree can be cited from another. Their threads are marked
 with their worktree, and an unreadable one is skipped with a warning. Archiving and cleanup stay
@@ -365,6 +366,10 @@ directories without requiring successful protocol parsing. A small `reset.json` 
 lanes. Reset backups are deliberately outside archive retention and `pair history`.
 Both preview and reset output show best-effort lane states. Unread closed threads still in their
 lanes are included in the backup; only already-archived history is left in `pair history`.
+
+`pair uninit` keeps the channel and auto mode's state directory. `pair uninit --purge` also deletes
+both, after taking the same auto-mode lock as `pair reset`, so it is refused while an auto session
+runs in the worktree or serves it. Live manual agents aren't detected; the help says to stop them.
 
 Each lane rename is atomic. If a later rename fails, the command reports which lanes moved and
 where their backup is; it never deletes or rolls back over new data. Manual agents must be stopped

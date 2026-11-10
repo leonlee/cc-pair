@@ -403,7 +403,7 @@ export async function setReviewer(stateDir: string, change: ReviewerChange): Pro
 }
 
 /** Serialize a manual channel reset with auto startup using the same exclusive socket. */
-export async function withAutoStopped<T>(stateDir: string, operation: () => T): Promise<T> {
+export async function withAutoStopped<T>(stateDir: string, operation: () => T, command = "reset"): Promise<T> {
   if (process.platform === "win32") return operation(); // auto mode is unsupported there
   const path = autoSocketPath(stateDir, true);
   const server = createServer((socket) => socket.destroy());
@@ -412,9 +412,9 @@ export async function withAutoStopped<T>(stateDir: string, operation: () => T): 
     server.listen(path, () => { server.removeListener("error", reject); resolve(); });
   }).catch((error) => {
     if (hasCode(error, "EADDRINUSE")) {
-      throw new Error(`cannot reset while auto mode or another reset owns this worktree. Run pair stop first for auto mode, or wait for the other reset. If the owner is gone, inspect the stale socket reported by pair status: ${path}`);
+      throw new Error(`cannot ${command} while auto mode or another reset owns this worktree. Run pair stop first for auto mode, or wait for the other reset. If the owner is gone, inspect the stale socket reported by pair status: ${path}`);
     }
-    if (hasCode(error, "EPERM", "EACCES")) throw new Error(`reset needs the auto-mode lock socket at ${path}; run pair reset in your own terminal, outside agent sandboxes. Socket access was denied (${(error as NodeJS.ErrnoException).code}).`);
+    if (hasCode(error, "EPERM", "EACCES")) throw new Error(`${command} needs the auto-mode lock socket at ${path}; run pair ${command} in your own terminal, outside agent sandboxes. Socket access was denied (${(error as NodeJS.ErrnoException).code}).`);
     throw error;
   });
   try { return await operation(); }

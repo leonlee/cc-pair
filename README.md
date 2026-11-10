@@ -666,7 +666,10 @@ an auto session in the same conversation, run `pair stop`, then `pair start --re
 
 Run `pair uninit` in each worktree. It removes the skill (unless edited), the pair section of
 `AGENTS.md` (or the file, if nothing else remains) and the Codex registrations, and prints the
-command to delete message history. Then:
+command to delete message history. `pair uninit --purge` also deletes the channel (message
+history) and auto mode's state (the resume record and log), so the next `pair start` there begins
+fresh. It is refused while an auto session runs in or serves the worktree; stop any other agents
+using the channel first. Then:
 
 ```sh
 codex mcp remove pair

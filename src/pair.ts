@@ -1246,13 +1246,18 @@ async function serveMcp(): Promise<void> {
 }
 
 function describe(thread: Thread): string {
-  const state = stateOf(listMessages(thread));
+  return `${basename(thread.lane)}: ${openState(thread, listMessages(thread))}`;
+}
+
+/** Where an open thread stands, as pair status shows it. */
+function openState(thread: Thread, messages: Message[]): string {
+  const state = stateOf(messages);
   if (state.kind === "idle") {
-    return `${basename(thread.lane)}: idle`;
+    return "idle";
   }
   const turn = state.kind === "awaiting-review" ? thread.reviewer : thread.author;
   const kind = kindOf(state.last.status) === "brainstorm" ? "brainstorm " : "";
-  return `${basename(thread.lane)}: ${kind}${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
+  return `${kind}${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
 }
 
 function instructionState(path: string, expected: string, sectionOnly = false): string {
@@ -1569,9 +1574,33 @@ function history(channel: string, root: string, query: string | undefined, warn:
       .join("\n");
   }
   const matches = archived.filter((entry) => entry.id.includes(query));
-  if (matches.length !== 1) {
-    const found = matches.length === 0 ? "no finished thread matches" : `${matches.length} finished threads match`;
-    throw new PairError(`${found} "${query}"${matches.map((entry) => `\n  ${entry.id}${where(entry)}`).join("")}`);
+  // This worktree's open threads too: pair status shows their IDs. A lane pair can't read doesn't hide the others.
+  const open = lanesOf(channel).flatMap((thread) => {
+    let dir: string | undefined;
+    try { dir = currentThreadDir(thread); }
+    catch (error) {
+      warn(`skipped the open thread of ${basename(thread.lane)}: ${errorMessage(error)}`);
+      return [];
+    }
+    return dir !== undefined && basename(dir).includes(query) ? [{ id: basename(dir), dir, thread }] : [];
+  });
+  if (matches.length + open.length !== 1) {
+    const count = matches.length + open.length;
+    const found = count === 0 ? "no thread matches" : `${count} threads match`;
+    const listed = [...open.map((each) => `\n  ${each.id}  (open)`), ...matches.map((entry) => `\n  ${entry.id}${where(entry)}`)];
+    throw new PairError(`${found} "${query}"${listed.join("")}`);
+  }
+  if (open[0]) {
+    const { id, dir, thread } = open[0];
+    let messages: Message[];
+    try { messages = readThread(dir, thread); }
+    catch (error) {
+      if (isMissing(error)) throw new PairError(`thread ${id} finished while reading it; run pair history ${id} again`);
+      throw error;
+    }
+    const laneName = basename(thread.lane);
+    const transcript = messages.map((message) => `${messageHeader(message, laneName)}\n${message.body.trimEnd()}`);
+    return [`== thread ${id} · ${laneName} · open: ${openState(thread, messages)} ==`, ...transcript].join("\n\n");
   }
   const [entry] = matches;
   // An access error names the sandbox root of the channel it happened in, not this worktree's.
@@ -1747,7 +1776,7 @@ function shellQuote(text: string): string {
  * Undoes `init` in this worktree. Every version so far wrote the same two paths and section markers,
  * so this also cleans up after older versions. History and global setup are only reported.
  */
-function uninit(channel: string, root: string): string {
+function uninit(channel: string, root: string, purge: boolean): string {
   const removed: string[] = [];
   const notes: string[] = [];
 
@@ -1790,9 +1819,15 @@ function uninit(channel: string, root: string): string {
     removed.push(registrations.length === 1 ? "the codex session registration, so pair stops notifying it" : `the ${registrations.length} codex session registrations, so pair stops notifying them`);
   }
 
-  const history = [channel, stateDir(channel)].filter((dir) => existsSync(dir));
-  if (history.length > 0) {
-    notes.push(`kept: message history. To delete it: rm -rf ${history.map(shellQuote).join(" ")}`);
+  // lstat, not exists: a symlink whose target is gone is still there to delete, and would break the next init.
+  const history = [channel, stateDir(channel)].filter((dir) => {
+    try { lstatSync(dir); return true; } catch { return false; }
+  });
+  if (purge) {
+    channelAccess(channel, () => { for (const dir of history) rmSync(dir, { recursive: true, force: true }); });
+    removed.push(...history.map((dir) => dir === channel ? `${dir} (the channel: message history)` : `${dir} (auto mode's state: the resume record and log)`));
+  } else if (history.length > 0) {
+    notes.push(`kept: message history. To delete it: pair uninit --purge, or rm -rf ${history.map(shellQuote).join(" ")}`);
   }
   notes.push(
     "If no repo uses pair anymore: run `codex mcp remove pair`, then `npm uninstall -g claude-codex-pair`, and remove the pair home from the sandbox settings `pair init` printed.",
@@ -2005,12 +2040,12 @@ const USAGE = `usage:
   pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict approve|changes|continue|complete] <file|->
   pair wait --as NAME [--timeout seconds]             (prints "no message … yet" on timeout)
   pair status
-  pair history [thread-id]                            (list finished threads, or show one)
+  pair history [thread-id]                            (list finished threads, or show any thread)
   pair clean --keep N                                 (delete all but the N newest finished threads)
   pair reset [--as NAME] [--dry-run]                  (back up pending lanes; --as selects their author, default: all)
   pair init
   pair upgrade                                        (install the latest pair from npm, then refresh this worktree)
-  pair uninit                                         (remove what pair init wrote in this worktree; keeps history)
+  pair uninit [--purge]                               (undo pair init here; --purge also deletes history)
   pair register | unregister [--as NAME]              (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
   pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)
@@ -2141,7 +2176,7 @@ the worktree or the channel.`,
   history: `usage: pair history [THREAD]
 
 With no argument, list finished threads, newest first. With THREAD (any unique part of a thread
-id), print that thread's messages. It covers this worktree and the repository's other existing
+id), print that thread's messages, including a thread still open in this worktree. It covers this worktree and the repository's other existing
 worktrees (git worktree list), whose threads are marked with their path; their channels are found
 with this shell's PAIR_HOME.`,
   clean: `usage: pair clean --keep N
@@ -2166,10 +2201,14 @@ Rerun it to refresh stale instructions; it keeps files that a newer pair wrote.`
 
 Run in your own terminal. If npm has a newer version, install it globally, then refresh this
 worktree's instructions. Restart Claude Code and Codex afterwards.`,
-  uninit: `usage: pair uninit
+  uninit: `usage: pair uninit [--purge]
 
 Undo pair init in this worktree: remove the pair section of AGENTS.md, the pair skill (unless you
-changed it), and the Codex session registration. Message history is kept.`,
+changed it), and the Codex session registration. Message history is kept.
+
+  --purge   also delete this worktree's channel (message history) and auto mode's state (the
+            resume record and log). Refused while an auto session runs here or serves this
+            worktree; stop any agents waiting on the channel first.`,
   help: HELP,
   register: REGISTER_HELP,
   unregister: REGISTER_HELP,
@@ -2185,7 +2224,7 @@ options:
   -v, --verbose                show full command lines`,
 };
 
-const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } } as const;
+const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, purge: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } } as const;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals, tokens } = parseArgs({
@@ -2206,6 +2245,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
+  if (values.purge && command !== "uninit") throw new PairError("--purge is only supported by pair uninit");
   if ((values.yes || values.resume) && command !== "start") {
     throw new PairError(`${values.yes ? "--yes" : "--resume"} is only supported by pair start`);
   }
@@ -2523,7 +2563,13 @@ async function main(argv: string[]): Promise<number> {
       case "upgrade":
         return upgrade(root);
       case "uninit":
-        console.log(uninit(channel, root));
+        if (!values.purge) {
+          console.log(uninit(channel, root, false));
+          return 0;
+        }
+        // A running session, or one serving this worktree, holds its lock: purge never deletes a live channel.
+        try { console.log(await withAutoStopped(stateDir(channel), () => uninit(channel, root, true), "uninit --purge")); }
+        catch (error) { throw new PairError(errorMessage(error)); }
         return 0;
       case "register":
         if (process.env.PAIR_AUTO_ROLE) throw new PairError("auto mode delivers reviews inline; session registration is unnecessary");
