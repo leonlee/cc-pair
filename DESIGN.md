@@ -367,6 +367,10 @@ lanes. Reset backups are deliberately outside archive retention and `pair histor
 Both preview and reset output show best-effort lane states. Unread closed threads still in their
 lanes are included in the backup; only already-archived history is left in `pair history`.
 
+`pair uninit` keeps the channel and auto mode's state directory. `pair uninit --purge` also deletes
+both, after taking the same auto-mode lock as `pair reset`, so it is refused while an auto session
+runs in the worktree or serves it. Live manual agents aren't detected; the help says to stop them.
+
 Each lane rename is atomic. If a later rename fails, the command reports which lanes moved and
 where their backup is; it never deletes or rolls back over new data. Manual agents must be stopped
 before reset. On macOS/Linux, reset exclusively binds the auto-mode control socket until it finishes,

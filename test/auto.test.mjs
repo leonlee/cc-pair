@@ -1339,6 +1339,11 @@ test("--serve-worktrees: a subagent's loop runs through the root's owner, writes
   await assert.rejects(inDir(f, c1, ["stop"]), /served by the auto session in .*run pair stop there, which stops the whole session/s);
   await assert.rejects(inDir(f, c1, ["reviewer", "--reviewer-model", "x"]), /run pair reviewer there to change the settings for new threads/);
   await assert.rejects(inDir(f, c1, ["reset", "--as", "claude"]), /cannot reset while auto mode or another reset owns this worktree/);
+  // A purge would delete a live channel, the served worktree's or the session's own: refused, and nothing is removed.
+  await assert.rejects(inDir(f, c1, ["uninit", "--purge"]), /cannot uninit --purge while auto mode/);
+  assert.ok(existsSync(join(f.root, "home", channelName(c1))));
+  await assert.rejects(f.command(["uninit", "--purge"]), /cannot uninit --purge while auto mode/);
+  assert.ok(existsSync(join(f.root, "AGENTS.md")) && existsSync(f.stateDir()), "uninit didn't start");
   assert.equal(f.state().phase, "idle", "nothing in the subagent's worktree stopped the session");
 });
 

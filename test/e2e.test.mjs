@@ -961,7 +961,7 @@ test("uninit removes what init wrote, even from an older version, and keeps ever
   assert.match(out, /removed: .*SKILL\.md/);
   assert.match(out, /removed: the pair section of .*AGENTS\.md/);
   assert.match(out, /removed: the codex session registration/);
-  assert.match(out, /kept: message history\. To delete it: rm -rf '/);
+  assert.match(out, /kept: message history\. To delete it: pair uninit --purge, or rm -rf '/);
   assert.match(out, /codex mcp remove pair/);
   assert.equal(readFileSync(agents, "utf8"), "# My rules\n\nBe kind.\n", "the user's own text is untouched");
   assert.equal(existsSync(join(root, ".claude")), false, "directories init created are gone once empty");
@@ -983,6 +983,33 @@ test("uninit removes what init wrote, even from an older version, and keeps ever
   writeFileSync(skill, `${readFileSync(join(import.meta.dirname, "fixtures", "skill-0.1.x.md"), "utf8")}\nMy extra rule.\n`);
   assert.match(ok(["uninit"]), /kept: .*SKILL\.md \(it isn't a file pair init wrote/);
   assert.match(readFileSync(skill, "utf8"), /My extra rule\./);
+});
+
+test("uninit --purge also deletes the channel and auto mode's state, and only uninit takes it", () => {
+  const { env, run, ok } = sandbox();
+  ok(["init"]);
+  ok(["send", "request", "--as", "claude", "-"], "history to delete");
+  const channel = ok(["status"]).split("\n")[0].replace("channel: ", "");
+  const state = join(env.XDG_STATE_HOME, "pair", basename(channel));
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "author.json"), "{}");
+  assert.match(run(["status", "--purge"]).out, /--purge is only supported by pair uninit/);
+  const out = ok(["uninit", "--purge"]);
+  assert.ok(out.includes(`removed: ${channel} (the channel: message history)`), out);
+  assert.ok(out.includes(`removed: ${state} (auto mode's state: the resume record and log)`), out);
+  assert.match(out, /removed: .*SKILL\.md/);
+  assert.doesNotMatch(out, /kept: message history/);
+  assert.equal(existsSync(channel) || existsSync(state), false);
+  assert.match(ok(["history"]), /no finished threads yet/);
+  assert.match(ok(["uninit", "--purge"]), /^nothing from pair init found in /, "nothing left: still fine");
+  // Links whose targets are gone are removed too, so the next init works.
+  symlinkSync(join(dirname(channel), "gone"), channel);
+  symlinkSync(join(dirname(state), "gone"), state);
+  const dangling = ok(["uninit", "--purge"]);
+  assert.ok(dangling.includes(`removed: ${channel} (`) && dangling.includes(`removed: ${state} (`), dangling);
+  assert.throws(() => lstatSync(channel));
+  assert.throws(() => lstatSync(state));
+  ok(["init"]);
 });
 
 test("uninit keeps the text around pair sections in the middle, repeated, or with CRLF", () => {
@@ -1016,7 +1043,7 @@ test("uninit's printed cleanup command is safe to paste for any worktree name", 
   const run = (args, input) => spawnSync("node", [CLI, ...args], { cwd: worktree, env, input, encoding: "utf8" });
   assert.equal(run(["send", "request", "--as", "claude", "-"], "req").status, 0);
   const out = run(["uninit"]).stdout;
-  const command = /To delete it: (rm -rf .*)/.exec(out)?.[1];
+  const command = /To delete it: pair uninit --purge, or (rm -rf .*)/.exec(out)?.[1];
   assert.ok(command, out);
   const channel = join(root, "home", readdirSync(join(root, "home"))[0]);
   assert.equal(spawnSync("sh", ["-c", command], { cwd: root }).status, 0);
