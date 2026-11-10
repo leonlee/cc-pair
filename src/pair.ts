@@ -2046,8 +2046,8 @@ pair init first if pair's instructions are missing.
 Each CLI is claude or codex; the reviewer's defaults to the other one. Each participant is named
 after its CLI unless you name it; a reviewer that would get the author's name is <cli>_reviewer.
 Without CLIs, as before 0.10, --as claude|codex (default: $PAIR_AGENT) also picks the author's CLI.
-Otherwise, in a terminal, pair start asks for the CLIs, where to run, whether to resume, and the
-reviewer's model and effort, then shows the command and runs it.
+Otherwise, in a terminal, pair start asks whether to resume the recorded conversation (if any),
+then for the CLIs, where to run, and the reviewer's model and effort, and shows the command it runs.
 
   pair start claude                                   claude, reviewed by codex
   pair start codex                                    codex, reviewed by claude
@@ -2060,7 +2060,7 @@ options:
   --reviewer NAME              the reviewer's participant name
   --worktree NAME              run in the git worktree ../<repo>-NAME, created on branch NAME (new
                                from HEAD, or tracking a remote NAME) on the first run
-  --resume                     resume the author conversation pair last recorded for the session's checkout
+  --resume                     resume the conversation pair last recorded for the session's checkout
   --reviewer-model MODEL       the reviewer's model (default: its CLI's)
   --reviewer-effort LEVEL      the reviewer's reasoning effort, such as high (default: its CLI's).
                                pair reviewer changes the model and effort while the session runs.
@@ -2311,6 +2311,7 @@ async function main(argv: string[]): Promise<number> {
           const facts: StartFacts = {
             installed: BACKENDS.filter((cli) => { try { executable(cli, values[cli]); return true; } catch { return false; } }),
             git: gitPath("--show-toplevel") !== undefined,
+            repo: basename(root),
             checkWorktree: (name) => { planWorktree(root, name); },
             recorded: (cli, worktree) => {
               try { // the same record --resume would use, in the checkout the session would run in

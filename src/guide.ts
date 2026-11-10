@@ -16,6 +16,8 @@ export interface StartFacts {
   installed: Cli[];
   /** A git repository: --worktree is possible. */
   git: boolean;
+  /** This checkout's directory name: --worktree NAME runs in ../<repo>-NAME. */
+  repo: string;
   /** Throws why NAME can't be a --worktree. */
   checkWorktree(name: string): void;
   /** The conversation pair start --resume would continue for this author CLI and --worktree, if any. */
@@ -43,40 +45,52 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
     throw new Error("neither claude nor codex was found; install one, or pass --claude or --codex /absolute/path");
   }
   const missing = CLIS.filter((cli) => !facts.installed.includes(cli));
-  const author = await choose(prompter, "Author CLI", CLIS, undefined, missing);
+  const flags = given.envName ? ["--as", given.envName] : [];
+  // A conversation to resume comes first: it names the author's CLI and the checkout.
+  let author: Cli | undefined;
+  const found = facts.installed.map((cli) => ({ cli, record: facts.recorded(cli, given.worktree) })).find((each) => each.record);
+  let resumed = given.resume;
+  if (found && given.resume) {
+    author = found.cli;
+  } else if (found?.record) {
+    const resume = await yesNo(prompter, `Resume the ${found.cli} conversation ${found.record.id} (recorded ${found.record.at})? [y/N] `);
+    if (resume === undefined) return undefined;
+    if (resume) {
+      author = found.cli;
+      resumed = true;
+      flags.push("--resume");
+    }
+  }
+  author ??= await choose(prompter, "Author CLI", CLIS, undefined, missing);
   if (author === undefined) return undefined;
   const other: Cli = author === "claude" ? "codex" : "claude";
   const reviewer = await choose(prompter, "Reviewer CLI", CLIS, facts.installed.includes(other) ? other : undefined, missing);
   if (reviewer === undefined) return undefined;
-  const added = [author, ...(reviewer === other ? [] : [reviewer]), ...(given.envName ? ["--as", given.envName] : [])];
 
-  let worktree = given.worktree;
-  if (worktree === undefined && facts.git) {
-    const answer = await validated(prompter, "Run in: Enter for this checkout, or a branch name for a worktree ../<repo>-NAME: ", (name) => facts.checkWorktree(name));
-    if (answer === undefined) return undefined;
-    if (answer) {
-      worktree = answer;
-      added.push("--worktree", answer);
+  if (given.worktree === undefined && !resumed && facts.git) {
+    const worktree = await validated(prompter, `Run in: Enter for this checkout, or a branch name for a worktree ../${facts.repo}-NAME: `, (name) => facts.checkWorktree(name));
+    if (worktree === undefined) return undefined;
+    // Another checkout: its own recorded conversation, if any.
+    const record = worktree ? facts.recorded(author, worktree) : undefined;
+    if (worktree) flags.push("--worktree", worktree);
+    if (record) {
+      const resume = await yesNo(prompter, `Resume the ${author} conversation ${record.id} (recorded ${record.at})? [y/N] `);
+      if (resume === undefined) return undefined;
+      if (resume) flags.push("--resume");
     }
-  }
-  const record = given.resume ? undefined : facts.recorded(author, worktree);
-  if (record) {
-    const resume = await yesNo(prompter, `Resume the ${author} conversation ${record.id} (recorded ${record.at})? [y/N] `);
-    if (resume === undefined) return undefined;
-    if (resume) added.push("--resume");
   }
   if (!given.model) {
     const model = await validated(prompter, `Reviewer model: Enter for ${reviewer}'s default, or a model ID or alias: `, (value) => facts.checkModel(value));
     if (model === undefined) return undefined;
-    if (model) added.push("--reviewer-model", model);
+    if (model) flags.push("--reviewer-model", model);
   }
   if (!given.effort) {
     const fallback = `${reviewer}'s default`;
     const effort = await choose(prompter, "Reviewer effort", [fallback, ...facts.efforts[reviewer]], fallback);
     if (effort === undefined) return undefined;
-    if (effort !== fallback) added.push("--reviewer-effort", effort);
+    if (effort !== fallback) flags.push("--reviewer-effort", effort);
   }
-  return added;
+  return [author, ...(reviewer === other ? [] : [reviewer]), ...flags];
 }
 
 /** A numbered menu answered by number or name; Enter takes the fallback, if there is one. */

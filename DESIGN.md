@@ -196,8 +196,9 @@ pairing in any shell.
 ### Startup
 
 When the command doesn't name the author's CLI and stdin and stdout are terminals (no `--yes`),
-pair asks first: the CLIs, the location, a resume when the target has a usable record, and the
-reviewer's model and effort, skipping whatever the command line gave. Its answers become ordinary
+pair asks first: a resume when this checkout (or the given `--worktree`) has a usable record, which
+also fixes the author's CLI and the location, then the CLIs, the location with a resume for that
+worktree's record, and the reviewer's model and effort, skipping whatever the command line gave. Its answers become ordinary
 arguments inserted after the `start` word. Pair prints the resulting command and runs `main` again
 with it, so a guided start is parsed, validated, summarized and confirmed exactly like a typed one.
 The questions use only read-only facts (installed CLIs, `planWorktree`, the author record), and
@@ -243,7 +244,13 @@ resumed only within the same review thread; no `--last` lookup is used. `--revie
 `--reviewer-effort` apply to every launch, including resume: Codex receives `--model` and
 `--config model_reasoning_effort="LEVEL"`, Claude `--model` and `--effort`. They never reach the
 author or either CLI's config. Status shows the requested values, with `CLI default` for omitted
-ones, since the launcher does not resolve inherited settings. Effort names are checked per backend
+ones, since the launcher does not resolve inherited settings. After each round it reads what the
+reviewer actually ran with from the CLI's own session file and shows it where it differs:
+Codex's last `turn_context` in `$CODEX_HOME/sessions/…/rollout-…-<id>.jsonl`, and Claude's last
+main-thread assistant entry in `$CLAUDE_CONFIG_DIR/projects/<cwd>/<id>.jsonl`. These files are
+the CLIs' internals, so this is display only: nothing depends on it, and a missing or changed file
+just leaves the requested values. The line for new threads shows the latest round's values only
+when that round was given the same settings. Effort names are checked per backend
 before startup and on every change; each CLI decides whether it supports the combination.
 
 `pair reviewer` changes the settings on the live owner, over the control socket, without a restart.

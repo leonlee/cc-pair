@@ -21,6 +21,7 @@ function scripted(answers) {
 const facts = (overrides = {}) => ({
   installed: ["claude", "codex"],
   git: true,
+  repo: "proj",
   checkWorktree: (name) => { if (name.includes(" ")) throw new Error(`--worktree ${JSON.stringify(name)} is not a usable branch name`); },
   recorded: () => undefined,
   checkModel: (model) => { if (model.includes(" ")) throw new Error("--reviewer-model must be a nonempty model ID"); },
@@ -45,6 +46,22 @@ test("guided start: every choice, answered by name or number, becomes its option
   assert.match(s.log[3], /Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[y\/N\]/);
 });
 
+test("guided start: a recorded conversation is offered first, and resuming it names the author's CLI and checkout", async () => {
+  const record = { id: "11111111-1111-4111-8111-111111111111", at: "2026-11-10T00:00:00.000Z" };
+  const recorded = (cli, worktree) => cli === "codex" && worktree === undefined ? record : undefined;
+  const yes = scripted(["y", "", "", ""]);
+  assert.deepEqual(await guideStart(yes.prompter, facts({ recorded }), none), ["codex", "--resume"]);
+  assert.match(yes.log[0], /^\? Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[y\/N\] $/);
+  assert.match(yes.log[1], /Reviewer CLI: .* \[claude\]/, "no author or location question");
+  assert.equal(yes.asked(), 4);
+  // Declined: the usual questions, without offering the same conversation again.
+  const no = scripted(["n", "1", "", "", "", ""]);
+  assert.deepEqual(await guideStart(no.prompter, facts({ recorded }), none), ["claude"]);
+  assert.match(no.log[1], /Author CLI/);
+  assert.match(no.log[3], /Run in: Enter for this checkout, or a branch name for a worktree \.\.\/proj-NAME: $/);
+  assert.equal(no.log.filter((line) => line.includes("Resume")).length, 1);
+});
+
 test("guided start: an invalid answer explains and asks again, keeping earlier choices", async () => {
   const s = scripted(["3", "gemini", "2", "x", "", "feat x", "feat", "bad model", "opus", "9", "ultracode"]);
   assert.deepEqual(await guideStart(s.prompter, facts(), none),
@@ -65,10 +82,10 @@ test("guided start: a CLI that isn't installed can't be chosen, and is never a d
 
 test("guided start: the command line's choices are kept and their questions skipped", async () => {
   const recorded = () => ({ id: "11111111-1111-4111-8111-111111111111", at: "x" });
-  const s = scripted(["1", ""]);
+  const s = scripted([""]);
   assert.deepEqual(await guideStart(s.prompter, facts({ recorded }), { worktree: "feat", resume: true, model: true, effort: true, envName: "alice" }),
     ["claude", "--as", "alice"]);
-  assert.equal(s.asked(), 2, "only the CLIs");
+  assert.equal(s.asked(), 1, "only the reviewer's CLI: --resume's record names the author's");
   // Outside git there's no worktree to offer; without a record, no resume question.
   const outside = scripted(["1", "", "", ""]);
   assert.deepEqual(await guideStart(outside.prompter, facts({ git: false }), none), ["claude"]);
@@ -78,7 +95,7 @@ test("guided start: the command line's choices are kept and their questions skip
 
 test("guided start: cancelling at any question stops at once", async () => {
   const recorded = () => ({ id: "11111111-1111-4111-8111-111111111111", at: "x" });
-  const answers = ["1", "", "", "", "", ""];
+  const answers = ["", "1", "", "", "", ""]; // resume, author, reviewer, where, model, effort
   for (let at = 0; at < answers.length; at++) {
     const s = scripted(answers.slice(0, at));
     assert.equal(await guideStart(s.prompter, facts({ recorded }), none), undefined, `cancelled at question ${at + 1}`);

@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, FAILED_REVIEW_RULE } from "../dist/auto.js";
+import { autoCall, FAILED_REVIEW_RULE, ranSettings } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -55,7 +55,7 @@ function fixture(t, { author = "claude", scenario = "roundtrip", worker = "norma
   writeFileSync(fake, `#!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { appendFileSync, chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const exec = promisify(execFile);
 const root = process.env.TEST_ROOT;
@@ -85,6 +85,15 @@ if (reviewer) {
   // Corrupt the lane before announcing the session, so recording the session must not read the lane.
   if (process.env.TEST_WORKER === 'corrupt') writeFileSync(join(dirname(process.env.PAIR_AUTO_MESSAGE), '002-review.md'), '---\\nfrom: nobody\\n---\\njunk\\n');
   console.log(JSON.stringify(cli === 'codex' ? {type:'thread.started', thread_id:session} : {type:'system',subtype:'init',session_id:session}));
+  // Like the real CLIs, record what the conversation ran with in their own session files.
+  if (process.env.TEST_SESSION_FILES && process.argv[process.argv.indexOf('--model') + 1] !== process.env.TEST_SESSION_UNREADABLE_FOR) {
+    const flag = (name) => { const at = process.argv.indexOf(name); return at >= 0 ? process.argv[at + 1] : undefined; };
+    const model = flag('--model') ?? 'default-model';
+    const effort = (cli === 'codex' ? /^model_reasoning_effort="(.*)"$/.exec(flag('--config') ?? '')?.[1] : flag('--effort')) ?? 'default-effort';
+    const dir = cli === 'codex' ? join(process.env.CODEX_HOME, 'sessions', '2026', '11', '10') : join(process.env.CLAUDE_CONFIG_DIR, 'projects', process.cwd().replace(/[^A-Za-z0-9]/g, '-'));
+    mkdirSync(dir, {recursive:true});
+    appendFileSync(join(dir, cli === 'codex' ? 'rollout-2026-11-10T00-00-00-' + session + '.jsonl' : session + '.jsonl'), JSON.stringify(cli === 'codex' ? {type:'turn_context', payload:{model, effort}} : {type:'assistant', isSidechain:false, message:{model}, effort}) + '\\n');
+  }
   const hangs = process.env.TEST_WORKER === 'hang' || (process.env.TEST_WORKER === 'hang-c1' && inC1);
   if (hangs || process.env.TEST_WORKER === 'leaky') {
     const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], {stdio:'inherit'});
@@ -402,6 +411,24 @@ test("a failed round reports the reviewer's own error, bounded and escaped, and 
   await f.command(["stop"]);
 });
 
+for (const author of ["claude", "codex"]) test(`status shows what the ${author === "claude" ? "codex" : "claude"} reviewer actually ran with`, { timeout: 20_000 }, async (t) => {
+  const homes = mkdtempSync(join(tmpdir(), "pair-cli-homes-"));
+  t.after(() => rmSync(homes, { recursive: true, force: true }));
+  const f = fixture(t, { author, scenario: "gated", reviewerEffort: "high", extraEnv: { TEST_SESSION_FILES: "1", CODEX_HOME: join(homes, "codex"), CLAUDE_CONFIG_DIR: join(homes, "claude") } });
+  await until(() => existsSync(f.file("first.out")), "first round");
+  const { log } = f.state(); // auto.json goes when the session ends
+  let status = "";
+  await until(async () => /\(ran default-model\)/.test(status = (await f.command(["status"])).stdout), "the round's settings are read");
+  assert.match(status, /reviewer for thread \S+: model CLI default \(ran default-model\) · effort high\n/, "a requested value the reviewer used isn't repeated");
+  assert.match(status, /reviewer for new threads: model CLI default \(last ran default-model\) · effort high\n/);
+  await f.command(["reviewer", "--reviewer-model", "new-model"]);
+  assert.match((await f.command(["status"])).stdout, /reviewer for new threads: model new-model · effort high\n/, "other settings: nothing ran with them yet");
+  writeFileSync(f.file("go1"), "");
+  writeFileSync(f.file("go2"), "");
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(readFileSync(log, "utf8"), /pair: reviewer for thread \S+ ran model new-model · effort high/);
+});
+
 test("pair reviewer changes the reviewer for new threads; an open thread keeps its settings", { timeout: 20_000 }, async (t) => {
   const f = fixture(t, { scenario: "gated", reviewerModel: "old-model" });
   await until(() => existsSync(f.file("first.out")), "first round");
@@ -428,7 +455,10 @@ test("pair reviewer changes the reviewer for new threads; an open thread keeps i
 });
 
 test("pair reviewer --thread fixes a failed thread's settings, and its retry starts a new reviewer conversation", { timeout: 20_000 }, async (t) => {
-  const f = fixture(t, { scenario: "gated-retry", worker: "bad-model", reviewerModel: "BAD" });
+  const homes = mkdtempSync(join(tmpdir(), "pair-cli-homes-"));
+  t.after(() => rmSync(homes, { recursive: true, force: true }));
+  // The new conversation's session file can't be read, so nothing may claim what it ran with.
+  const f = fixture(t, { scenario: "gated-retry", worker: "bad-model", reviewerModel: "BAD", extraEnv: { TEST_SESSION_FILES: "1", TEST_SESSION_UNREADABLE_FOR: "good", CODEX_HOME: join(homes, "codex") } });
   await until(() => existsSync(f.file("first.error")), "failed round delivered");
   assert.match(f.read("first.error"), /unknown model BAD.*run pair reviewer --thread current/s);
   await assert.rejects(exec(process.execPath, [CLI, "reviewer", "--thread", "current", "--reviewer-model", "good"], { cwd: f.root, env: { ...f.env, PAIR_AUTO_ROLE: "author" } }),
@@ -443,6 +473,7 @@ test("pair reviewer --thread fixes a failed thread's settings, and its retry sta
   writeFileSync(f.file("go1"), "");
   await until(() => existsSync(f.file("retry.out")), "retried round");
   assert.match(f.read("retry.out"), /verdict approve/);
+  assert.match((await f.command(["status"])).stdout, /reviewer for thread \S+: model good · effort CLI default\n/, "not the old conversation's model BAD");
   const calls = JSON.parse(f.read("calls.json"));
   assert.equal(calls.length, 2);
   assert.equal(calls[1].args[calls[1].args.indexOf("--model") + 1], "good");
@@ -450,6 +481,32 @@ test("pair reviewer --thread fixes a failed thread's settings, and its retry sta
   await assert.rejects(f.command(["reviewer", "--thread", "current", "--reviewer-model", "x"]), /no pending thread's last review round failed/);
   writeFileSync(f.file("go2"), "");
   assert.equal((await f.completed).code, 0, f.output());
+});
+
+test("ranSettings reads the last model and effort a conversation ran with from each CLI's session file", () => {
+  const homes = mkdtempSync(join(tmpdir(), "pair-cli-homes-"));
+  try {
+    const env = { CODEX_HOME: join(homes, "codex"), CLAUDE_CONFIG_DIR: join(homes, "claude") };
+    const id = "11111111-1111-4111-8111-111111111111";
+    const lines = (...entries) => entries.map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry)).join("\n") + "\n";
+    mkdirSync(join(env.CODEX_HOME, "sessions", "2026", "11", "09"), { recursive: true });
+    writeFileSync(join(env.CODEX_HOME, "sessions", "2026", "11", "09", `rollout-2026-11-09T23-00-00-${id}.jsonl`), lines(
+      { type: "turn_context", payload: { model: "gpt-old", effort: "low" } }, "not json", { type: "turn_context", payload: { model: "gpt-new", effort: "xhigh" } }, { type: "event_msg" }));
+    assert.deepEqual(ranSettings("codex", id, "/any", env), { model: "gpt-new", effort: "xhigh" });
+    // Claude: the last main-thread entry from a model, not a subagent's or Claude's own "<synthetic>" one.
+    const dir = join(env.CLAUDE_CONFIG_DIR, "projects", "-work-my-repo");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${id}.jsonl`), lines(
+      { type: "assistant", isSidechain: false, message: { model: "claude-opus-5-5" }, effort: "xhigh" },
+      { type: "assistant", isSidechain: true, message: { model: "claude-haiku-5-5" }, effort: "low" },
+      { type: "assistant", isSidechain: false, isApiErrorMessage: false, message: { model: "<synthetic>" } }));
+    assert.deepEqual(ranSettings("claude", id, "/work/my.repo", env), { model: "claude-opus-5-5", effort: "xhigh" });
+    assert.deepEqual(ranSettings("claude", id, "/elsewhere", env), { model: "claude-opus-5-5", effort: "xhigh" }, "found by scanning when the directory name differs");
+    assert.equal(ranSettings("codex", "22222222-2222-4222-8222-222222222222", "/any", env), undefined);
+    assert.equal(ranSettings("claude", id, "/any", { CLAUDE_CONFIG_DIR: join(homes, "missing") }), undefined);
+  } finally {
+    rmSync(homes, { recursive: true, force: true });
+  }
 });
 
 test("pair reviewer --thread is refused while a round runs", { timeout: 15_000 }, async (t) => {

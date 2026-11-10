@@ -121,9 +121,11 @@ as before 0.10.
 
 In a terminal, `pair start` without a CLI asks instead. The questions are:
 
-1. the CLIs;
-2. where to run: this checkout, or a `--worktree` branch name;
-3. whether to resume the conversation pair recorded there, asked only when there is one;
+1. whether to resume the conversation pair recorded for this checkout, asked first and only when
+   there is one. Resuming also settles the author's CLI and where to run;
+2. the CLIs;
+3. where to run: this checkout, or a `--worktree` branch name, with a resume question for that
+   worktree's own recorded conversation;
 4. the reviewer's model and effort.
 
 Enter takes each default. It then prints the command it chose, such as
@@ -182,7 +184,10 @@ pair start claude --worktree feature/login --resume
 ```
 
 Reviewer overrides apply to every round, including resumed ones; pair edits no CLI configuration.
-`pair status` and `pair ps` show them, with `CLI default` for omitted ones. A model or effort the
+`pair status` and `pair ps` show them, with `CLI default` for omitted ones. After a round,
+`pair status` also shows what the reviewer actually ran with when that differs, as in
+`model CLI default (ran gpt-6.1-sol)`. Pair reads this from the CLI's own session file, so it may be
+missing if that file is. A model or effort the
 reviewer rejects fails the round and keeps the request
 ([Control and recovery](#34-control-and-recovery)). `pair reviewer` changes them while the session
 runs ([Changing the reviewer](#35-changing-the-reviewer)).
@@ -602,7 +607,7 @@ codex notifications: no session registered
 auto mode: claude author, codex reviewer · reviewing · owner 41820
   author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
   reviewer for new threads: model gpt-6.1-sol · effort high
-  reviewer for thread 2026-11-06T05-19-31-945Z-da0bac: model CLI default · effort CLI default
+  reviewer for thread 2026-11-06T05-19-31-945Z-da0bac: model CLI default (ran gpt-6.1-sol) · effort CLI default (ran xhigh)
   serves subagent worktrees · reviewers 2 · running 1 · queued 0
   running: /Users/you/your-repo (thread 2026-11-06T05-19-31-945Z-da0bac, pid 41907)
   reviewer pid: 41907

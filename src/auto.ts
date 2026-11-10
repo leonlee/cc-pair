@@ -1,7 +1,8 @@
 import { spawn, fork, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { isatty } from "node:tty";
@@ -40,8 +41,10 @@ interface RecordState {
   session?: string;
   authorSession: string;
   error?: string;
-  /** The reviewer settings of the thread most recently launched or corrected. */
-  thread?: { id: string } & ReviewerSettings;
+  /** The reviewer settings of the thread most recently launched or corrected, and what its reviewer last ran with. */
+  thread?: { id: string; ran?: ReviewerSettings } & ReviewerSettings;
+  /** What the latest round's reviewer ran with, and the settings it was given. */
+  lastRan?: { requested: ReviewerSettings; ran: ReviewerSettings };
   /** With --serve-worktrees: the capacity, the worktrees served, and the reviews running, queued or failed. */
   served?: ServedState;
 }
@@ -252,11 +255,12 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
     const reply = await autoCall(stateDir, { action: "status" });
     if (reply.served) return claimLines(reply.served);
     const { state } = reply;
+    const defaults = { model: state.reviewerModel, effort: state.reviewerEffort };
     return [
       `auto mode: ${who(state.authorName, state.author)} author, ${who(state.reviewerName, state.reviewer)} reviewer · ${state.phase} · owner ${state.pid}`,
       ...(state.authorSession ? [`  author session: ${state.authorSession}`] : []), // an older owner has none
-      `  reviewer for new threads: ${describeSettings({ model: state.reviewerModel, effort: state.reviewerEffort })}`,
-      ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread)}`] : []),
+      `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
+      ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
       ...(state.served ? servingLines(state.served) : []),
       ...(state.workerPid ? [`  reviewer pid: ${state.workerPid}`] : []),
       ...(state.session ? [`  reviewer session: ${state.session}`] : []),
@@ -280,8 +284,75 @@ export async function stopAuto(stateDir: string, root: string): Promise<string> 
   }
 }
 
-function describeSettings(settings: ReviewerSettings): string {
-  return `model ${settings.model ?? "CLI default"} · effort ${settings.effort ?? "CLI default"}`;
+/** The requested settings, each followed by what the reviewer actually ran with when that differs. */
+function describeSettings(settings: ReviewerSettings, ran?: ReviewerSettings, label = "ran"): string {
+  const one = (requested: string | undefined, actual: string | undefined) => `${requested ?? "CLI default"}${actual && actual !== requested ? ` (${label} ${actual})` : ""}`;
+  return `model ${one(settings.model, ran?.model)} · effort ${one(settings.effort, ran?.effort)}`;
+}
+
+function sameSettings(a: ReviewerSettings | undefined, b: ReviewerSettings): boolean {
+  return a !== undefined && a.model === b.model && a.effort === b.effort;
+}
+
+/** A string at path in parsed JSON. */
+function stringAt(value: unknown, ...path: string[]): string | undefined {
+  let at = value;
+  for (const key of path) {
+    if (typeof at !== "object" || at === null) return undefined;
+    at = (at as Record<string, unknown>)[key];
+  }
+  return typeof at === "string" && at ? at : undefined;
+}
+
+/** Codex keeps a conversation in $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl, under the day it started. */
+function codexSessionFile(session: string, env: NodeJS.ProcessEnv): string | undefined {
+  const root = join(env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
+  const newest = (dir: string) => readdirSync(dir).filter((name) => /^\d+$/.test(name)).sort().reverse().map((name) => join(dir, name));
+  let days = 0;
+  for (const year of newest(root)) {
+    for (const month of newest(year)) {
+      for (const day of newest(month)) {
+        const file = readdirSync(day).find((name) => name.endsWith(`-${session}.jsonl`));
+        if (file) return join(day, file);
+        if (++days >= 62) return undefined; // ponytail: two months back; a review thread older than that shows only its requested settings
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Claude keeps a conversation in $CLAUDE_CONFIG_DIR/projects/<cwd, non-alphanumerics as ->/<id>.jsonl. */
+function claudeSessionFile(session: string, cwd: string, env: NodeJS.ProcessEnv): string | undefined {
+  const root = join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+  const named = join(root, cwd.replace(/[^A-Za-z0-9]/g, "-"), `${session}.jsonl`);
+  if (existsSync(named)) return named;
+  return readdirSync(root).map((dir) => join(root, dir, `${session}.jsonl`)).find((file) => existsSync(file)); // a long path is shortened
+}
+
+/**
+ * The model and effort a reviewer conversation last ran with, from its CLI's own session file: Codex's
+ * last turn_context, Claude's last main-thread assistant message from a model. Those files are the CLIs' internals,
+ * so this is for display only, and undefined when it can't tell.
+ */
+export function ranSettings(cli: Agent, session: string, cwd: string, env: NodeJS.ProcessEnv = process.env): ReviewerSettings | undefined {
+  try {
+    const file = cli === "codex" ? codexSessionFile(session, env) : claudeSessionFile(session, cwd, env);
+    if (!file) return undefined;
+    const lines = readFileSync(file, "utf8").split("\n");
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index]!;
+      if (!line.includes(cli === "codex" ? '"turn_context"' : '"assistant"')) continue;
+      let entry: unknown;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const ran = cli === "codex"
+        ? stringAt(entry, "type") === "turn_context" ? { model: stringAt(entry, "payload", "model"), effort: stringAt(entry, "payload", "effort") } : undefined
+        : stringAt(entry, "type") === "assistant" && (entry as Record<string, unknown>).isSidechain !== true
+          && !/^<.*>$/.test(stringAt(entry, "message", "model") ?? "") // Claude's own messages, such as "<synthetic>", ran no model
+          ? { model: stringAt(entry, "message", "model"), effort: stringAt(entry, "effort") } : undefined;
+      if (ran && (ran.model || ran.effort)) return ran;
+    }
+  } catch { /* no session file, or one pair can't read: show only the requested settings */ }
+  return undefined;
 }
 
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */
@@ -616,6 +687,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const running = new Map<string, Entry>(); // by guardian job ID
   const failures = new Map<Target, Failure>(); // a target's last failed round, until its next launch
   const sessions = new Map<string, string>(); // reviewer conversations, by target and thread
+  const ranBy = new Map<string, ReviewerSettings>(); // what each conversation last ran with, by target and thread
   // pair reviewer changes the defaults for new threads; a thread keeps what it had at its first launch.
   let defaults: ReviewerSettings = { model: options.reviewerModel, effort: options.reviewerEffort };
   const threadSettings = new Map<string, ReviewerSettings>(); // by target and thread
@@ -850,7 +922,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     running.set(id, entry);
     failures.delete(target);
     if (target === rootTarget) delete state.error;
-    state.thread = { id: entry.thread, ...settings };
+    state.thread = { id: entry.thread, ...settings, ran: ranBy.get(key) };
     const session = sessions.get(key);
     state.session = session;
     const bin = join(runDir, "bin", "pair");
@@ -922,6 +994,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const after = change(before);
     threadSettings.set(key, after);
     sessions.delete(key); // a saved conversation may not resume under another model
+    ranBy.delete(key); // and what it ran with is no longer this thread's
     delete state.session;
     state.thread = { id: failure.thread, ...after };
     publish();
@@ -1055,6 +1128,15 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             catch (readError) { error = `cannot check the verdict: ${errorMessage(readError)}`; } // e.g. a corrupt lane: fail this round only
           }
           lastFailed = !success;
+          const key = keyOf(target, entry.thread);
+          const session = sessions.get(key);
+          const ran = session ? ranSettings(reviewer, session, target.root) : undefined;
+          if (ran) {
+            ranBy.set(key, ran);
+            if (state.thread?.id === entry.thread) state.thread.ran = ran;
+            state.lastRan = { requested: entry.settings ?? {}, ran };
+            log(`pair: reviewer for thread ${entry.thread} ran ${describeSettings(ran)}\n`);
+          }
           // The verdict on disk decides: a reviewer may report an error it recovered from.
           const reason = success ? error : [
             error ?? "reviewer exited without sending a verdict",
