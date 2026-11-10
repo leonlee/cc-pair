@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
 // The two CLIs pair runs, and the two default participants, named after them.
@@ -2322,11 +2322,12 @@ async function main(argv: string[]): Promise<number> {
               } catch { return undefined; }
             },
             checkModel: (model) => checkSettings("claude", { model }),
+            models: (cli) => knownModels(cli),
             efforts: EFFORTS,
           };
           const prompter = linePrompter(process.stdin, process.stdout);
           try {
-            return await guideStart(prompter, facts, { worktree: values.worktree, resume: Boolean(values.resume), model: values["reviewer-model"] !== undefined, effort: values["reviewer-effort"] !== undefined, envName });
+            return await guideStart(prompter, facts, { worktree: values.worktree, resume: Boolean(values.resume), model: values["reviewer-model"], effort: values["reviewer-effort"] !== undefined, envName });
           } catch (error) {
             throw new PairError(errorMessage(error));
           } finally {

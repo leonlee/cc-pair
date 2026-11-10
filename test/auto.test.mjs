@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, FAILED_REVIEW_RULE, ranSettings } from "../dist/auto.js";
+import { autoCall, FAILED_REVIEW_RULE, knownModels, ranSettings } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -506,6 +506,26 @@ test("ranSettings reads the last model and effort a conversation ran with from e
     assert.equal(ranSettings("claude", id, "/any", { CLAUDE_CONFIG_DIR: join(homes, "missing") }), undefined);
   } finally {
     rmSync(homes, { recursive: true, force: true });
+  }
+});
+
+test("knownModels offers Codex's picker models from its cache, and Claude's aliases", () => {
+  const home = mkdtempSync(join(tmpdir(), "pair-codex-home-"));
+  try {
+    const env = { CODEX_HOME: home };
+    assert.deepEqual(knownModels("codex", env), [], "no cache");
+    writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [
+      { slug: "gpt-second", visibility: "list", priority: 2 },
+      { slug: "gpt-hidden", visibility: "hide", priority: 0 },
+      { slug: "gpt-first", visibility: "list", priority: 1, supported_reasoning_levels: [{ effort: "low" }, { effort: "xhigh" }, {}] },
+      { visibility: "list", priority: 3 },
+    ] }));
+    assert.deepEqual(knownModels("codex", env), [{ id: "gpt-first", efforts: ["low", "xhigh"] }, { id: "gpt-second" }]);
+    writeFileSync(join(home, "models_cache.json"), "{");
+    assert.deepEqual(knownModels("codex", env), [], "unreadable cache");
+    assert.deepEqual(knownModels("claude", env).map((model) => model.id), ["fable", "opus", "sonnet", "haiku"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

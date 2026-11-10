@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import type { KnownModel } from "./auto.js";
 
 /** Guided pair start: asks for what the command line left out and returns the pair start arguments that say it. */
 
@@ -24,6 +25,8 @@ export interface StartFacts {
   recorded(cli: Cli, worktree: string | undefined): { id: string; at: string } | undefined;
   /** Throws why MODEL can't be a --reviewer-model. */
   checkModel(model: string): void;
+  /** The models to offer for a reviewer CLI; any other is typed. */
+  models(cli: Cli): KnownModel[];
   efforts: Record<Cli, readonly string[]>;
 }
 
@@ -31,7 +34,8 @@ export interface StartFacts {
 export interface StartGiven {
   worktree?: string;
   resume: boolean;
-  model: boolean;
+  /** --reviewer-model: its efforts, if known, are the ones offered. */
+  model?: string;
   effort: boolean;
   /** A custom PAIR_AGENT name: a CLI word would make pair start ignore it, so it is kept with --as. */
   envName?: string;
@@ -79,22 +83,35 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
       if (resume) flags.push("--resume");
     }
   }
-  if (!given.model) {
-    const model = await validated(prompter, `Reviewer model: Enter for ${reviewer}'s default, or a model ID or alias: `, (value) => facts.checkModel(value));
-    if (model === undefined) return undefined;
-    if (model) flags.push("--reviewer-model", model);
+  const fallback = `${reviewer}'s default`;
+  const offered = facts.models(reviewer);
+  let model = given.model;
+  if (model === undefined) {
+    const answer = offered.length === 0
+      ? await validated(prompter, `Reviewer model: Enter for ${fallback}, or a model ID or alias: `, (value) => facts.checkModel(value))
+      : await choose(prompter, "Reviewer model (a number, or any model ID)", [fallback, ...offered.map((each) => each.id)], fallback, [], (text) => {
+        facts.checkModel(text);
+        return text;
+      });
+    if (answer === undefined) return undefined;
+    if (answer && answer !== fallback) {
+      model = answer;
+      flags.push("--reviewer-model", model);
+    }
   }
   if (!given.effort) {
-    const fallback = `${reviewer}'s default`;
-    const effort = await choose(prompter, "Reviewer effort", [fallback, ...facts.efforts[reviewer]], fallback);
+    // The model's own efforts, when its CLI lists them; pair still accepts only its own.
+    const supported = offered.find((each) => each.id === model)?.efforts;
+    const efforts = facts.efforts[reviewer].filter((effort) => supported?.includes(effort) ?? true);
+    const effort = await choose(prompter, "Reviewer effort", [fallback, ...(efforts.length ? efforts : facts.efforts[reviewer])], fallback);
     if (effort === undefined) return undefined;
     if (effort !== fallback) flags.push("--reviewer-effort", effort);
   }
   return [author, ...(reviewer === other ? [] : [reviewer]), ...flags];
 }
 
-/** A numbered menu answered by number or name; Enter takes the fallback, if there is one. */
-async function choose<T extends string>(prompter: Prompter, question: string, choices: readonly T[], fallback?: T, unavailable: readonly T[] = []): Promise<T | undefined> {
+/** A numbered menu answered by number or name; Enter takes the fallback, if there is one. With other, any other text it accepts. */
+async function choose<T extends string>(prompter: Prompter, question: string, choices: readonly T[], fallback?: T, unavailable: readonly T[] = [], other?: (text: string) => T): Promise<T | undefined> {
   const menu = choices.map((choice, index) => `${index + 1}) ${choice}${unavailable.includes(choice) ? " (not found)" : ""}`).join("  ");
   for (;;) {
     const answer = await prompter.ask(`${question}: ${menu}${fallback === undefined ? "" : ` [${fallback}]`} `);
@@ -102,6 +119,14 @@ async function choose<T extends string>(prompter: Prompter, question: string, ch
     const text = answer.trim();
     const chosen = text === "" ? fallback : choices[Number(text) - 1] ?? choices.find((choice) => choice === text);
     if (chosen !== undefined && !unavailable.includes(chosen)) return chosen;
+    if (chosen === undefined && other !== undefined && !/^\d*$/.test(text)) {
+      try {
+        return other(text);
+      } catch (error) {
+        prompter.say(reason(error));
+        continue;
+      }
+    }
     const available = choices.filter((choice) => !unavailable.includes(choice));
     prompter.say(chosen === undefined ? `Choose ${available.map((choice) => `${choices.indexOf(choice) + 1} (${choice})`).join(" or ")}.` : `${chosen} was not found; choose another.`);
   }
@@ -118,9 +143,13 @@ async function validated(prompter: Prompter, question: string, check: (value: st
       check(text);
       return text;
     } catch (error) {
-      prompter.say(error instanceof Error ? error.message : String(error));
+      prompter.say(reason(error));
     }
   }
+}
+
+function reason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function yesNo(prompter: Prompter, question: string): Promise<boolean | undefined> {

@@ -25,10 +25,11 @@ const facts = (overrides = {}) => ({
   checkWorktree: (name) => { if (name.includes(" ")) throw new Error(`--worktree ${JSON.stringify(name)} is not a usable branch name`); },
   recorded: () => undefined,
   checkModel: (model) => { if (model.includes(" ")) throw new Error("--reviewer-model must be a nonempty model ID"); },
+  models: () => [],
   efforts: EFFORTS,
   ...overrides,
 });
-const none = { resume: false, model: false, effort: false };
+const none = { resume: false, effort: false };
 
 test("guided start: Enter takes every default after the author's CLI", async () => {
   const s = scripted(["1", "", "", "", ""]);
@@ -62,6 +63,31 @@ test("guided start: a recorded conversation is offered first, and resuming it na
   assert.equal(no.log.filter((line) => line.includes("Resume")).length, 1);
 });
 
+test("guided start: the reviewer's CLI offers its models, any other is typed, and a model's efforts are offered", async () => {
+  const models = (cli) => cli === "codex" ? [{ id: "gpt-a", efforts: ["low", "high", "turbo"] }, { id: "gpt-b" }] : [{ id: "opus" }];
+  const picked = scripted(["1", "", "", "9", "bad model", "2", "4", "3"]);
+  assert.deepEqual(await guideStart(picked.prompter, facts({ models }), none), ["claude", "--reviewer-model", "gpt-a", "--reviewer-effort", "high"]);
+  assert.match(picked.log[3], /^\? Reviewer model \(a number, or any model ID\): 1\) codex's default {2}2\) gpt-a {2}3\) gpt-b \[codex's default\] $/);
+  assert.ok(picked.log.includes("! Choose 1 (codex's default) or 2 (gpt-a) or 3 (gpt-b)."), "a number past the menu isn't a model");
+  assert.ok(picked.log.includes("! --reviewer-model must be a nonempty model ID"));
+  const efforts = picked.log.filter((line) => line.includes("Reviewer effort"));
+  assert.match(efforts[0], /1\) codex's default {2}2\) low {2}3\) high \[codex's default\] $/, "gpt-a's efforts that pair accepts");
+  // A typed model, a model without efforts, or the default: every effort pair accepts.
+  for (const answer of ["gpt-z", "gpt-b", ""]) {
+    const s = scripted(["1", "", "", answer, ""]);
+    assert.deepEqual(await guideStart(s.prompter, facts({ models }), none), ["claude", ...(answer ? ["--reviewer-model", answer] : [])]);
+    assert.ok(s.log[4].includes(`${EFFORTS.codex.length + 1}) ${EFFORTS.codex.at(-1)}`), answer);
+  }
+  // --reviewer-model on the command line narrows the efforts too; Claude offers its aliases.
+  const given = scripted(["1", "", "", ""]);
+  assert.deepEqual(await guideStart(given.prompter, facts({ models }), { ...none, model: "gpt-a" }), ["claude"]);
+  assert.ok(!given.log.some((line) => line.includes("Reviewer model")));
+  assert.match(given.log[3], /Reviewer effort: 1\) codex's default {2}2\) low {2}3\) high \[/);
+  const claude = scripted(["2", "", "", "opus", ""]);
+  assert.deepEqual(await guideStart(claude.prompter, facts({ models }), none), ["codex", "--reviewer-model", "opus"]);
+  assert.match(claude.log[3], /1\) claude's default {2}2\) opus/);
+});
+
 test("guided start: an invalid answer explains and asks again, keeping earlier choices", async () => {
   const s = scripted(["3", "gemini", "2", "x", "", "feat x", "feat", "bad model", "opus", "9", "ultracode"]);
   assert.deepEqual(await guideStart(s.prompter, facts(), none),
@@ -83,7 +109,7 @@ test("guided start: a CLI that isn't installed can't be chosen, and is never a d
 test("guided start: the command line's choices are kept and their questions skipped", async () => {
   const recorded = () => ({ id: "11111111-1111-4111-8111-111111111111", at: "x" });
   const s = scripted([""]);
-  assert.deepEqual(await guideStart(s.prompter, facts({ recorded }), { worktree: "feat", resume: true, model: true, effort: true, envName: "alice" }),
+  assert.deepEqual(await guideStart(s.prompter, facts({ recorded }), { worktree: "feat", resume: true, model: "gpt-x", effort: true, envName: "alice" }),
     ["claude", "--as", "alice"]);
   assert.equal(s.asked(), 1, "only the reviewer's CLI: --resume's record names the author's");
   // Outside git there's no worktree to offer; without a record, no resume question.

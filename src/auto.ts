@@ -355,6 +355,33 @@ export function ranSettings(cli: Agent, session: string, cwd: string, env: NodeJ
   return undefined;
 }
 
+/** A model guided pair start offers, with the efforts it supports when its CLI says. */
+export interface KnownModel {
+  id: string;
+  efforts?: string[];
+}
+
+/**
+ * The models to offer a reviewer CLI: Claude's aliases for its latest models, or the ones Codex lists in its own
+ * picker, from the $CODEX_HOME/models_cache.json it fetches for the account. That file is Codex's internals, so
+ * this only offers choices, never rejects one, and is empty when it can't tell.
+ */
+export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): KnownModel[] {
+  if (cli === "claude") return ["fable", "opus", "sonnet", "haiku"].map((id) => ({ id }));
+  try {
+    const models: unknown = (JSON.parse(readFileSync(join(env.CODEX_HOME || join(homedir(), ".codex"), "models_cache.json"), "utf8")) as { models?: unknown }).models;
+    if (!Array.isArray(models)) return [];
+    const priority = (model: unknown) => { const value = (model as { priority?: unknown }).priority; return typeof value === "number" ? value : Number.MAX_SAFE_INTEGER; };
+    return (models as unknown[]).filter((model) => stringAt(model, "visibility") === "list").sort((a, b) => priority(a) - priority(b)).flatMap((model) => {
+      const id = stringAt(model, "slug");
+      if (!id) return [];
+      const levels = (model as { supported_reasoning_levels?: unknown }).supported_reasoning_levels;
+      const efforts = Array.isArray(levels) ? levels.flatMap((level) => stringAt(level, "effort") ?? []) : [];
+      return [efforts.length ? { id, efforts } : { id }];
+    });
+  } catch { return []; }
+}
+
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */
 export async function setReviewer(stateDir: string, change: ReviewerChange): Promise<string> {
   try { return (await autoCall(stateDir, { action: "reviewer", ...change })).message; }

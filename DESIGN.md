@@ -201,8 +201,11 @@ also fixes the author's CLI and the location, then the CLIs, the location with a
 worktree's record, and the reviewer's model and effort, skipping whatever the command line gave. Its answers become ordinary
 arguments inserted after the `start` word. Pair prints the resulting command and runs `main` again
 with it, so a guided start is parsed, validated, summarized and confirmed exactly like a typed one.
-The questions use only read-only facts (installed CLIs, `planWorktree`, the author record), and
-cancelling one stops before anything else runs.
+The questions use only read-only facts (installed CLIs, `planWorktree`, the author record, the
+models to offer), and cancelling one stops before anything else runs. The models are Claude's aliases,
+or the ones Codex's picker lists in its `$CODEX_HOME/models_cache.json`. That file is Codex's internals, so
+pair uses it only to offer choices: any model ID can be typed, and without the file the question
+is free text.
 
 The checks run first: options and the pairing, the forwarded argument allowlists, the executables, the
 `--worktree` name and target, and the `--resume` record. The only thing prepared before
