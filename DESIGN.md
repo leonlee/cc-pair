@@ -196,8 +196,12 @@ pairing in any shell.
 ### Startup
 
 When the command doesn't name the author's CLI and stdin and stdout are terminals (no `--yes`),
-pair asks first: a resume when this checkout (or the given `--worktree`) has a usable record, which
-also fixes the author's CLI and the location, then the CLIs, the location with a resume for that
+pair asks first: a resume when this checkout (or the given `--worktree`) has a usable record. The
+record keeps its session's pair start arguments (`start`, as in its restart command, with the reviewer
+settings it last had), and resuming adds them with `--resume`, asking nothing else. An added option
+that the command line also gives, on either side of `start`, is left out, so the command line's
+wins. Those arguments may name a CLI's path, so such a record is offered even when its CLI isn't on
+PATH. A record written by an older pair fixes only the author's CLI and the location. Otherwise pair asks for the CLIs, the location with a resume for that
 worktree's record, and the reviewer's model and effort, skipping whatever the command line gave. Its answers become ordinary
 arguments inserted after the `start` word. Pair prints the resulting command and runs `main` again
 with it, so a guided start is parsed, validated, summarized and confirmed exactly like a typed one.

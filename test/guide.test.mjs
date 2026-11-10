@@ -30,6 +30,12 @@ const facts = (overrides = {}) => ({
   ...overrides,
 });
 const none = { resume: false, effort: false };
+/** pair start's options, as far as these tests use them. */
+const OPTIONS = Object.fromEntries([
+  ...["as", "reviewer", "worktree", "reviewer-model", "reviewer-effort", "reviewer-args", "claude", "codex"].map((name) => [name, { type: "string" }]),
+  ...["resume", "serve-worktrees"].map((name) => [name, { type: "boolean" }]),
+  ["yes", { type: "boolean", short: "y" }],
+]);
 
 test("guided start: Enter takes every default after the author's CLI", async () => {
   const s = scripted(["1", "", "", "", ""]);
@@ -104,6 +110,34 @@ test("guided start: the reviewer's CLI offers its models, any other is typed, an
   assert.equal(typed.asked(), 5);
 });
 
+test("guided start: resuming a session that recorded its arguments asks nothing else, and the command line's still win", async () => {
+  const start = ["claude", "--as", "alice", "--reviewer-model", "gpt-x", "--reviewer-effort", "high"];
+  const recorded = (cli) => cli === "claude" ? { id: "11111111-1111-4111-8111-111111111111", at: "x", start } : undefined;
+  const yes = scripted(["y"]);
+  assert.deepEqual(await guideStart(yes.prompter, facts({ recorded }), { ...none, envName: "bob" }), [...start, "--resume"]);
+  assert.equal(yes.asked(), 1);
+  const given = scripted([]);
+  assert.deepEqual(await guideStart(given.prompter, facts({ recorded }), { ...none, resume: true }), start, "--resume is already given");
+  assert.equal(given.asked(), 0);
+  // Declined: the usual questions.
+  const no = scripted(["n", "2", "", "", "", ""]);
+  assert.deepEqual(await guideStart(no.prompter, facts({ recorded }), none), ["codex"]);
+});
+
+test("guided start: a recorded session whose CLI is off PATH can still be resumed through its saved path", async () => {
+  const start = ["claude", "--claude", "/opt/claude/bin/claude"];
+  const recorded = (cli) => cli === "claude" ? { id: "11111111-1111-4111-8111-111111111111", at: "x", start } : undefined;
+  const yes = scripted(["y"]);
+  assert.deepEqual(await guideStart(yes.prompter, facts({ installed: [], recorded }), none), [...start, "--resume"]);
+  assert.deepEqual(await guideStart(scripted([]).prompter, facts({ installed: [], recorded }), { ...none, resume: true }), start);
+  await assert.rejects(guideStart(scripted(["n"]).prompter, facts({ installed: [], recorded }), none), /neither claude nor codex was found/);
+  // A record without its arguments can't name a path: its CLI must be installed to be offered.
+  const old = scripted(["2", "2", "", "", ""]);
+  const oldRecord = (cli) => cli === "claude" ? { id: "11111111-1111-4111-8111-111111111111", at: "x" } : undefined;
+  assert.deepEqual(await guideStart(old.prompter, facts({ installed: ["codex"], recorded: oldRecord }), none), ["codex", "codex"]);
+  assert.ok(!old.log.some((line) => line.includes("Resume")));
+});
+
 test("guided start: an invalid answer explains and asks again, keeping earlier choices", async () => {
   const s = scripted(["3", "gemini", "2", "x", "", "feat x", "feat", "bad model", "opus", "9", "ultracode"]);
   assert.deepEqual(await guideStart(s.prompter, facts(), none),
@@ -147,8 +181,16 @@ test("guided start: cancelling at any question stops at once", async () => {
 
 test("guided start: the added arguments go right after the command word, before --", () => {
   const argv = ["--as", "alice", "start", "--reviewer-args=-c model_verbosity=low", "--", "--model", "it's", "--"];
-  assert.deepEqual(guidedArgv(argv, 2, ["claude", "--worktree", "feat"]),
+  assert.deepEqual(guidedArgv(argv, 2, ["claude", "--worktree", "feat"], OPTIONS),
     ["--as", "alice", "start", "claude", "--worktree", "feat", "--reviewer-args=-c model_verbosity=low", "--", "--model", "it's", "--"]);
+});
+
+test("guided start: an added option the command line gives, before or after start, is left out", () => {
+  const added = ["claude", "codex", "--as", "alice", "--reviewer=bob", "--reviewer-model", "old", "--reviewer-args=-c x=1", "--serve-worktrees", "--claude", "/c", "--resume"];
+  const argv = ["--reviewer-model", "new", "--as=carol", "start", "-y", "--reviewer", "dave", "--resume", "--", "--as", "eve"];
+  assert.deepEqual(guidedArgv(argv, 3, added, OPTIONS),
+    ["--reviewer-model", "new", "--as=carol", "start", "claude", "codex", "--reviewer-args=-c x=1", "--serve-worktrees", "--claude", "/c",
+      "-y", "--reviewer", "dave", "--resume", "--", "--as", "eve"], "the author's own --as, after --, isn't pair's");
 });
 
 test("guided start's readline prompter: answers typed ahead wait for their question, and end of input cancels", async () => {

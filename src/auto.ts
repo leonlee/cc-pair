@@ -596,6 +596,8 @@ interface AuthorRecord {
   note: string | null;
   at: string;
   restart: string | null;
+  /** pair start's arguments for the same pairing and settings, without the conversation; older records lack it. */
+  start?: string[];
 }
 
 function writeAuthorRecord(stateDir: string, record: AuthorRecord): void {
@@ -612,16 +614,17 @@ function readAuthorRecord(stateDir: string, root: string): AuthorRecord | undefi
   if (typeof record !== "object" || record === null) {
     return undefined;
   }
-  const { backend, worktree, session, learned, note, at, restart } = record as Record<string, unknown>;
+  const { backend, worktree, session, learned, note, at, restart, start } = record as Record<string, unknown>;
   const valid = (backend === "claude" || backend === "codex") && worktree === root && typeof at === "string"
     && (session === null || (typeof session === "string" && UUID.test(session)))
     && (learned === null || learned === "generated" || learned === "resume-arg" || learned === "author-env")
-    && (note === null || typeof note === "string") && (restart === null || typeof restart === "string");
+    && (note === null || typeof note === "string") && (restart === null || typeof restart === "string")
+    && (start === undefined || (Array.isArray(start) && start.every((arg) => typeof arg === "string")));
   return valid ? record as AuthorRecord : undefined;
 }
 
 /** pair start --resume: the author arguments that resume the conversation last recorded for root. */
-export function withRecordedSession(author: Agent, args: string[], stateDir: string, root: string): { args: string[]; id: string; at: string } {
+export function withRecordedSession(author: Agent, args: string[], stateDir: string, root: string): { args: string[]; id: string; at: string; start?: string[] } {
   const selected = author === "claude" ? args.some((arg) => ["-c", "--continue", "-r", "--resume"].includes(splitOption(arg).name)) : args[0] === "resume";
   if (selected) {
     throw new Error(`pair start --resume picks the conversation; drop the ${author === "claude" ? "--continue or --resume" : "resume"} after --`);
@@ -637,7 +640,7 @@ export function withRecordedSession(author: Agent, args: string[], stateDir: str
     throw new Error(`the last ${author} author in ${root} has no known conversation ID (${record.note ?? "unknown"}); start without --resume`);
   }
   const id = record.session;
-  return { args: author === "claude" ? [...args, "--resume", id] : ["resume", id, ...args], id, at: record.at };
+  return { args: author === "claude" ? [...args, "--resume", id] : ["resume", id, ...args], id, at: record.at, ...(record.start ? { start: record.start } : {}) };
 }
 
 /** For pair status and pair stop once the session is gone. */
@@ -1056,16 +1059,17 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   let learned: AuthorRecord["learned"] = session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null;
   const recordAuthor = (report: (problem: string) => void) => {
     const selector = (id: string) => options.author === "claude" ? [...session.rest, "--resume", id] : ["resume", id, ...session.rest];
+    const start = [
+      ...options.restartOptions,
+      ...(defaults.model === undefined ? [] : ["--reviewer-model", defaults.model]),
+      ...(defaults.effort === undefined ? [] : ["--reviewer-effort", defaults.effort]),
+    ];
     try {
       writeAuthorRecord(options.stateDir, {
         backend: options.author, worktree: options.root, session: authorId ?? null, learned,
         note: session.kind === "unknown" ? session.why : null, at: new Date().toISOString(),
-        restart: authorId ? `cd ${shellWord(options.root)} && pair start ${[
-          ...options.restartOptions,
-          ...(defaults.model === undefined ? [] : ["--reviewer-model", defaults.model]),
-          ...(defaults.effort === undefined ? [] : ["--reviewer-effort", defaults.effort]),
-          "--", ...selector(authorId),
-        ].map(shellWord).join(" ")}` : null,
+        restart: authorId ? `cd ${shellWord(options.root)} && pair start ${[...start, "--", ...selector(authorId)].map(shellWord).join(" ")}` : null,
+        start,
       });
     } catch (error) { report(`couldn't save the author's session for pair stop to report: ${errorMessage(error)}`); }
   };

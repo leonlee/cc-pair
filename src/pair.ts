@@ -2046,8 +2046,9 @@ pair init first if pair's instructions are missing.
 Each CLI is claude or codex; the reviewer's defaults to the other one. Each participant is named
 after its CLI unless you name it; a reviewer that would get the author's name is <cli>_reviewer.
 Without CLIs, as before 0.10, --as claude|codex (default: $PAIR_AGENT) also picks the author's CLI.
-Otherwise, in a terminal, pair start asks whether to resume the recorded conversation (if any),
-then for the CLIs, where to run, and the reviewer's model and effort, and shows the command it runs.
+Otherwise, in a terminal, pair start asks whether to resume the recorded conversation (if any, with
+its session's settings), else for the CLIs, where to run, and the reviewer's model and effort, and
+shows the command it runs.
 
   pair start claude                                   claude, reviewed by codex
   pair start codex                                    codex, reviewed by claude
@@ -2184,12 +2185,14 @@ options:
   -v, --verbose                show full command lines`,
 };
 
+const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } } as const;
+
 async function main(argv: string[]): Promise<number> {
   const { values, positionals, tokens } = parseArgs({
     args: argv,
     allowPositionals: true,
     tokens: true,
-    options: { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } },
+    options: OPTIONS,
   });
   const [command, ...rest] = positionals;
   const terminator = tokens.find((token) => token.kind === "option-terminator");
@@ -2341,7 +2344,7 @@ async function main(argv: string[]): Promise<number> {
           if (!added) {
             throw new PairError("pair start cancelled; nothing was started");
           }
-          const next = guidedArgv(argv, tokens.find((token) => token.kind === "positional")!.index, added);
+          const next = guidedArgv(argv, tokens.find((token) => token.kind === "positional")!.index, added, OPTIONS);
           console.error(`pair: command: pair ${next.map(shellWord).join(" ")}`);
           return await main(next);
         }

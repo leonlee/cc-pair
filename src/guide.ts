@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import type { ModelList } from "./auto.js";
 
 /** Guided pair start: asks for what the command line left out and returns the pair start arguments that say it. */
@@ -22,12 +23,19 @@ export interface StartFacts {
   /** Throws why NAME can't be a --worktree. */
   checkWorktree(name: string): void;
   /** The conversation pair start --resume would continue for this author CLI and --worktree, if any. */
-  recorded(cli: Cli, worktree: string | undefined): { id: string; at: string } | undefined;
+  recorded(cli: Cli, worktree: string | undefined): Recorded | undefined;
   /** Throws why MODEL can't be a --reviewer-model. */
   checkModel(model: string): void;
   /** The models a reviewer CLI is known to accept: the ones not hidden are offered, any other is typed. */
   models(cli: Cli): ModelList;
   efforts: Record<Cli, readonly string[]>;
+}
+
+/** A recorded author conversation, with the pair start arguments of its session when the record has them. */
+export interface Recorded {
+  id: string;
+  at: string;
+  start?: string[];
 }
 
 /** What the command line already chose; its questions are skipped. */
@@ -45,25 +53,32 @@ const CLIS: readonly Cli[] = ["claude", "codex"];
 
 /** The arguments to add after the command word, or undefined when the person cancelled. */
 export async function guideStart(prompter: Prompter, facts: StartFacts, given: StartGiven): Promise<string[] | undefined> {
-  if (facts.installed.length === 0) {
-    throw new Error("neither claude nor codex was found; install one, or pass --claude or --codex /absolute/path");
-  }
   const missing = CLIS.filter((cli) => !facts.installed.includes(cli));
   const flags = given.envName ? ["--as", given.envName] : [];
-  // A conversation to resume comes first: it names the author's CLI and the checkout.
+  // A conversation to resume comes first: it names the author's CLI and the checkout, and its session's
+  // arguments name the rest. The command line's own follow the added ones, so they still win.
   let author: Cli | undefined;
-  const found = facts.installed.map((cli) => ({ cli, record: facts.recorded(cli, given.worktree) })).find((each) => each.record);
+  const found = CLIS.flatMap((cli) => {
+    const record = facts.recorded(cli, given.worktree);
+    // A session's recorded arguments include any --claude or --codex path, so its CLI needn't be on PATH.
+    return record && (facts.installed.includes(cli) || record.start) ? [{ cli, record }] : [];
+  })[0];
   let resumed = given.resume;
   if (found && given.resume) {
+    if (found.record.start) return found.record.start;
     author = found.cli;
-  } else if (found?.record) {
+  } else if (found) {
     const resume = await yesNo(prompter, `Resume the ${found.cli} conversation ${found.record.id} (recorded ${found.record.at})? [y/N] `);
     if (resume === undefined) return undefined;
     if (resume) {
+      if (found.record.start) return [...found.record.start, "--resume"];
       author = found.cli;
       resumed = true;
       flags.push("--resume");
     }
+  }
+  if (facts.installed.length === 0) {
+    throw new Error("neither claude nor codex was found; install one, or pass --claude or --codex /absolute/path");
   }
   author ??= await choose(prompter, "Author CLI", CLIS, undefined, missing);
   if (author === undefined) return undefined;
@@ -169,9 +184,19 @@ async function yesNo(prompter: Prompter, question: string): Promise<boolean | un
   }
 }
 
-/** argv with the guided arguments right after the command word, so they stay before any --. */
-export function guidedArgv(argv: readonly string[], commandIndex: number, added: readonly string[]): string[] {
-  return [...argv.slice(0, commandIndex + 1), ...added, ...argv.slice(commandIndex + 1)];
+/**
+ * argv with the guided arguments right after the command word, so they stay before any --. An added option that argv
+ * already gives, before or after the command word, is left out: the command line's own wins.
+ */
+export function guidedArgv(argv: readonly string[], commandIndex: number, added: readonly string[], options: ParseArgsOptionsConfig): string[] {
+  const tokens = (args: readonly string[]) => parseArgs({ args: [...args], options, allowPositionals: true, tokens: true, strict: false }).tokens;
+  const given = new Set(tokens(argv).flatMap((token) => token.kind === "option" ? [token.name] : []));
+  const kept = tokens(added).flatMap((token) => {
+    if (token.kind === "positional") return [token.value];
+    if (token.kind !== "option" || given.has(token.name)) return [];
+    return added.slice(token.index, token.index + (token.value !== undefined && !token.inlineValue ? 2 : 1));
+  });
+  return [...argv.slice(0, commandIndex + 1), ...kept, ...argv.slice(commandIndex + 1)];
 }
 
 /** Questions over readline. Lines typed ahead wait for their question; Ctrl-C and end of input cancel. */

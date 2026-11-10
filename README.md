@@ -122,7 +122,9 @@ as before 0.10.
 In a terminal, `pair start` without a CLI asks instead. The questions are:
 
 1. whether to resume the conversation pair recorded for this checkout, asked first and only when
-   there is one. Resuming also settles the author's CLI and where to run;
+   there is one. Resuming reuses that session's settings, such as its CLIs, names and reviewer model
+   and effort, and asks nothing else. Options you type with `pair start` still win, and
+   in a terminal, `pair start --resume` reuses them without asking;
 2. the CLIs;
 3. where to run: this checkout, or a `--worktree` branch name, with a resume question for that
    worktree's own recorded conversation;

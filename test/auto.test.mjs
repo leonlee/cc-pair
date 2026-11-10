@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, FAILED_REVIEW_RULE, knownModels, ranSettings } from "../dist/auto.js";
+import { autoCall, FAILED_REVIEW_RULE, knownModels, ranSettings, withRecordedSession } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -451,6 +451,8 @@ test("pair reviewer changes the reviewer for new threads; an open thread keeps i
   assert.ok(!calls[0].args.includes("--config") && calls[2].args.includes('model_reasoning_effort="high"'));
   const record = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8"));
   assert.match(record.restart, /--reviewer-model new-model --reviewer-effort high -- /, "pair stop's restart command has the current settings");
+  assert.deepEqual(record.start.slice(-4), ["--reviewer-model", "new-model", "--reviewer-effort", "high"], "and so do the arguments a guided resume reuses");
+  assert.ok(record.restart.includes(` pair start ${record.start.join(" ")} -- `));
   await assert.rejects(f.command(["reviewer", "--reviewer-model", "x"]), /auto mode is not running here/);
 });
 
@@ -992,6 +994,25 @@ function recordAuthor(root, stateHome, record) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "author.json"), JSON.stringify({ worktree: real, learned: "author-env", note: null, at: "2026-10-30T00:00:00.000Z", restart: "cd x && pair start", ...record }));
 }
+
+test("withRecordedSession gives a guided resume its session's pair start arguments, when the record has them", () => {
+  const root = mkdtempSync(join(tmpdir(), "pair-record-"));
+  const states = mkdtempSync(join(tmpdir(), "pair-states-"));
+  try {
+    const id = "0c8b6a3e-ff15-49a6-915b-b3884cabde5f";
+    const real = realpathSync(root);
+    const stateDir = join(states, "pair", `${basename(real)}-${createHash("sha1").update(real).digest("hex").slice(0, 8)}`);
+    recordAuthor(root, states, { backend: "claude", session: id });
+    assert.equal(withRecordedSession("claude", [], stateDir, real).start, undefined, "an older record");
+    recordAuthor(root, states, { backend: "claude", session: id, start: ["claude", "--reviewer-model", "m"] });
+    assert.deepEqual(withRecordedSession("claude", [], stateDir, real).start, ["claude", "--reviewer-model", "m"]);
+    recordAuthor(root, states, { backend: "claude", session: id, start: ["claude", 1] });
+    assert.throws(() => withRecordedSession("claude", [], stateDir, real), /no author conversation is recorded/, "a malformed record is no record");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(states, { recursive: true, force: true });
+  }
+});
 
 for (const author of ["claude", "codex"]) {
   test(`pair start --resume resumes the ${author} author's last recorded conversation`, { timeout: 15_000 }, async (t) => {
