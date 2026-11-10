@@ -355,31 +355,40 @@ export function ranSettings(cli: Agent, session: string, cwd: string, env: NodeJ
   return undefined;
 }
 
-/** A model guided pair start offers, with the efforts it supports when its CLI says. */
+/** A model guided pair start knows, with the efforts it supports when its CLI says. A hidden one isn't offered. */
 export interface KnownModel {
   id: string;
   efforts?: string[];
+  hidden?: true;
+}
+
+/** The models a reviewer CLI is known to accept; complete when it accepts no others. */
+export interface ModelList {
+  models: KnownModel[];
+  complete: boolean;
 }
 
 /**
- * The models to offer a reviewer CLI: Claude's aliases for its latest models, or the ones Codex lists in its own
- * picker, from the $CODEX_HOME/models_cache.json it fetches for the account. That file is Codex's internals, so
- * this only offers choices, never rejects one, and is empty when it can't tell.
+ * The models guided pair start knows for a reviewer CLI: Claude's aliases for its latest models (it accepts many
+ * other IDs), or every model Codex has for the account, from the $CODEX_HOME/models_cache.json it fetches, with the
+ * ones its own picker hides marked. That file is Codex's internals, so this only offers choices and questions an
+ * unknown one, never rejects one; without it, nothing is known.
  */
-export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): KnownModel[] {
-  if (cli === "claude") return ["fable", "opus", "sonnet", "haiku"].map((id) => ({ id }));
+export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): ModelList {
+  if (cli === "claude") return { models: ["fable", "opus", "sonnet", "haiku"].map((id) => ({ id })), complete: false };
   try {
     const models: unknown = (JSON.parse(readFileSync(join(env.CODEX_HOME || join(homedir(), ".codex"), "models_cache.json"), "utf8")) as { models?: unknown }).models;
-    if (!Array.isArray(models)) return [];
+    if (!Array.isArray(models)) return { models: [], complete: false };
     const priority = (model: unknown) => { const value = (model as { priority?: unknown }).priority; return typeof value === "number" ? value : Number.MAX_SAFE_INTEGER; };
-    return (models as unknown[]).filter((model) => stringAt(model, "visibility") === "list").sort((a, b) => priority(a) - priority(b)).flatMap((model) => {
+    const known = (models as unknown[]).sort((a, b) => priority(a) - priority(b)).flatMap((model): KnownModel[] => {
       const id = stringAt(model, "slug");
       if (!id) return [];
       const levels = (model as { supported_reasoning_levels?: unknown }).supported_reasoning_levels;
       const efforts = Array.isArray(levels) ? levels.flatMap((level) => stringAt(level, "effort") ?? []) : [];
-      return [efforts.length ? { id, efforts } : { id }];
+      return [{ id, ...(efforts.length ? { efforts } : {}), ...(stringAt(model, "visibility") === "list" ? {} : { hidden: true as const }) }];
     });
-  } catch { return []; }
+    return { models: known, complete: known.length > 0 };
+  } catch { return { models: [], complete: false }; }
 }
 
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */

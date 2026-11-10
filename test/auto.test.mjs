@@ -509,21 +509,26 @@ test("ranSettings reads the last model and effort a conversation ran with from e
   }
 });
 
-test("knownModels offers Codex's picker models from its cache, and Claude's aliases", () => {
+test("knownModels reads every Codex model from its cache, marking the hidden ones, and gives Claude's aliases", () => {
   const home = mkdtempSync(join(tmpdir(), "pair-codex-home-"));
   try {
     const env = { CODEX_HOME: home };
-    assert.deepEqual(knownModels("codex", env), [], "no cache");
+    const nothing = { models: [], complete: false };
+    assert.deepEqual(knownModels("codex", env), nothing, "no cache");
     writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [
       { slug: "gpt-second", visibility: "list", priority: 2 },
       { slug: "gpt-hidden", visibility: "hide", priority: 0 },
       { slug: "gpt-first", visibility: "list", priority: 1, supported_reasoning_levels: [{ effort: "low" }, { effort: "xhigh" }, {}] },
       { visibility: "list", priority: 3 },
     ] }));
-    assert.deepEqual(knownModels("codex", env), [{ id: "gpt-first", efforts: ["low", "xhigh"] }, { id: "gpt-second" }]);
+    assert.deepEqual(knownModels("codex", env), {
+      models: [{ id: "gpt-hidden", hidden: true }, { id: "gpt-first", efforts: ["low", "xhigh"] }, { id: "gpt-second" }],
+      complete: true,
+    });
     writeFileSync(join(home, "models_cache.json"), "{");
-    assert.deepEqual(knownModels("codex", env), [], "unreadable cache");
-    assert.deepEqual(knownModels("claude", env).map((model) => model.id), ["fable", "opus", "sonnet", "haiku"]);
+    assert.deepEqual(knownModels("codex", env), nothing, "unreadable cache");
+    const claude = knownModels("claude", env);
+    assert.deepEqual([claude.models.map((model) => model.id), claude.complete], [["fable", "opus", "sonnet", "haiku"], false]);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

@@ -18,9 +18,10 @@ history and registrations work as they are.
 - **Guided `pair start`.** In a terminal, `pair start` without a CLI asks whether to resume the
   recorded conversation (first, and only when there is one; it also picks the author's CLI), then
   for the CLIs, where to run, and the reviewer's model and effort. The model menu lists Claude's
-  aliases or the models in Codex's own picker, and any other model ID can be typed. For a Codex
-  model, the effort menu lists only that model's efforts. Enter takes each default. It then prints the equivalent command and runs it,
-  with the usual summary and `Start? [Y/n]`. Options given on the command line are kept and not
+  aliases or the models in Codex's own picker, and any other model ID can be typed; one that Codex
+  doesn't list for your account asks for confirmation. For a Codex model, the effort menu lists
+  only that model's efforts. Enter takes each default. It then prints the equivalent command and
+  runs it, with the usual summary and `Start? [Y/n]`. Options given on the command line are kept and not
   asked again; scripts and `-y` see no change.
 - **`pair status` shows what the reviewer actually ran with**, such as
   `model CLI default (ran gpt-6.1-sol) · effort CLI default (ran xhigh)`, read after each round from

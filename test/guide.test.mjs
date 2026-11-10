@@ -25,7 +25,7 @@ const facts = (overrides = {}) => ({
   checkWorktree: (name) => { if (name.includes(" ")) throw new Error(`--worktree ${JSON.stringify(name)} is not a usable branch name`); },
   recorded: () => undefined,
   checkModel: (model) => { if (model.includes(" ")) throw new Error("--reviewer-model must be a nonempty model ID"); },
-  models: () => [],
+  models: () => ({ models: [], complete: false }),
   efforts: EFFORTS,
   ...overrides,
 });
@@ -64,7 +64,9 @@ test("guided start: a recorded conversation is offered first, and resuming it na
 });
 
 test("guided start: the reviewer's CLI offers its models, any other is typed, and a model's efforts are offered", async () => {
-  const models = (cli) => cli === "codex" ? [{ id: "gpt-a", efforts: ["low", "high", "turbo"] }, { id: "gpt-b" }] : [{ id: "opus" }];
+  const models = (cli) => cli === "codex"
+    ? { models: [{ id: "gpt-a", efforts: ["low", "high", "turbo"] }, { id: "gpt-b" }, { id: "gpt-h", efforts: ["low", "max"], hidden: true }], complete: true }
+    : { models: [{ id: "opus" }], complete: false };
   const picked = scripted(["1", "", "", "9", "bad model", "2", "4", "3"]);
   assert.deepEqual(await guideStart(picked.prompter, facts({ models }), none), ["claude", "--reviewer-model", "gpt-a", "--reviewer-effort", "high"]);
   assert.match(picked.log[3], /^\? Reviewer model \(a number, or any model ID\): 1\) codex's default {2}2\) gpt-a {2}3\) gpt-b \[codex's default\] $/);
@@ -72,8 +74,18 @@ test("guided start: the reviewer's CLI offers its models, any other is typed, an
   assert.ok(picked.log.includes("! --reviewer-model must be a nonempty model ID"));
   const efforts = picked.log.filter((line) => line.includes("Reviewer effort"));
   assert.match(efforts[0], /1\) codex's default {2}2\) low {2}3\) high \[codex's default\] $/, "gpt-a's efforts that pair accepts");
-  // A typed model, a model without efforts, or the default: every effort pair accepts.
-  for (const answer of ["gpt-z", "gpt-b", ""]) {
+  // A model the menu hides is still known: typed, it's taken as is, with its efforts.
+  const hidden = scripted(["1", "", "", "gpt-h", ""]);
+  assert.deepEqual(await guideStart(hidden.prompter, facts({ models }), none), ["claude", "--reviewer-model", "gpt-h"]);
+  assert.match(hidden.log[4], /Reviewer effort: 1\) codex's default {2}2\) low {2}3\) max \[/);
+  // One the CLI's complete list lacks is questioned; no asks for the model again.
+  const unknown = scripted(["1", "", "", "gpt-z", "n", "gpt-z", "y", ""]);
+  assert.deepEqual(await guideStart(unknown.prompter, facts({ models }), none), ["claude", "--reviewer-model", "gpt-z"]);
+  assert.equal(unknown.log.filter((line) => line === "? gpt-z isn't one of the models codex lists for your account; use it anyway? [y/N] ").length, 2);
+  assert.ok(unknown.log.at(-1).includes(`${EFFORTS.codex.length + 1}) ${EFFORTS.codex.at(-1)}`), "a typed model: every effort");
+  assert.equal(await guideStart(scripted(["1", "", "", "gpt-z"]).prompter, facts({ models }), none), undefined, "cancelled at the question");
+  // A model without efforts, or the default: every effort pair accepts.
+  for (const answer of ["gpt-b", ""]) {
     const s = scripted(["1", "", "", answer, ""]);
     assert.deepEqual(await guideStart(s.prompter, facts({ models }), none), ["claude", ...(answer ? ["--reviewer-model", answer] : [])]);
     assert.ok(s.log[4].includes(`${EFFORTS.codex.length + 1}) ${EFFORTS.codex.at(-1)}`), answer);
@@ -86,6 +98,10 @@ test("guided start: the reviewer's CLI offers its models, any other is typed, an
   const claude = scripted(["2", "", "", "opus", ""]);
   assert.deepEqual(await guideStart(claude.prompter, facts({ models }), none), ["codex", "--reviewer-model", "opus"]);
   assert.match(claude.log[3], /1\) claude's default {2}2\) opus/);
+  // Claude's list isn't complete: any other model is taken without a question.
+  const typed = scripted(["2", "", "", "claude-x", ""]);
+  assert.deepEqual(await guideStart(typed.prompter, facts({ models }), none), ["codex", "--reviewer-model", "claude-x"]);
+  assert.equal(typed.asked(), 5);
 });
 
 test("guided start: an invalid answer explains and asks again, keeping earlier choices", async () => {

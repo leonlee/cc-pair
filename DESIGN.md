@@ -204,8 +204,9 @@ with it, so a guided start is parsed, validated, summarized and confirmed exactl
 The questions use only read-only facts (installed CLIs, `planWorktree`, the author record, the
 models to offer), and cancelling one stops before anything else runs. The models are Claude's aliases,
 or the ones Codex's picker lists in its `$CODEX_HOME/models_cache.json`. That file is Codex's internals, so
-pair uses it only to offer choices: any model ID can be typed, and without the file the question
-is free text.
+pair uses it only to offer choices and to question a typed Codex model that it doesn't list,
+hidden ones included: any model ID can still be used, and without the file the question is free
+text.
 
 The checks run first: options and the pairing, the forwarded argument allowlists, the executables, the
 `--worktree` name and target, and the `--resume` record. The only thing prepared before

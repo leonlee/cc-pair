@@ -128,8 +128,9 @@ In a terminal, `pair start` without a CLI asks instead. The questions are:
    worktree's own recorded conversation;
 4. the reviewer's model and effort. The model menu lists Claude's aliases (`fable`, `opus`, `sonnet`,
    `haiku`), or the models Codex shows in its own picker, read from `$CODEX_HOME/models_cache.json`.
-   You can also type any other model ID. For a Codex model, the effort menu lists only the efforts
-   that model supports.
+   You can also type any other model ID. For Codex, an ID that isn't in that file, where Codex's
+   hidden models also appear, asks you to confirm it, since a typo is likelier than a model that
+   isn't listed yet. For a Codex model, the effort menu lists only the efforts that model supports.
 
 Enter takes each default. It then prints the command it chose, such as
 `pair: command: pair start claude --worktree feat`, and goes on as if you had typed it, with the

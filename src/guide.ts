@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import type { KnownModel } from "./auto.js";
+import type { ModelList } from "./auto.js";
 
 /** Guided pair start: asks for what the command line left out and returns the pair start arguments that say it. */
 
@@ -25,8 +25,8 @@ export interface StartFacts {
   recorded(cli: Cli, worktree: string | undefined): { id: string; at: string } | undefined;
   /** Throws why MODEL can't be a --reviewer-model. */
   checkModel(model: string): void;
-  /** The models to offer for a reviewer CLI; any other is typed. */
-  models(cli: Cli): KnownModel[];
+  /** The models a reviewer CLI is known to accept: the ones not hidden are offered, any other is typed. */
+  models(cli: Cli): ModelList;
   efforts: Record<Cli, readonly string[]>;
 }
 
@@ -84,9 +84,10 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
     }
   }
   const fallback = `${reviewer}'s default`;
-  const offered = facts.models(reviewer);
+  const known = facts.models(reviewer);
+  const offered = known.models.filter((each) => !each.hidden);
   let model = given.model;
-  if (model === undefined) {
+  while (model === undefined) {
     const answer = offered.length === 0
       ? await validated(prompter, `Reviewer model: Enter for ${fallback}, or a model ID or alias: `, (value) => facts.checkModel(value))
       : await choose(prompter, "Reviewer model (a number, or any model ID)", [fallback, ...offered.map((each) => each.id)], fallback, [], (text) => {
@@ -94,14 +95,19 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
         return text;
       });
     if (answer === undefined) return undefined;
-    if (answer && answer !== fallback) {
-      model = answer;
-      flags.push("--reviewer-model", model);
+    if (!answer || answer === fallback) break;
+    // A typo is likelier than a model the CLI's own list lacks, but that list can lag a new model.
+    if (known.complete && !known.models.some((each) => each.id === answer)) {
+      const anyway = await yesNo(prompter, `${answer} isn't one of the models ${reviewer} lists for your account; use it anyway? [y/N] `);
+      if (anyway === undefined) return undefined;
+      if (!anyway) continue;
     }
+    model = answer;
+    flags.push("--reviewer-model", model);
   }
   if (!given.effort) {
     // The model's own efforts, when its CLI lists them; pair still accepts only its own.
-    const supported = offered.find((each) => each.id === model)?.efforts;
+    const supported = known.models.find((each) => each.id === model)?.efforts;
     const efforts = facts.efforts[reviewer].filter((effort) => supported?.includes(effort) ?? true);
     const effort = await choose(prompter, "Reviewer effort", [fallback, ...(efforts.length ? efforts : facts.efforts[reviewer])], fallback);
     if (effort === undefined) return undefined;
