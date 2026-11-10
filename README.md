@@ -110,12 +110,14 @@ Auto mode runs on macOS and Linux. The CLIs it runs MUST be installed and signed
 agents yourself, use [manual mode](#5-manual-mode).
 
 ```sh
-pair start --as claude                        # interactive Claude, automatic Codex reviewer
-pair start --as codex                         # interactive Codex, automatic Claude reviewer
-pair start --as claude --reviewer-cli claude  # Claude reviewed by Claude (claude_reviewer)
+pair start claude          # interactive Claude, automatic Codex reviewer
+pair start codex           # interactive Codex, automatic Claude reviewer
+pair start claude claude   # Claude reviewed by Claude (claude_reviewer)
 ```
 
-Other pairings, and the options that choose them, are in [Participants](#4-participants).
+The first word is the author's CLI, the second the reviewer's (default: the other one). Named
+participants are in [Participants](#4-participants). `pair start --as claude` and `--as codex` work
+as before 0.10.
 
 Give the author a task as usual. Each request or response it sends starts the other agent as a
 non-interactive reviewer for one round, and the review comes back inline to the author's
@@ -142,24 +144,29 @@ started. `-y` starts without waiting.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--cli`, `--reviewer NAME`, `--reviewer-cli` | from `--as` | The author's CLI, and the reviewer's name and CLI ([Participants](#4-participants)) |
+| `--as NAME`, `--reviewer NAME` | each CLI's name | The participants' names ([Participants](#4-participants)) |
 | `--worktree NAME` | current worktree | Run in the worktree `../<repo>-NAME` ([Worktrees](#7-worktrees)) |
 | `--resume` | new conversation | Resume the author conversation pair last recorded for the session's worktree ([Author conversations](#33-author-conversations)) |
-| `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-model MODEL` | CLI default | Reviewer model ID or alias, passed as given (Codex IDs are case-sensitive) |
 | `--reviewer-effort LEVEL` | CLI default | Codex: `none` `minimal` `low` `medium` `high` `xhigh` `max` `ultra`; Claude: `low` `medium` `high` `xhigh` `max` `ultracode` |
+| `-- ARGS...` | none | Options for the interactive author ([Forwarded arguments](#32-forwarded-arguments)) |
+
+Advanced options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-y`, `--yes` | wait for Enter | Start without waiting for Enter |
 | `--reviewer-args="ARGS"` | none | More reviewer options, space-separated ([Forwarded arguments](#32-forwarded-arguments)) |
 | `--serve-worktrees` | off | Also review subagents' own worktrees of this repository ([Parallel work](#63-parallel-work)) |
 | `--reviewers N` | 1 (max 8) | Review rounds at once, across all served worktrees; needs `--serve-worktrees` |
 | `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
 | `--timeout SECONDS` | 900 (max 86400) | Limit per review round; the author has none |
 | `--grace SECONDS` | 2 (max 30) | Wait between termination and forced termination |
-| `-- ARGS...` | none | Options for the interactive author ([Forwarded arguments](#32-forwarded-arguments)) |
 
 ```sh
-pair start --as claude --worktree feature/login --reviewer-effort high -- --model opus
-pair start --as codex --reviewer-model opus --reviewer-args="--max-budget-usd 2"
-pair start --as claude --worktree feature/login --resume
+pair start claude --worktree feature/login --reviewer-effort high -- --model opus
+pair start codex --reviewer-model opus --reviewer-args="--max-budget-usd 2"
+pair start claude --worktree feature/login --resume
 ```
 
 Reviewer overrides apply to every round, including resumed ones; pair edits no CLI configuration.
@@ -194,9 +201,9 @@ excludes everything that changes its tools, permissions or sandbox
 
 | To continue | Claude author | Codex author |
 |---|---|---|
-| A specific conversation | `pair start --as claude -- --resume <id>` | `pair start --as codex -- resume <id>` |
-| The newest conversation in the session's worktree | `pair start --as claude -- --continue` | not supported |
-| The conversation pair last recorded for the worktree | `pair start --as claude --resume` | `pair start --as codex --resume` |
+| A specific conversation | `pair start claude -- --resume <id>` | `pair start codex -- resume <id>` |
+| The newest conversation in the session's worktree | `pair start claude -- --continue` | not supported |
+| The conversation pair last recorded for the worktree | `pair start claude --resume` | `pair start codex --resume` |
 
 The last row uses pair's own `--resume`, before `--`; the others pass the CLI's options after `--`.
 
@@ -212,7 +219,7 @@ as unknown.
 
 `pair status` and `pair stop` show the last recorded ID and a command that starts the session again
 in its worktree and resumes it, for example
-`cd /path/to/worktree && pair start --as claude -- --resume <id>`. You can change its options
+`cd /path/to/worktree && pair start claude -- --resume <id>`. You can change its options
 before running it.
 
 `pair start --resume` uses that record without copying the ID. The record MUST be for the same
@@ -278,18 +285,23 @@ names, each partnered with the other, so nothing changes unless you name others.
 letters, digits and underscores, up to 32 characters, starting with a letter. Each pair of names has
 its own lane, so a participant can have one open thread with each partner.
 
-**Auto mode.** `--as` names the author; the options below choose its CLI and its reviewer:
+**Auto mode.** The words after `pair start` choose the CLIs: the author's, then the reviewer's,
+which defaults to the other one. `--as` and `--reviewer` choose the names. Each participant is
+named after its CLI, unless that would give the reviewer the author's name: then it is
+`<cli>_reviewer`.
 
-| Option | Default |
-|---|---|
-| `--cli claude\|codex` | The author's name, if it is `claude` or `codex`; required otherwise |
-| `--reviewer-cli claude\|codex` | Without `--reviewer`, the CLI the author doesn't use; with `--reviewer claude` or `codex`, that CLI; required for other reviewer names |
-| `--reviewer NAME` | With one CLI on both sides, `<cli>_reviewer`; otherwise the author's default partner (`claude` for `codex`, `codex` for `claude`); required for other authors |
+| Command | Author | Reviewer |
+|---|---|---|
+| `pair start claude` | claude (Claude) | codex (Codex) |
+| `pair start codex codex` | codex (Codex) | codex_reviewer (Codex) |
+| `pair start claude --as alice` | alice (Claude) | codex (Codex) |
+| `pair start claude claude --as alice --reviewer bob` | alice (Claude) | bob (Claude) |
 
-```sh
-pair start --as codex --reviewer-cli codex                              # codex reviewed by codex_reviewer
-pair start --as alice --cli claude --reviewer bob --reviewer-cli claude  # two Claude participants
-```
+Names don't choose CLIs: `pair start claude --reviewer claude` is refused (the same participant
+twice), and `pair start claude codex --as alice --reviewer claude` runs a Codex reviewer named
+claude. The exception is the form without CLIs, as before 0.10: `--as` (default: `PAIR_AGENT`) must
+then be `claude` or `codex`, and also chooses the author's CLI. When a CLI is given, `PAIR_AGENT` is
+ignored, so the command means the same in every shell.
 
 Only the CLIs the pairing uses must be installed. A same-CLI reviewer gets its own conversation per
 thread, never the author's. The summary, `pair status` and the restart command show the pairing; it
@@ -456,7 +468,7 @@ Start the session with `--serve-worktrees`; `--reviewers N` runs up to N reviews
 max 8):
 
 ```sh
-pair start --as claude --serve-worktrees --reviewers 2
+pair start claude --serve-worktrees --reviewers 2
 ```
 
 Then ask the author for parallel work, for example: *"Use two subagents, each in its own worktree:
@@ -543,7 +555,7 @@ Agents run `send` and `wait`; users mostly run `start`, `stop`, `status`, `revie
 `pair help <command>` describes each command and its options.
 
 ```
-pair start --as NAME [--cli CLI] [--reviewer NAME] [--reviewer-cli CLI] [options] [-- AUTHOR_ARGS...]
+pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME] [options] [-- AUTHOR_ARGS...]
 pair stop
 pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
 pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict VERDICT] <file|->

@@ -8,10 +8,13 @@ participant is a name; the CLI that runs it belongs to the session. Without new 
 changes: `claude` and `codex` are the defaults and each other's partner, and existing channels,
 history and registrations work as they are.
 
-- **Auto mode.** `pair start --as NAME [--cli claude|codex] [--reviewer NAME] [--reviewer-cli
-  claude|codex]`. `pair start --as claude --reviewer-cli claude` pairs Claude with
-  `claude_reviewer`; only the CLIs a pairing uses must be installed. The restart command keeps the
-  pairing, and every launch restates it to a resumed Claude author.
+- **Auto mode.** `pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME]`: the
+  words choose the CLIs, the flags the names. `pair start claude claude` pairs Claude with
+  `claude_reviewer`, and `pair start claude claude --as alice --reviewer bob` names both. Only the
+  CLIs a pairing uses must be installed. `pair start --as claude|codex` works as before. The restart
+  command keeps the pairing, and every launch restates it to a resumed Claude author.
+- **Shorter `pair help start`**: everyday options first, the rest under advanced options, with the
+  details in the README.
 - **Manual mode.** Give each agent its name and partner with `PAIR_AGENT` and `PAIR_PARTNER` (for
   Codex, as `-c 'shell_environment_policy.set.PAIR_AGENT="alice"'`), or in words. `send` takes
   `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers
