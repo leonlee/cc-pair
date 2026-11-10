@@ -639,7 +639,7 @@ test("auto start refuses agent arguments outside its allowlists", () => {
   try {
     const refused = (name, agent) => new RegExp(`can't pass "${name}" to the ${agent}`);
     for (const [args, message] of [
-      [["--as", "claude", "stray"], /the author's CLI must be one of: claude, codex \(got "stray"\)/],
+      [["--as", "claude", "stray"], /the author's CLI must be claude or codex \(got "stray"\)/],
       // Print and background modes, settings that replace pair's, directory switches, and a second terminator.
       ...["-p", "--print", "--output-format", "--settings=x.json", "--bg", "--background", "--desktop", "-w", "--worktree", "--"]
         .map((arg) => [["--as", "claude", "--", "--model", "opus", arg], refused(arg.split("=")[0], "claude author")]),
@@ -1518,8 +1518,8 @@ test("pair start refuses an incomplete, unknown or self pairing", () => {
   const cases = [
     [[], /name the author's CLI: pair start claude\|codex/],
     [["--as", "alice"], /name the CLI that runs alice: pair start claude\|codex --as alice/],
-    [["gemini"], /the author's CLI must be one of: claude, codex \(got "gemini"\)/],
-    [["claude", "gemini"], /the reviewer's CLI must be one of: claude, codex \(got "gemini"\)/],
+    [["alice"], /the author's CLI must be claude or codex \(got "alice"\); participant names go in --as and --reviewer/],
+    [["claude", "gemini"], /the reviewer's CLI must be claude or codex \(got "gemini"\)/],
     [["claude", "codex", "claude"], /at most two CLIs, the author's and the reviewer's/],
     [["claude", "--as", "alice", "--reviewer", "alice"], /must be a different participant/],
     [["claude", "--reviewer", "claude"], /must be a different participant/],

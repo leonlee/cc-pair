@@ -661,7 +661,7 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
 | Variable | Default | Meaning |
 |---|---|---|
 | `PAIR_HOME` | `~/.pair` | Channel root. Relative paths resolve against the worktree root |
-| `PAIR_AGENT` | none | Your participant name: the default for `--as` |
+| `PAIR_AGENT` | none | Your participant name: the default for `--as` (for `pair start`, only without CLIs) |
 | `PAIR_PARTNER` | the default partner | Whom a new request goes to without `--to` ([Participants](#4-participants)) |
 | `PAIR_MAX_ROUNDS` | `3` | Review rounds before escalation; a brainstorm's turns, fixed when it opens |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |

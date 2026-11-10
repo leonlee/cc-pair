@@ -2019,7 +2019,7 @@ const HELP = `${USAGE}
 
 environment:
   PAIR_HOME              root directory for channels (default ~/.pair)
-  PAIR_AGENT             your participant name: the default for --as
+  PAIR_AGENT             your participant name: the default for --as (pair start: only without CLIs)
   PAIR_PARTNER           whom a new request goes to without --to (default: claude's or codex's partner)
   PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
@@ -2058,7 +2058,7 @@ options:
   --reviewer NAME              the reviewer's participant name
   --worktree NAME              run in the git worktree ../<repo>-NAME, created on branch NAME (new
                                from HEAD, or tracking a remote NAME) on the first run
-  --resume                     resume the author conversation pair last recorded for that checkout
+  --resume                     resume the author conversation pair last recorded for the session's checkout
   --reviewer-model MODEL       the reviewer's model (default: its CLI's)
   --reviewer-effort LEVEL      the reviewer's reasoning effort, such as high (default: its CLI's).
                                pair reviewer changes the model and effort while the session runs.
@@ -2300,7 +2300,10 @@ async function main(argv: string[]): Promise<number> {
         if (clis.length > 2) {
           throw new PairError("pair start takes at most two CLIs, the author's and the reviewer's; put the author's own options after --");
         }
-        const [authorCli, reviewerCli] = clis.map((value, index) => oneOf(value, BACKENDS, index === 0 ? "the author's CLI" : "the reviewer's CLI"));
+        const [authorCli, reviewerCli] = clis.map((value, index): Backend => {
+          if (isBackend(value)) return value;
+          throw new PairError(`${index === 0 ? "the author's" : "the reviewer's"} CLI must be claude or codex (got "${value}"); participant names go in --as and --reviewer`);
+        });
         if (authorCli === undefined && values.as === undefined && !process.env.PAIR_AGENT) {
           throw new PairError("name the author's CLI: pair start claude|codex (see pair help start)");
         }
