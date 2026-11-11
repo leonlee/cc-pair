@@ -1271,7 +1271,15 @@ export async function runGuardian(): Promise<void> {
     for (const job of jobs.values()) job.stop("auto owner stopped");
     done();
   };
-  const watchdog = setInterval(() => { if (performance.now() - heartbeat > 5000) shutdown(); }, 1000);
+  let tick = performance.now();
+  const watchdog = setInterval(() => {
+    const now = performance.now();
+    // The monotonic clock counts a system sleep (macOS). A late tick means this process was suspended
+    // as well, so the owner gets a fresh deadline; only an owner hung while the guardian runs is stale.
+    if (now - tick > 3000) heartbeat = now;
+    tick = now;
+    if (now - heartbeat > 5000) shutdown();
+  }, 1000);
   process.on("disconnect", () => { if (!disconnecting) disconnected = true; shutdown(); });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, shutdown);
   process.on("SIGWINCH", () => { interactive?.kill("SIGWINCH"); });

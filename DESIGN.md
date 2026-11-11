@@ -319,8 +319,9 @@ the tty state and restores it during cleanup, and the guardian does so if the la
 Every termination path stops accepting jobs, terminates owned groups, escalates to SIGKILL after the
 grace period, and observes the CLI exit and stream closure. Even a successful CLI exit triggers
 cleanup of the rest of its group. A private IPC disconnect cleans up if the launcher dies; a
-monotonic heartbeat deadline covers a hung launcher without counting wall-clock jumps or suspended
-time. The guardian exits after its jobs are collected, and the launcher tracks live child identities
+monotonic heartbeat deadline covers a hung launcher without counting wall-clock jumps. The
+monotonic clock does count a system sleep (macOS), which suspends the guardian too, so a watchdog
+tick that comes late restarts the deadline instead. The guardian exits after its jobs are collected, and the launcher tracks live child identities
 for emergency cleanup if the guardian fails. No cleanup loads a PID from disk and signals it, and no
 command kills by agent name.
 
