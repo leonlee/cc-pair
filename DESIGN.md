@@ -186,16 +186,24 @@ old server removing its own can't remove the new one. Records survive the server
 when the registration they name is gone or replaced, never on a server's exit, which looks the same
 whether the user closed Codex or Codex restarted the server.
 
-Every 30 seconds each server checks the records it doesn't watch itself. A record with an
-undelivered message (no claim, or one not yet `sent`) is a candidate, and only then does the server
-ask the running daemon, over its control socket (`$CODEX_HOME/app-server-control/
+A listening server refreshes its record's mtime every 30 seconds: the listener's heartbeat. Every
+30 seconds each server also checks the records it doesn't watch itself. A record whose heartbeat is
+more than 90 seconds old has lost its listener. If that happened less than 10 minutes ago, the server
+asks the running daemon, over its control socket (`$CODEX_HOME/app-server-control/
 app-server-control.sock`, JSON-RPC over WebSocket), for `thread/loaded/list`. If the session is
-loaded, it claims and queues the note as a watch would; if not, or the daemon can't be asked, it
-logs why once and sends nothing. It never starts a daemon or resumes a session, and `codex queue`
-would accept a note for a closed session, so the daemon's answer is the only liveness check. A
-recovered session never becomes a standing watch: each later note is checked with the daemon again,
-so a session closed in the meantime isn't notified, until it calls `pair_listen` itself. A session
-that doesn't run on the shared daemon isn't recovered. Idle, recovery reads files only.
+loaded, the server adopts the record: it refreshes the heartbeat itself, and for an undelivered
+message (no claim, or one not yet `sent`) claims and queues the note as a watch would. It asks again
+on every pass. As soon as the daemon stops listing the session, it removes the record, so the
+session must call `pair_listen` again however soon it is reopened. An adopted record whose heartbeat
+reaches 10 minutes, because the daemon couldn't be asked, expires too. If the session isn't loaded, or the daemon can't be asked, it logs why and sends nothing.
+
+The 10 minutes keep recovery to what it is for, a server Codex replaced under a session that stayed
+open, which takes a minute or two. A session that was closed and is opened again later, perhaps
+only to read it, isn't notified: it must call `pair_listen` itself, as the instructions say after a
+resume, so opening an old session never starts a turn the user didn't ask for. pair never starts a
+daemon or resumes a session, and `codex queue` would accept a note for a closed session, so the
+daemon's answer is the only liveness check. A session that doesn't run on the shared daemon isn't
+recovered. With no recently lost listener, recovery reads files only.
 
 ## Auto sessions
 

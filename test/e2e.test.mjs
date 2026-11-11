@@ -938,24 +938,63 @@ test("a replacement pair mcp notifies a lost listener's session only while Codex
     daemon.state.loaded = [thread];
     await until(() => calls().length === 1, "the session the daemon lists is notified");
     assert.match(calls()[0], new RegExp(`^queue --thread ${thread} --message pair: a message is waiting for you`));
-    assert.match(readFileSync(log, "utf8"), /recovered the listener for 01a13922/);
-    const queries = daemon.state.queries;
+    assert.match(readFileSync(log, "utf8"), /took over the lost listener for 01a13922/);
     await settle();
     assert.equal(calls().length, 1, "notified once");
-    assert.equal(daemon.state.queries, queries, "a delivered note needs no more daemon queries");
 
     daemon.state.loaded = []; // the session closed
+    await until(() => readFileSync(log, "utf8").includes(`let go of the listener for ${thread}`), "a recovered session seen closed is let go");
+    assert.deepEqual(readdirSync(records), [], "its record goes with it");
+    daemon.state.loaded = [thread]; // reopened right away, without pair_listen
     ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1");
     ok(["send", "response", "--as", "claude", "-"], "### F1 fixed");
     await settle();
-    assert.equal(calls().length, 1, "each recovered note is checked with the daemon, so a closed session isn't notified");
+    assert.equal(calls().length, 1, "a session seen closed must call pair_listen itself, however soon it is reopened");
 
     register(); // the same session again: a new registration, whose record pair_listen writes
-    await until(() => readdirSync(records).length === 0, "the replaced registration's record is removed");
     assert.match(ok(["status"]), /listener recovery not armed/);
     assert.equal((await server.listen(thread)).isError, undefined);
     assert.equal(readdirSync(records).length, 1);
     await until(() => calls().length === 2, "a listener armed by pair_listen doesn't need the daemon");
+  } finally {
+    assert.equal(await server.stop(), 0);
+    await daemon.close();
+  }
+});
+
+test("a listener lost more than 10 minutes ago is never taken over, even by a server that adopted it", async () => {
+  const { root, env, ok } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  assert.equal(spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } }).status, 0);
+  const { codex, calls } = fakeCodex(root);
+  const daemon = fakeDaemon(root);
+  daemon.state.loaded = [thread];
+  const serverEnv = { ...env, PAIR_CODEX: codex, CODEX_HOME: daemon.home, PAIR_RECOVER_MS: "300" };
+  const replaced = startMcp(serverEnv);
+  assert.equal((await replaced.listen(thread)).isError, undefined);
+  assert.equal(await replaced.stop(), 0);
+  const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  const { channel, log } = mcpState(root, pending, thread);
+  const records = join(root, "state", "pair", basename(channel), "listeners");
+  const age = (minutes) => {
+    const then = new Date(Date.now() - minutes * 60 * 1000);
+    for (const record of readdirSync(records)) utimesSync(join(records, record), then, then);
+  };
+  await daemon.start();
+  const server = startMcp(serverEnv);
+  try {
+    await until(() => calls().length === 1, "a listener lost moments ago is taken over");
+    await daemon.close(); // pair can't check the session for a long time
+    await settle();
+    age(11);
+    ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1");
+    ok(["send", "response", "--as", "claude", "-"], "### F1 fixed");
+    await daemon.start();
+    await until(() => readFileSync(log, "utf8").includes(`no listener for ${thread} since`), "the expired listener is reported");
+    const queries = daemon.state.queries;
+    await settle();
+    assert.equal(calls().length, 1, "an adopted listener expires without a successful check");
+    assert.equal(daemon.state.queries, queries, "with no recent lost listener, recovery reads files only");
   } finally {
     assert.equal(await server.stop(), 0);
     await daemon.close();
