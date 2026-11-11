@@ -3,6 +3,7 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { chmodSync, closeSync, existsSync, openSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -69,6 +70,52 @@ function startMcp(env, cwd = tmpdir()) {
     ]);
   };
   return { server, call, listen, stop };
+}
+
+/**
+ * A fake Codex app-server daemon: answers initialize and thread/loaded/list over WebSocket on its
+ * control socket, listing `state.loaded`. The socket lives at a short path, as Codex's does, behind
+ * CODEX_HOME's link.
+ */
+function fakeDaemon(root) {
+  const path = join(mkdtempSync("/tmp/pair-daemon-"), "s");
+  const home = join(root, "codex-home");
+  mkdirSync(join(home, "app-server-control"), { recursive: true });
+  symlinkSync(path, join(home, "app-server-control", "app-server-control.sock"));
+  const state = { loaded: [], queries: 0 };
+  const server = createServer((socket) => {
+    let buffer = Buffer.alloc(0);
+    let upgraded = false;
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!upgraded) {
+        const end = buffer.indexOf("\r\n\r\n");
+        if (end < 0) return;
+        upgraded = true;
+        buffer = buffer.subarray(end + 4);
+        socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+      }
+      while (buffer.length >= 6) {
+        let length = buffer[1] & 0x7f;
+        let offset = 2;
+        if (length === 126) { length = buffer.readUInt16BE(2); offset = 4; }
+        if (buffer.length < offset + 4 + length) return;
+        const mask = buffer.subarray(offset, offset + 4);
+        const message = JSON.parse(Buffer.from(buffer.subarray(offset + 4, offset + 4 + length).map((byte, i) => byte ^ mask[i % 4])).toString());
+        buffer = buffer.subarray(offset + 4 + length);
+        if (message.id === undefined) continue;
+        if (message.method === "thread/loaded/list") state.queries += 1;
+        const out = Buffer.from(JSON.stringify({ id: message.id, result: message.method === "initialize" ? {} : { data: state.loaded, nextCursor: null } }));
+        socket.write(Buffer.concat([out.length < 126 ? Buffer.from([0x81, out.length]) : Buffer.from([0x81, 126, out.length >> 8, out.length & 0xff]), out]));
+      }
+    });
+  });
+  return {
+    home,
+    state,
+    start: () => new Promise((resolve) => server.listen(path, resolve)),
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
 }
 
 async function until(check, what) {
@@ -861,6 +908,82 @@ test("a claim left by a server that died mid-send is taken over once its lease r
     assert.equal(calls().length, 1);
   } finally {
     assert.equal(await server.stop(), 0);
+  }
+});
+
+test("a replacement pair mcp notifies a lost listener's session only while Codex's daemon lists it as open", async () => {
+  const { root, env, ok } = sandbox();
+  const thread = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  const register = () => assert.equal(spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } }).status, 0);
+  const { codex, calls } = fakeCodex(root);
+  const daemon = fakeDaemon(root);
+  const serverEnv = { ...env, PAIR_CODEX: codex, CODEX_HOME: daemon.home, PAIR_RECOVER_MS: "300" };
+  register();
+  assert.match(ok(["status"]), /listener recovery not armed \(pair_listen arms it\)/);
+  const replaced = startMcp(serverEnv);
+  assert.equal((await replaced.listen(thread)).isError, undefined);
+  assert.equal(await replaced.stop(), 0, "Codex replaced this server; its listener record stays");
+  assert.match(ok(["status"]), /listener recovery armed/);
+
+  const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  const { channel, log } = mcpState(root, pending, thread);
+  const records = join(root, "state", "pair", basename(channel), "listeners");
+  const server = startMcp(serverEnv);
+  try {
+    await until(() => readFileSync(log, "utf8").includes("can't ask Codex's daemon"), "without a daemon to ask, nothing is sent");
+    await daemon.start();
+    await until(() => readFileSync(log, "utf8").includes("doesn't list it as open"), "a session the daemon doesn't list isn't notified");
+    assert.equal(calls().length, 0);
+
+    daemon.state.loaded = [thread];
+    await until(() => calls().length === 1, "the session the daemon lists is notified");
+    assert.match(calls()[0], new RegExp(`^queue --thread ${thread} --message pair: a message is waiting for you`));
+    assert.match(readFileSync(log, "utf8"), /recovered the listener for 01a13922/);
+    const queries = daemon.state.queries;
+    await settle();
+    assert.equal(calls().length, 1, "notified once");
+    assert.equal(daemon.state.queries, queries, "a delivered note needs no more daemon queries");
+
+    daemon.state.loaded = []; // the session closed
+    ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1");
+    ok(["send", "response", "--as", "claude", "-"], "### F1 fixed");
+    await settle();
+    assert.equal(calls().length, 1, "each recovered note is checked with the daemon, so a closed session isn't notified");
+
+    register(); // the same session again: a new registration, whose record pair_listen writes
+    await until(() => readdirSync(records).length === 0, "the replaced registration's record is removed");
+    assert.match(ok(["status"]), /listener recovery not armed/);
+    assert.equal((await server.listen(thread)).isError, undefined);
+    assert.equal(readdirSync(records).length, 1);
+    await until(() => calls().length === 2, "a listener armed by pair_listen doesn't need the daemon");
+  } finally {
+    assert.equal(await server.stop(), 0);
+    await daemon.close();
+  }
+});
+
+test("an older listener removes only its own record when another session takes over the registration", async () => {
+  const { root, env, ok } = sandbox();
+  const older = "01a13922-c08f-79e3-a41f-6780876fd9c5";
+  const newer = "01a13927-59e7-74b1-8f59-306c2811e2b1";
+  const register = (thread) => assert.equal(spawnSync("node", [CLI, "register"], { cwd: root, env: { ...env, CODEX_THREAD_ID: thread } }).status, 0);
+  const { codex } = fakeCodex(root);
+  const serverEnv = { ...env, PAIR_CODEX: codex, CODEX_HOME: join(root, "no-daemon") };
+  const pending = ok(["send", "request", "--as", "claude", "-"], "req").replace("sent: ", "").trim();
+  const records = join(root, "state", "pair", basename(mcpState(root, pending, older).channel), "listeners");
+  const first = startMcp(serverEnv);
+  const second = startMcp(serverEnv);
+  try {
+    register(older);
+    assert.equal((await first.listen(older)).isError, undefined);
+    register(newer);
+    assert.equal((await second.listen(newer)).isError, undefined);
+    await until(() => readdirSync(records).length === 1, "the older listener's record is gone");
+    assert.match(readdirSync(records)[0], new RegExp(`^codex\\.${newer}\\.`), "the newer session's record stays");
+    assert.match(ok(["status"]), /listener recovery armed/);
+  } finally {
+    assert.equal(await first.stop(), 0);
+    assert.equal(await second.stop(), 0);
   }
 });
 

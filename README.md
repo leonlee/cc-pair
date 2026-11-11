@@ -398,9 +398,14 @@ it is pending, the server runs `codex queue` with a fixed note that never contai
   starts a turn with no window attached.
 - Without the server, Codex checks once, says it cannot be woken, and checks again only when asked
   ("check pair").
-- The server writes only to `~/.local/state/pair/<repo>-<hash>/codex.listen.log` (under
-  `$XDG_STATE_HOME` if absolute), rotated at 256 KB. `pair status` shows the registration and the
-  last listener event.
+- When Codex restarts the server under an open session, for example when its background service
+  updates itself, the replacement takes over: within 30 seconds it notifies a pending message if
+  Codex's background service lists the session as open, and otherwise logs why and sends nothing.
+  This works for sessions that called `pair_listen` with pair 0.10.0 or later; `pair status` shows
+  "listener recovery armed".
+- The server writes only under `~/.local/state/pair/<repo>-<hash>/` (under `$XDG_STATE_HOME` if
+  absolute): `codex.listen.log`, rotated at 256 KB, its claims and its listener records. `pair status`
+  shows the registration and the last listener event.
 
 <a id="5-workflows"></a>
 ## 6. Workflows
