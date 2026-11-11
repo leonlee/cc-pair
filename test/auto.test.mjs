@@ -94,7 +94,7 @@ if (reviewer) {
     mkdirSync(dir, {recursive:true});
     appendFileSync(join(dir, cli === 'codex' ? 'rollout-2026-11-10T00-00-00-' + session + '.jsonl' : session + '.jsonl'), JSON.stringify(cli === 'codex' ? {type:'turn_context', payload:{model, effort}} : {type:'assistant', isSidechain:false, message:{model}, effort}) + '\\n');
   }
-  const hangs = process.env.TEST_WORKER === 'hang' || (process.env.TEST_WORKER === 'hang-c1' && inC1);
+  const hangs = process.env.TEST_WORKER === 'hang' || (process.env.TEST_WORKER === 'hang-c1' && inC1) || (process.env.TEST_WORKER === 'hangfirst' && count === 1);
   if (hangs || process.env.TEST_WORKER === 'leaky') {
     const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], {stdio:'inherit'});
     write('descendant.pid', child.pid);
@@ -389,6 +389,14 @@ test("reviewer timeout preserves the request and kills descendants", { timeout: 
   assert.match((await f.command(["status"])).stdout, /awaiting-review/);
   await until(() => !alive(Number(f.read("descendant.pid"))), "timed-out descendant gone");
   await f.command(["stop"]);
+});
+
+test("pair wait reruns a timed-out review", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "retry", worker: "hangfirst" });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(f.read("first.error"), /reviewer timed out\. Pair wait retries it\./);
+  assert.match(f.read("retry.out"), /verdict approve/);
+  assert.equal(JSON.parse(f.read("calls.json")).length, 2);
 });
 
 test("explicit wait retries a crashed reviewer in its saved session", { timeout: 15_000 }, async (t) => {
@@ -847,6 +855,20 @@ test("heartbeat expiry cleans a hung launcher's workers", { timeout: 20_000 }, a
   try { await until(() => pids.every((pid) => !alive(pid)), "heartbeat cleanup", 10_000); }
   finally { f.launcher.kill("SIGCONT"); }
   await f.completed;
+});
+
+test("guardian survives a system sleep that suspends it and the launcher past the heartbeat deadline", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold" });
+  await until(() => existsSync(f.file("author.pid")), "author started");
+  const guardian = f.state().guardianPid;
+  // A sleeping Mac suspends every process while Node's monotonic clock keeps counting.
+  f.launcher.kill("SIGSTOP");
+  process.kill(guardian, "SIGSTOP");
+  try { await pause(6500); }
+  finally { process.kill(guardian, "SIGCONT"); f.launcher.kill("SIGCONT"); }
+  await pause(2200);
+  assert.ok(alive(Number(f.read("author.pid"))), "waking up must not terminate the author");
+  await f.command(["stop"]);
 });
 
 test("standard help describes auto mode", () => {

@@ -45,6 +45,9 @@ Fixes found while testing with the real CLIs:
   `-c shell_environment_policy.set.NAME=…`. Earlier versions were affected too.
 - The instructions tell agents to read their names with `echo`: macOS `printenv` shows only its
   first argument, which led agents to the default name.
+- Auto mode no longer ends when a Mac wakes from sleep. Node's monotonic clock counts the sleep, so
+  the guardian took the owner for hung and stopped the session, author included. It now gives the
+  owner a fresh deadline when its own watchdog woke late. Earlier versions were affected too.
 - A corrupt registration no longer stops others from registering, and when registrations block
   `pair start`, it names each one with `pair unregister --as NAME`.
 
