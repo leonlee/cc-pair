@@ -45,6 +45,12 @@ Fixes found while testing with the real CLIs:
   `-c shell_environment_policy.set.NAME=…`. Earlier versions were affected too.
 - The instructions tell agents to read their names with `echo`: macOS `printenv` shows only its
   first argument, which led agents to the default name.
+- A Codex reviewer in manual mode stayed silent after Codex restarted `pair mcp` under it, for
+  example when Codex's background service updated itself: the session's listener lived only in the
+  old server, and nothing showed it was gone. Another server now takes over a listener lost in the
+  last 10 minutes while Codex's background service lists the session as open, and logs why when it
+  doesn't. A session closed and opened again later isn't notified until it listens again.
+  `pair status` says whether a registration's listener can be recovered.
 - Auto mode no longer ends when a Mac wakes from sleep. Node's monotonic clock counts the sleep, so
   the guardian took the owner for hung and stopped the session, author included. It now gives the
   owner a fresh deadline when its own watchdog woke late. Earlier versions were affected too.

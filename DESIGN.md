@@ -43,6 +43,7 @@ auto mode, `pair start` runs the author interactively and starts the reviewer fo
 ${XDG_STATE_HOME:-~/.local/state}/pair/<repo>-<hash>/   # written by pair mcp and pair start, outside agent sandboxes
   codex.listen.log                    # what the MCP listener did, newest last; .1 holds the previous 256 KB
   claims/<thread>.<message file>.<session id>
+  listeners/<name>.<session id>.<generation>.json  # pair_listen's record, for a replacement server
   auto.json                           # the live auto session's state; removed when it ends
   auto.log                            # reviewer output, rotated at 256 KB
   author.json                         # the author's last known conversation; survives pair stop
@@ -175,6 +176,34 @@ message still starts a turn with no TUI attached. `pair unregister` stops notifi
 A note already accepted by the daemon still runs either way, so the prompt tells Codex to ignore a
 note that arrives after the user said stop. A repeated note costs one short
 turn: `pair wait --timeout 5` prints `no message` and Codex ends its turn.
+
+Codex can also replace a server under a session that stays open: its daemon updater restarts the
+daemon, and with it every MCP server, without the session calling `pair_listen` again. The new server
+can't tell which session it serves (`initialize` carries no thread id). So `pair_listen` also writes a
+listener record, `listeners/<name>.<thread>.<generation>.json` beside the claims, where the generation
+hashes the registration's time: a newer `pair register` of the same session gets a new file, and an
+old server removing its own can't remove the new one. Records survive the server; they are removed
+when the registration they name is gone or replaced, never on a server's exit, which looks the same
+whether the user closed Codex or Codex restarted the server.
+
+A listening server refreshes its record's mtime every 30 seconds: the listener's heartbeat. Every
+30 seconds each server also checks the records it doesn't watch itself. A record whose heartbeat is
+more than 90 seconds old has lost its listener. If that happened less than 10 minutes ago, the server
+asks the running daemon, over its control socket (`$CODEX_HOME/app-server-control/
+app-server-control.sock`, JSON-RPC over WebSocket), for `thread/loaded/list`. If the session is
+loaded, the server adopts the record: it refreshes the heartbeat itself, and for an undelivered
+message (no claim, or one not yet `sent`) claims and queues the note as a watch would. It asks again
+on every pass. As soon as the daemon stops listing the session, it removes the record, so the
+session must call `pair_listen` again however soon it is reopened. An adopted record whose heartbeat
+reaches 10 minutes, because the daemon couldn't be asked, expires too. If the session isn't loaded, or the daemon can't be asked, it logs why and sends nothing.
+
+The 10 minutes keep recovery to what it is for, a server Codex replaced under a session that stayed
+open, which takes a minute or two. A session that was closed and is opened again later, perhaps
+only to read it, isn't notified: it must call `pair_listen` itself, as the instructions say after a
+resume, so opening an old session never starts a turn the user didn't ask for. pair never starts a
+daemon or resumes a session, and `codex queue` would accept a note for a closed session, so the
+daemon's answer is the only liveness check. A session that doesn't run on the shared daemon isn't
+recovered. With no recently lost listener, recovery reads files only.
 
 ## Auto sessions
 

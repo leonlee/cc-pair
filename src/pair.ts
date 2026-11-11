@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile, execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
@@ -9,6 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { codexControlSocket, loadedThreads } from "./daemon.js";
 import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
 // The two CLIs pair runs, and the two default participants, named after them.
@@ -65,6 +66,13 @@ const LISTEN_LOG = "codex.listen.log";
 const LISTEN_LOG_MAX_BYTES = 256 * 1024; // then it becomes codex.listen.log.1, replacing the previous one
 const CLAIM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const STALL_MS = 10 * 60 * 1000;
+// How often a listener refreshes its record, and each pair mcp may ask Codex's daemon about lost
+// listeners (PAIR_RECOVER_MS is for tests).
+const RECOVER_MS = Number(process.env.PAIR_RECOVER_MS) || 30_000;
+const LISTENER_STALE_MS = 3 * RECOVER_MS; // older: its listener is gone
+// Older: lost too long ago to be a server Codex just replaced. A session closed and reopened later
+// must call pair_listen itself, so opening an old session never starts a turn the user didn't ask for.
+const RECOVERY_GRACE_MS = 10 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 30_000;
 const CLAIM_LEASE_MS = 2 * QUEUE_TIMEOUT_MS; // longer than any live `codex queue` call can hold a claim
 // Fixed text on purpose: nothing from the channel may reach Codex as user input.
@@ -940,6 +948,9 @@ interface Watch {
   dispatching: boolean;
   failures: number;
   retryAt: number;
+  record?: string; // its listener record, removed when the registration moves on
+  refreshedAt?: number; // when tick last refreshed the record, the heartbeat recovery reads
+  recovered?: true; // a one-off note from a recovery pass, which also does its retries
 }
 
 /**
@@ -1004,7 +1015,8 @@ function listen(thread: unknown, watches: Map<string, Watch>): string {
       try { names = registeredNamesTolerant(channel, () => {}); } catch { return []; }
       return names.flatMap((name) => {
         try {
-          return readRegistration(channel, name)?.thread === thread ? [{ channel, name }] : [];
+          const registration = readRegistration(channel, name);
+          return registration?.thread === thread ? [{ channel, name, registration }] : [];
         } catch {
           return [];
         }
@@ -1017,14 +1029,24 @@ function listen(thread: unknown, watches: Map<string, Watch>): string {
     const where = registered.map(({ channel, name }) => `${name} in ${channel}`).join(", ");
     throw new PairError(`this session is registered ${registered.length} times (${where}); run \`pair unregister\` where you don't want it`);
   }
-  const [{ channel, name }] = registered;
+  const [{ channel, name, registration }] = registered;
   const current = watches.get(thread);
   if (current?.channel !== channel || current.name !== name) {
     watches.set(thread, { channel, name, codex, notifiedAt: 0, stallReported: false, dispatching: false, failures: 0, retryAt: 0 });
     logListen(channel, `listening for ${thread} as ${name}`);
     pruneClaims(channel);
   }
-  return `listening: pair will queue a short "pair:" note into this session when a message for ${name} arrives in ${channel}. End your turn now.`;
+  const watch = watches.get(thread)!;
+  let recovery = "";
+  try {
+    // Only the registration that named this caller: another session that replaced it since never listened.
+    // A replacement after this write leaves a stale generation, which tick or recovery removes.
+    watch.record = writeListenerRecord(channel, name, registration);
+    watch.refreshedAt = Date.now();
+  } catch (error) {
+    recovery = ` Pair couldn't record this listener (${errorMessage(error)}), so if Codex restarts pair mcp, call pair_listen again.`;
+  }
+  return `listening: pair will queue a short "pair:" note into this session when a message for ${name} arrives in ${channel}.${recovery} End your turn now.`;
 }
 
 /**
@@ -1101,7 +1123,8 @@ function dispatch(thread: string, watch: Watch, pending: string): void {
       watch.failures += 1;
       const delay = Math.min(60_000, 1000 * 2 ** watch.failures);
       watch.retryAt = Date.now() + delay;
-      logListen(watch.channel, `codex queue failed for ${pending}, retrying in ${delay / 1000}s: ${stderr.trim() || error.message}`);
+      const retry = watch.recovered ? "the next recovery pass retries it" : `retrying in ${delay / 1000}s`;
+      logListen(watch.channel, `codex queue failed for ${pending}, ${retry}: ${stderr.trim() || error.message}`);
       return;
     }
     Object.assign(watch, { notified: pending, notifiedAt: Date.now(), stallReported: false, failures: 0 });
@@ -1125,8 +1148,13 @@ function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
   try {
     if (readRegistration(watch.channel, watch.name)?.thread !== thread) {
       watches.delete(thread);
+      if (watch.record) rmSync(watch.record, { force: true }); // its own generation: never a newer registration's
       logListen(watch.channel, `stopped notifying ${thread}: it is no longer the registered session`);
       return;
+    }
+    if (watch.record && Date.now() - (watch.refreshedAt ?? 0) >= RECOVER_MS) {
+      watch.refreshedAt = Date.now();
+      touchRecord(watch.record);
     }
     const pending = pendingFor(watch.channel, watch.name)?.state.last.file;
     if (pending === undefined) {
@@ -1160,6 +1188,168 @@ function tick(thread: string, watch: Watch, watches: Map<string, Watch>): void {
   } catch (error) {
     watch.retryAt = Date.now() + 60_000;
     logListen(watch.channel, `poll failed, retrying in 60s: ${errorMessage(error)}`);
+  }
+}
+
+/**
+ * A listener that pair_listen armed, kept by pair mcp outside the channel so that a replacement
+ * server (Codex restarts them, for example when its daemon updates) can take over. One file per
+ * registration generation: an old server cleaning up its own can't remove a newer one's.
+ */
+interface ListenerRecord {
+  channel: string;
+  name: Agent;
+  thread: string;
+  registeredAt: string;
+  path: string;
+  refreshedAt: number; // the record's mtime: its listener's last heartbeat
+}
+
+const LISTENER_RECORD = /^([a-z][a-z0-9_]{0,31})\.([0-9a-f-]{36})\.([0-9a-f]{16})\.json$/;
+
+function listenerRecordPath(channel: string, name: Agent, registration: Registration): string {
+  const generation = createHash("sha256").update(`${name}\n${registration.thread}\n${registration.registeredAt}`).digest("hex").slice(0, 16);
+  return join(stateDir(channel), "listeners", `${name}.${registration.thread}.${generation}.json`);
+}
+
+function writeListenerRecord(channel: string, name: Agent, registration: Registration): string {
+  const path = listenerRecordPath(channel, name, registration);
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.${randomBytes(3).toString("hex")}.tmp`;
+  writeChannelFile(tmpPath, `${JSON.stringify({ name, thread: registration.thread, registeredAt: registration.registeredAt, armedAt: new Date().toISOString() })}\n`, constants.O_EXCL);
+  renameSync(tmpPath, path);
+  return path;
+}
+
+/** Every valid listener record for the channels under this server's PAIR_HOME. A bad one is skipped alone. */
+function listenerRecords(): ListenerRecord[] {
+  const home = pairHome(process.cwd());
+  return readdirOrEmpty(home).filter((entry) => entry.isDirectory()).flatMap((entry) => {
+    const channel = join(home, entry.name);
+    const dir = join(stateDir(channel), "listeners");
+    return readdirOrEmpty(dir).flatMap((file): ListenerRecord[] => {
+      const match = LISTENER_RECORD.exec(file.name);
+      if (!match || !file.isFile() || !SESSION_ID.test(match[2])) return [];
+      try {
+        const path = join(dir, file.name);
+        const { name, thread, registeredAt } = JSON.parse(readChannelFile(path)) as Partial<ListenerRecord>;
+        if (name !== match[1] || thread !== match[2] || typeof registeredAt !== "string") return [];
+        if (listenerRecordPath(channel, name, { thread, worktree: "", registeredAt }) !== path) return [];
+        return [{ channel, name, thread, registeredAt, path, refreshedAt: lstatSync(path).mtimeMs }];
+      } catch {
+        return [];
+      }
+    });
+  });
+}
+
+/** A listener's heartbeat. A record removed meanwhile stays removed. */
+function touchRecord(path: string): void {
+  try {
+    const now = new Date();
+    utimesSync(path, now, now);
+  } catch {
+    // removed by a server that saw its registration replaced: tick drops the watch next
+  }
+}
+
+function claimSent(path: string): boolean {
+  try {
+    return lstatSync(path).isFile() && readChannelFile(path).trim() === "sent";
+  } catch {
+    return false;
+  }
+}
+
+/** The record still names the registered session, at the same registration. */
+function stillRegistered(record: ListenerRecord): boolean | undefined {
+  try {
+    const current = readRegistration(record.channel, record.name);
+    return current?.thread === record.thread && current.registeredAt === record.registeredAt;
+  } catch {
+    return undefined; // a corrupt registration: status reports it; keep the record
+  }
+}
+
+/**
+ * Takes over listeners that were lost, such as when Codex restarted their server under an open
+ * session. A record whose heartbeat stopped less than RECOVERY_GRACE_MS ago is adopted while Codex's
+ * daemon lists its session as loaded; this server then refreshes the heartbeat itself and lets go as
+ * soon as the daemon stops listing it. Each note is sent only after that check, never by a standing
+ * watch, and nothing is resumed or started. Idle with no lost listener, it reads files only.
+ */
+async function recover(watches: Map<string, Watch>, adopted: Set<string>, reported: Set<string>): Promise<void> {
+  const now = Date.now();
+  const report = (channel: string, text: string): void => {
+    if (reported.has(text)) return; // the text names the session, the message and the reason
+    reported.add(text);
+    logListen(channel, text);
+  };
+  const pendingOf = (record: ListenerRecord): string | undefined => {
+    try {
+      const pending = pendingFor(record.channel, record.name)?.state.last.file;
+      return pending && !claimSent(claimPath(record.channel, record.thread, pending)) ? pending : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const candidates = listenerRecords().flatMap((record) => {
+    const registered = stillRegistered(record);
+    if (registered === false) rmSync(record.path, { force: true }); // unregistered or replaced: only this generation's file
+    if (!registered || watches.has(record.thread)) {
+      adopted.delete(record.path);
+      return [];
+    }
+    const age = now - record.refreshedAt;
+    if (age > RECOVERY_GRACE_MS) {
+      // Adopted too: a heartbeat this old means pair couldn't check the session for that long.
+      adopted.delete(record.path);
+      const pending = pendingOf(record);
+      if (pending) report(record.channel, `no listener for ${record.thread} since ${new Date(record.refreshedAt).toISOString()}; not notifying it about ${pending}. If that session is still running, have it call pair_listen again.`);
+      return [];
+    }
+    if (!adopted.has(record.path) && age <= LISTENER_STALE_MS) return []; // its listener, or another server that adopted it, is alive
+    return [{ ...record, pending: pendingOf(record) }];
+  });
+  if (candidates.length === 0) return;
+  let loaded: Set<string>;
+  const socket = codexControlSocket();
+  try {
+    loaded = new Set(await loadedThreads(socket));
+  } catch (error) {
+    for (const candidate of candidates) {
+      if (candidate.pending) report(candidate.channel, `no listener for ${candidate.thread}, and pair can't ask Codex's daemon at ${socket} whether it is open (${errorMessage(error)}); not notifying it about ${candidate.pending}. If that session is still running, have it call pair_listen again.`);
+    }
+    return;
+  }
+  const codex = pinnedCodex();
+  for (const candidate of candidates) {
+    if (!loaded.has(candidate.thread)) {
+      if (adopted.delete(candidate.path)) {
+        // Seen closed after recovery: reopened, it must listen again, however soon.
+        rmSync(candidate.path, { force: true });
+        logListen(candidate.channel, `let go of the listener for ${candidate.thread}: Codex's daemon no longer lists it as open, so it must call pair_listen again`);
+      }
+      if (candidate.pending) report(candidate.channel, `no listener for ${candidate.thread}, and Codex's daemon doesn't list it as open; not notifying it about ${candidate.pending}. If that session is still running, have it call pair_listen again.`);
+      continue;
+    }
+    if (!stillRegistered(candidate) || watches.has(candidate.thread)) continue; // changed while the daemon answered
+    if (!adopted.has(candidate.path)) {
+      // Another server may have adopted it while the daemon answered: then it's that server's.
+      const refreshedAt = lstatSync(candidate.path, { throwIfNoEntry: false })?.mtimeMs;
+      if (refreshedAt === undefined || now - refreshedAt <= LISTENER_STALE_MS) continue;
+      adopted.add(candidate.path);
+      logListen(candidate.channel, `took over the lost listener for ${candidate.thread}: Codex's daemon lists it as open`);
+    }
+    touchRecord(candidate.path);
+    if (!candidate.pending) continue;
+    const watch: Watch = { channel: candidate.channel, name: candidate.name, codex, notifiedAt: 0, stallReported: false, dispatching: false, failures: 0, retryAt: 0, recovered: true };
+    try {
+      if (claim(claimPath(candidate.channel, candidate.thread, candidate.pending)) !== "claimed") continue;
+    } catch {
+      continue; // released or replaced meanwhile: the next pass looks again
+    }
+    dispatch(candidate.thread, watch, candidate.pending);
   }
 }
 
@@ -1212,9 +1402,18 @@ function mcpResult(request: McpRequest, watches: Map<string, Watch>): unknown {
 /** stdio MCP server. Its watches live and die with this process, which Codex ends with the session. */
 async function serveMcp(): Promise<void> {
   const watches = new Map<string, Watch>();
+  const reported = new Set<string>();
+  const adopted = new Set<string>(); // listener records this server took over
+  let recovering = false;
+  let nextRecovery = 0;
   const timer = setInterval(() => {
     for (const [thread, watch] of watches) {
       tick(thread, watch, watches);
+    }
+    if (!recovering && Date.now() >= nextRecovery) {
+      recovering = true;
+      nextRecovery = Date.now() + RECOVER_MS;
+      void recover(watches, adopted, reported).catch((error) => console.error(`pair: listener recovery failed: ${errorMessage(error)}`)).finally(() => { recovering = false; });
     }
   }, POLL_MS);
   const respond = (message: object): void => {
@@ -1290,7 +1489,9 @@ function notificationStatus(channel: string): string[] {
   for (const name of registeredNamesTolerant(channel, report)) {
     try {
       const current = readRegistration(channel, name);
-      if (current) registrations.push(`session ${current.thread}${name === "codex" ? "" : ` as ${name}`}, registered ${current.registeredAt}`);
+      if (!current) continue;
+      const armed = existsSync(listenerRecordPath(channel, name, current)) ? "listener recovery armed" : "listener recovery not armed (pair_listen arms it)";
+      registrations.push(`session ${current.thread}${name === "codex" ? "" : ` as ${name}`}, registered ${current.registeredAt}, ${armed}`);
     } catch (error) {
       report(error);
     }
