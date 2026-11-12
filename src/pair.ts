@@ -700,13 +700,13 @@ function formatMessage(me: Agent, pending: Pending): string {
  * Prints the message, then archives a closed thread. Archiving last keeps the `== pair:` header on
  * the first line even when cleanup warns on stderr, since agents read stdout and stderr merged.
  */
-async function wait(channel: string, me: Agent, timeoutSeconds: number, scope?: Thread): Promise<boolean> {
+async function wait(channel: string, me: Agent, timeoutSeconds: number, scope?: Thread, archiveClosed = true): Promise<boolean> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (true) {
     const pending = channelAccess(channel, () => pendingFor(channel, me, scope));
     if (pending) {
       console.log(formatMessage(me, pending));
-      if (pending.state.kind === "closed") {
+      if (pending.state.kind === "closed" && archiveClosed) {
         try {
           channelAccess(channel, () => archive(channel, pending.state.last));
         } catch (error) {
@@ -1743,16 +1743,33 @@ function otherWorktrees(root: string): string[] {
 }
 
 /**
+ * Archived threads plus a finished thread still in its lane: an auto author's own pair wait leaves the
+ * verdict there for its managed send, or the next request, to archive. A lane pair can't read is skipped.
+ */
+function finishedThreads(channel: string): ArchivedThread[] {
+  const live = lanesOf(channel).flatMap((thread): ArchivedThread[] => {
+    try {
+      const state = stateOf(listMessages(thread));
+      if (state.kind !== "closed") return [];
+      const dir = dirname(state.last.file);
+      const stats = statSync(dir, { throwIfNoEntry: false });
+      return stats ? [{ id: basename(dir), finishedAt: stats.mtimeMs, dir, laneName: basename(thread.lane), outcome: state.last.status as ThreadStatus, thread }] : [];
+    } catch { return []; }
+  });
+  return [...listArchived(channel), ...live].sort((a, b) => b.finishedAt - a.finishedAt || b.id.localeCompare(a.id));
+}
+
+/**
  * Finished threads of this worktree and, read-only, of the repository's other worktrees, whose
  * channels are found as an agent there would, with this process's PAIR_HOME. Another worktree's
  * unreadable channel is skipped with a warning; this worktree's errors stand as before.
  */
 function repositoryArchived(channel: string, root: string, warn: (text: string) => void): ArchivedThread[] {
   const others = otherWorktrees(root).flatMap((worktree) => {
-    try { return listArchived(channelDir(worktree)).map((entry) => ({ ...entry, worktree })); }
+    try { return finishedThreads(channelDir(worktree)).map((entry) => ({ ...entry, worktree })); }
     catch (error) { warn(`skipped the finished threads of ${worktree}: ${errorMessage(error)}`); return []; }
   });
-  return [...listArchived(channel), ...others].sort((a, b) => b.finishedAt - a.finishedAt || b.id.localeCompare(a.id));
+  return [...finishedThreads(channel), ...others].sort((a, b) => b.finishedAt - a.finishedAt || b.id.localeCompare(a.id));
 }
 
 function history(channel: string, root: string, query: string | undefined, warn: (text: string) => void): string {
@@ -1776,6 +1793,7 @@ function history(channel: string, root: string, query: string | undefined, warn:
   }
   const matches = archived.filter((entry) => entry.id.includes(query));
   // This worktree's open threads too: pair status shows their IDs. A lane pair can't read doesn't hide the others.
+  // A finished thread still in its lane is already among the matches.
   const open = lanesOf(channel).flatMap((thread) => {
     let dir: string | undefined;
     try { dir = currentThreadDir(thread); }
@@ -1783,7 +1801,7 @@ function history(channel: string, root: string, query: string | undefined, warn:
       warn(`skipped the open thread of ${basename(thread.lane)}: ${errorMessage(error)}`);
       return [];
     }
-    return dir !== undefined && basename(dir).includes(query) ? [{ id: basename(dir), dir, thread }] : [];
+    return dir !== undefined && basename(dir).includes(query) && !matches.some((entry) => entry.dir === dir) ? [{ id: basename(dir), dir, thread }] : [];
   });
   if (matches.length + open.length !== 1) {
     const count = matches.length + open.length;
@@ -2737,7 +2755,14 @@ async function main(argv: string[]): Promise<number> {
         if (process.env.PAIR_AUTO_ROLE && me !== process.env.PAIR_AGENT) throw new PairError(`this auto session runs you as ${process.env.PAIR_AGENT}: pass --as ${process.env.PAIR_AGENT}`);
         const timeout = positiveNumber(values.timeout ?? String(DEFAULT_WAIT_SECONDS), "--timeout");
         await managedReview(me); // explicit retry after a failed managed round
-        if (!(await wait(channel, me, timeout, sessionLane(me)))) {
+        // An auto author's replies come back with its pair send. An extra wait doesn't idle, and it leaves a final
+        // verdict in the lane for that send (or the next request) to archive, so it can't take the send's reply.
+        const autoAuthor = process.env.PAIR_AUTO_ROLE === "author" && Boolean(process.env.PAIR_AUTO_RUN);
+        if (!(await wait(channel, me, autoAuthor ? 0 : timeout, sessionLane(me), !autoAuthor))) {
+          if (autoAuthor) {
+            console.log(`pair: no message for ${me} yet. In auto mode pair send returns the review itself; pair wait only retries a failed review.`);
+            return 0;
+          }
           // Exit 0: a timeout is routine, and agent UIs show any non-zero exit as a failure. No "run it
           // again" here: whether to wait again differs by agent (Codex must not poll), so the prompt says.
           console.log(`pair: no message for ${me} yet.`);

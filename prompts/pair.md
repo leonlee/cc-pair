@@ -54,11 +54,20 @@ approval or escalation, or in a brainstorm until it completes. In interactive Cl
 these commands and managed retry waits with Bash's `run_in_background: true`, end your turn, and
 read their output when the completion notification arrives. Reviews can exceed the foreground Bash
 timeout. This background command is active review work, not an idle wait loop. Do not register,
-call `pair_listen`, or run idle waits.
+call `pair_listen`, or run idle waits. Never append `&` to a pair command, and don't start a
+separate `pair wait` after a managed send: the send already returns the review. Use `pair wait`
+only for the retry below.
+
+If `PAIR_AUTO_PROMPT_FILE` is set as well, read that file at session start and after a clear or
+compaction, and follow it: it holds this launch's author instructions.
 
 If a managed review fails, the request stays on disk. Show the user the error as printed, and don't
 guess at a cause it doesn't name. Retry once with `pair wait --as {{AGENT}}`. If the same failure
 comes back, stop and ask the user, naming any reviewer model or effort the error says a retry keeps.
+
+If an auto session ended unexpectedly, for example killed with its author, run `pair status` in its
+worktree and use the restart command it prints, or `pair start --resume` there. A bare
+`claude --resume` or `codex resume` brings back the conversation without pair's owner or reviewer.
 
 If `PAIR_AUTO_ROLE=reviewer`, handle exactly one pending review round. Read it with
 `pair wait --as {{AGENT}} --timeout 1`, review, send your verdict, and exit. Do not modify source,
@@ -101,6 +110,10 @@ out: start it again, unless you are Codex (see above). That isn't an error. If i
 `== pair:`, a message was delivered. Act on
 it, even if its body quotes timeout text. If `pair wait` ends any other way (a non-zero exit, or
 cancelled by you or the user), don't restart it. Tell the user what happened.
+
+To stop a background `pair wait` or `pair send` you started, stop that task or its exact PID. Never
+stop processes by pattern (`pkill -f`, `killall`): other agents' command lines contain pair commands,
+and a pattern kills those agents too.
 
 ## Ask your partner for a review (you are the author)
 

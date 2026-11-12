@@ -332,6 +332,18 @@ selector only when the record is valid, is for the same CLI and has a known ID, 
 author arguments that already select a conversation. A plain `pair start`, or one with
 `--continue`, never resumes the record by itself.
 
+An author's prompt lives in a file in the run directory, not on its command line: the prompt names
+pair commands, and there `pkill -f "pair wait …"` matched every auto-mode author. Claude takes it
+with `--append-system-prompt-file`. Codex has no append-from-file option (its instructions file
+replaces Codex's own), so its first message only points at the file, and `PAIR_AUTO_PROMPT_FILE`
+lets the instructions reread it after compaction. A reviewer's round prompt stays on its command
+line; killing a reviewer fails only that round. No pattern is safe: the run directory's path still
+contains `pair`.
+
+An auto author's own `pair wait` is for the failed-review retry. It joins a running round instead of
+starting another, returns at once when nothing is pending, and leaves a final verdict in the lane
+for the managed send, or the next request, to archive, so it can't take that send's reply.
+
 Claude records a conversation's system prompt on its first request and reuses it on resume, so the
 author prompt names `"$PAIR_BIN"` rather than the run directory. Every launch also sends a first
 user message naming `"$PAIR_BIN"` and the launch's pairing (`--as`, `--to`), for conversations whose
