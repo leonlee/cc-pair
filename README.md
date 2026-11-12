@@ -180,7 +180,7 @@ Advanced options:
 | `--serve-worktrees` | off | Also review subagents' own worktrees of this repository ([Parallel work](#63-parallel-work)) |
 | `--reviewers N` | 1 (max 8) | Review rounds at once, across all served worktrees; needs `--serve-worktrees` |
 | `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
-| `--timeout SECONDS` | 900 (max 86400) | Limit per review round; the author has none |
+| `--timeout SECONDS` | 900 (max 86400) | Limit per review round, not counting system sleep; the author has none |
 | `--grace SECONDS` | 2 (max 30) | Wait between termination and forced termination |
 
 ```sh

@@ -1252,7 +1252,7 @@ export async function runGuardian(): Promise<void> {
   let stopping = false;
   let disconnected = false;
   let disconnecting = false;
-  const jobs = new Map<string, { stop(reason?: string): void }>();
+  const jobs = new Map<string, { stop(reason?: string): void; deadline?: number }>();
   let interactive: ChildProcess | undefined;
   const done = () => {
     if (!stopping || jobs.size) return;
@@ -1272,14 +1272,24 @@ export async function runGuardian(): Promise<void> {
     done();
   };
   let tick = performance.now();
-  const watchdog = setInterval(() => {
+  const check = () => {
     const now = performance.now();
     // The monotonic clock counts a system sleep (macOS). A late tick means this process was suspended
     // as well, so the owner gets a fresh deadline; only an owner hung while the guardian runs is stale.
-    if (now - tick > 3000) heartbeat = now;
+    // Review deadlines move by the time slept, so a round gets its whole limit awake.
+    const slept = now - tick > 3000 ? now - tick - 1000 : 0;
+    if (slept) heartbeat = now;
     tick = now;
     if (now - heartbeat > 5000) shutdown();
-  }, 1000);
+    for (const job of jobs.values()) {
+      if (job.deadline === undefined) continue;
+      job.deadline += slept;
+      if (now < job.deadline) continue;
+      job.deadline = undefined;
+      job.stop("reviewer timed out");
+    }
+  };
+  const watchdog = setInterval(check, 1000);
   process.on("disconnect", () => { if (!disconnecting) disconnected = true; shutdown(); });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, shutdown);
   process.on("SIGWINCH", () => { interactive?.kill("SIGWINCH"); });
@@ -1290,6 +1300,8 @@ export async function runGuardian(): Promise<void> {
     if (message.type === "claim" && typeof message.socket === "string") { claims.push(message.socket); return; }
     if (message.type === "stop") { jobs.get(message.id)?.stop("worktree removed or replaced"); return; }
     if (message.type !== "launch" || !config || stopping) return;
+    check(); // a launch handled on waking, before the late tick, must not get credit for the sleep before it
+    if (stopping) return;
     const job = message.job as Job;
     const child = spawn(job.executable, job.args, { cwd: job.cwd, env: job.env, detached: true, stdio: job.interactive ? "inherit" : ["ignore", "pipe", "pipe"] });
     if (job.interactive) interactive = child;
@@ -1302,7 +1314,6 @@ export async function runGuardian(): Promise<void> {
     let closed = false;
     let grace: NodeJS.Timeout | undefined;
     let hard: NodeJS.Timeout | undefined;
-    let timeout: NodeJS.Timeout | undefined;
     const signal = (name: NodeJS.Signals) => {
       if (!child.pid) return;
       try { process.kill(-child.pid, name); }
@@ -1318,7 +1329,6 @@ export async function runGuardian(): Promise<void> {
       finished = true;
       if (grace) clearTimeout(grace);
       if (hard) clearTimeout(hard);
-      if (timeout) clearTimeout(timeout);
       child.stdout?.destroy();
       child.stderr?.destroy();
       jobs.delete(job.id);
@@ -1338,7 +1348,8 @@ export async function runGuardian(): Promise<void> {
         if (exited && closed) finish();
       }, config!.graceMs);
     };
-    jobs.set(job.id, { stop });
+    // ponytail: checked by the watchdog, so a limit lands within a second of its time
+    jobs.set(job.id, { stop, ...(job.timeoutMs ? { deadline: performance.now() + job.timeoutMs } : {}) });
     child.once("spawn", () => send({ type: "spawned", id: job.id, pid: child.pid }));
     child.once("error", (error) => { reason = error.message; exited = true; result = { code: null }; });
     child.once("exit", (code, signal) => {
@@ -1354,6 +1365,5 @@ export async function runGuardian(): Promise<void> {
     for (const stream of ["stdout", "stderr"] as const) {
       child[stream]?.on("data", (chunk: Buffer) => send({ type: "output", id: job.id, stream, text: chunk.toString("utf8") }));
     }
-    if (job.timeoutMs) timeout = setTimeout(() => stop("reviewer timed out"), job.timeoutMs);
   });
 }

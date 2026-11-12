@@ -54,6 +54,8 @@ Fixes found while testing with the real CLIs:
 - Auto mode no longer ends when a Mac wakes from sleep. Node's monotonic clock counts the sleep, so
   the guardian took the owner for hung and stopped the session, author included. It now gives the
   owner a fresh deadline when its own watchdog woke late. Earlier versions were affected too.
+- A review round's `--timeout` counts only time awake. A Mac that slept through a review used to
+  time it out on waking, and the author had to rerun it with `pair wait`.
 - A corrupt registration no longer stops others from registering, and when registrations block
   `pair start`, it names each one with `pair unregister --as NAME`.
 

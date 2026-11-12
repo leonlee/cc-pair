@@ -871,6 +871,43 @@ test("guardian survives a system sleep that suspends it and the launcher past th
   await f.command(["stop"]);
 });
 
+test("a review's time limit doesn't count a system sleep", { timeout: 25_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "hang", timeout: 4 });
+  await until(() => existsSync(f.file("worker.pid")), "reviewer started");
+  const guardian = f.state().guardianPid;
+  f.launcher.kill("SIGSTOP");
+  process.kill(guardian, "SIGSTOP");
+  try { await pause(6000); }
+  finally { process.kill(guardian, "SIGCONT"); f.launcher.kill("SIGCONT"); }
+  await pause(1500);
+  assert.ok(!existsSync(f.file("first.error")), "six seconds asleep don't use up a four-second limit");
+  await until(() => existsSync(f.file("first.error")), "the limit still applies to time awake");
+  assert.match(f.read("first.error"), /timed out/);
+  await f.command(["stop"]);
+});
+
+test("a review launched as the Mac wakes gets no credit for the sleep before it", { timeout: 25_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold", worker: "hang", timeout: 2 });
+  await until(() => existsSync(f.file("author.env.json")), "author started");
+  const guardian = f.state().guardianPid;
+  process.kill(guardian, "SIGSTOP");
+  let output = "";
+  let ended;
+  try {
+    // The owner queues the launch while the guardian sleeps; the guardian handles it on waking.
+    const send = spawn(process.execPath, [CLI, "send", "request", "--as", "claude", "--to", "codex", "-"], { cwd: f.root, env: { ...f.env, ...JSON.parse(f.read("author.env.json")) } });
+    for (const stream of [send.stdout, send.stderr]) stream.on("data", (chunk) => { output += chunk; });
+    ended = new Promise((resolve) => send.once("close", resolve));
+    send.stdin.end("## Summary\nx");
+    await pause(6000);
+  } finally { process.kill(guardian, "SIGCONT"); }
+  const woke = Date.now();
+  await ended;
+  assert.match(output, /timed out/);
+  assert.ok(Date.now() - woke < 4500, `a two-second limit ended ${Date.now() - woke}ms after waking`);
+  await f.command(["stop"]);
+});
+
 test("standard help describes auto mode", () => {
   const result = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0);

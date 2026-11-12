@@ -350,7 +350,8 @@ grace period, and observes the CLI exit and stream closure. Even a successful CL
 cleanup of the rest of its group. A private IPC disconnect cleans up if the launcher dies; a
 monotonic heartbeat deadline covers a hung launcher without counting wall-clock jumps. The
 monotonic clock does count a system sleep (macOS), which suspends the guardian too, so a watchdog
-tick that comes late restarts the deadline instead. The guardian exits after its jobs are collected, and the launcher tracks live child identities
+tick that comes late restarts the deadline instead and moves each review's time limit by the time
+slept, so `--timeout` counts time awake. The guardian exits after its jobs are collected, and the launcher tracks live child identities
 for emergency cleanup if the guardian fails. No cleanup loads a PID from disk and signals it, and no
 command kills by agent name.
 
