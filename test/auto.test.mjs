@@ -132,6 +132,9 @@ if (reviewer) {
   }
 } else {
   write('author.args.json', JSON.stringify(process.argv.slice(2)));
+  const promptFlag = process.argv.indexOf('--append-system-prompt-file');
+  const promptFile = promptFlag >= 0 ? process.argv[promptFlag + 1] : process.env.PAIR_AUTO_PROMPT_FILE;
+  if (promptFile) write('author.prompt', readFileSync(promptFile, 'utf8'));
   write('author.env.json', JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('PAIR_')))));
   if (process.env.TEST_AUTHOR_SESSION) process.env[cli === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
   write('author.cwd', process.cwd());
@@ -268,7 +271,7 @@ for (const author of ["claude", "codex"]) {
       assert.match(args.at(-1), /This thread is a brainstorm[^]*--verdict continue\|complete; /);
       assert.doesNotMatch(args.at(-1), /approve\|changes/);
     }
-    assert.match(JSON.parse(f.read("author.args.json")).join(" "), /use pair send request --brainstorm/);
+    assert.match(f.read("author.prompt"), /use pair send request --brainstorm/);
     assert.match((await f.command(["history"])).stdout, /completed  4 messages/);
   });
 
@@ -953,6 +956,87 @@ test("a review launched as the Mac wakes gets no credit for the sleep before it"
   await f.command(["stop"]);
 });
 
+// Runs a pair command as the session's author would, with its environment.
+function asAuthor(f, args, input) {
+  const child = spawn(process.execPath, [CLI, ...args], { cwd: f.root, env: { ...f.env, ...JSON.parse(f.read("author.env.json")) } });
+  let output = "";
+  for (const stream of [child.stdout, child.stderr]) stream.on("data", (chunk) => { output += chunk; });
+  const done = new Promise((resolve) => child.once("close", (code) => resolve({ code, output })));
+  child.stdin.end(input ?? "");
+  return done;
+}
+
+test("a Codex author's command line points at its instructions and names no pair command", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { author: "codex", scenario: "hold" });
+  await until(() => existsSync(f.file("author.prompt")), "author started");
+  const args = JSON.parse(f.read("author.args.json"));
+  assert.ok(!args.some((arg) => /pair (wait|send)/.test(arg)), "no pair command on the author's command line, where pkill -f would match it");
+  const file = JSON.parse(f.read("author.env.json")).PAIR_AUTO_PROMPT_FILE;
+  assert.equal(args.at(-2), "--");
+  assert.ok(args.at(-1).includes(`read the instruction file at ${JSON.stringify(file)}`));
+  assert.ok(args.some((arg) => arg.startsWith("shell_environment_policy.set.PAIR_AUTO_PROMPT_FILE=")), "commands on Codex's shared daemon get the path too");
+  const prompt = f.read("author.prompt");
+  assert.ok(prompt.includes(FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", "codex")));
+  assert.match(prompt, /Never append & to a pair command/);
+  await f.command(["stop"]);
+  assert.ok(!existsSync(file), "the file goes with its run");
+});
+
+test("an auto author's extra pair wait neither idles nor takes the managed send's verdict", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold", worker: "gated-release" });
+  await until(() => existsSync(f.file("author.env.json")), "author started");
+  const send = asAuthor(f, ["send", "request", "--as", "claude", "-"], "## Summary\nx");
+  await until(() => existsSync(f.file("worker.pid")), "review running");
+  const extra = asAuthor(f, ["wait", "--as", "claude", "--timeout", "30"]);
+  await pause(300);
+  writeFileSync(f.file("release"), "");
+  const [sent, waited] = await Promise.all([send, extra]);
+  assert.equal(sent.code, 0, sent.output);
+  assert.match(sent.output, /verdict approve/, "the send still delivers its verdict");
+  assert.equal(waited.code, 0, waited.output);
+  assert.equal(JSON.parse(f.read("calls.json")).length, 1, "the extra wait joined the round instead of starting another");
+  const started = Date.now();
+  const idle = await asAuthor(f, ["wait", "--as", "claude", "--timeout", "30"]);
+  assert.match(idle.output, /^pair: no message for claude yet\. In auto mode pair send returns the review itself/);
+  assert.ok(Date.now() - started < 3000, "an auto author's wait doesn't idle");
+  await f.command(["stop"]);
+});
+
+test("an approval from an explicit retry is in pair history before any further request", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "retry", worker: "failfirst" });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(f.read("retry.out"), /verdict approve/);
+  const [id] = readdirSync(join(f.env.PAIR_HOME, readdirSync(f.env.PAIR_HOME)[0], "claude-to-codex"));
+  assert.ok(id, "the retry left its verdict in the lane for the next request to archive");
+  assert.match((await f.command(["history"])).stdout, new RegExp(`^${id}  claude-to-codex  approved  2 messages`, "m"));
+  assert.match((await f.command(["history", id])).stdout, new RegExp(`^== thread ${id} · claude-to-codex · approved ==`));
+});
+
+test("an author killed out from under its session leaves the restart command in the terminal and in status", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold" });
+  await until(() => existsSync(f.file("author.pid")), "author started");
+  process.kill(Number(f.read("author.pid")), "SIGKILL");
+  await f.completed;
+  assert.match(f.output(), /pair: the claude author ended unexpectedly \(SIGKILL\); stopping this session\n {2}last author session: \S+[^\n]*\n {2}restart it: cd .* pair start /);
+  // A stale socket, as when the owner itself was killed: status still says how to resume.
+  const previous = process.env.PAIR_AUTO_SOCKET_DIR;
+  process.env.PAIR_AUTO_SOCKET_DIR = f.socketDir;
+  let socket;
+  try { socket = autoSocketPath(f.stateDir()); }
+  finally {
+    if (previous === undefined) delete process.env.PAIR_AUTO_SOCKET_DIR;
+    else process.env.PAIR_AUTO_SOCKET_DIR = previous;
+  }
+  const holder = spawn(process.execPath, ["-e", `require("node:net").createServer().listen(${JSON.stringify(socket)}, () => console.log("up"))`]);
+  await new Promise((resolve) => holder.stdout.once("data", resolve));
+  holder.kill("SIGKILL");
+  await new Promise((resolve) => holder.once("close", resolve));
+  try {
+    const { stdout } = await f.command(["status"]);
+    assert.match(stdout, /owner unavailable; stale socket .* remove it before restarting\n {2}last author session: [^\n]*\n {2}restart it: /);
+  } finally { rmSync(socket, { force: true }); }
+});
+
 test("standard help describes auto mode", () => {
   const result = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0);
@@ -978,10 +1062,12 @@ test("Claude author gets one canonical socket allow rule and persistent instruct
   const allowed = settings.sandbox.network.allowUnixSockets;
   assert.equal(allowed.length, 1);
   assert.equal(allowed[0], join(realpathSync(f.socketDir), readdirSync(f.socketDir)[0]));
-  assert.ok(args.includes("--append-system-prompt"));
-  assert.match(args[args.indexOf("--append-system-prompt") + 1], /run_in_background: true/);
+  assert.ok(!args.includes("--append-system-prompt"));
+  assert.ok(!args.some((arg) => /pair (wait|send)/.test(arg)), "no pair command on the author's command line, where pkill -f would match it");
+  const prompt = f.read("author.prompt");
+  assert.match(prompt, /run_in_background: true/);
   // One rule for a failed review, in the author's system prompt and in the instructions agents read.
-  assert.ok(args[args.indexOf("--append-system-prompt") + 1].includes(FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", "claude")));
+  assert.ok(prompt.includes(FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", "claude")));
   const instructions = readFileSync(join(import.meta.dirname, "..", "prompts", "pair.md"), "utf8").replace(/\s+/g, " ");
   assert.ok(instructions.includes(FAILED_REVIEW_RULE), "prompts/pair.md states the same failed-review rule");
   await f.command(["stop"]);
@@ -1015,7 +1101,7 @@ test("a resumed Claude author keeps the ID it was given, and its prompts never n
   // Claude reuses a resumed conversation's recorded system prompt, so it can't name this run's wrapper. The new
   // user turn on each launch points a conversation recorded by an older pair at the current one; this checks
   // that pair sends it, not that the model follows it.
-  const prompt = args[args.indexOf("--append-system-prompt") + 1];
+  const prompt = f.read("author.prompt");
   assert.match(prompt, /The pair CLI is "\$PAIR_BIN"/);
   assert.match(args.at(-1), /Run pair as "\$PAIR_BIN" in this launch; an absolute .*bin\/pair path from an earlier launch no longer exists/);
   assert.match(args.at(-1), /In this launch your pair name is claude and your reviewer is codex: pass --as claude --to codex/, "a recorded prompt may name another pairing");

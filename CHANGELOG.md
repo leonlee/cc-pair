@@ -59,6 +59,17 @@ Fixes found while testing with the real CLIs:
   owner a fresh deadline when its own watchdog woke late. Earlier versions were affected too.
 - A review round's `--timeout` counts only time awake. A Mac that slept through a review used to
   time it out on waking, and the author had to rerun it with `pair wait`.
+- `pkill -f "pair wait --as claude"`, meant for one stray wait, ended every auto-mode Claude
+  author: pair passed the author's prompt, which names pair commands, on its command line. It now
+  passes it in a file, to Claude with `--append-system-prompt-file`; a Codex author's first message
+  points at the file. The instructions say to stop a background pair command by its task or exact
+  PID, never by pattern; never to append `&` to a pair command or start a separate wait after a
+  managed send; and to resume an interrupted auto session with the restart command `pair status`
+  prints, not a bare `claude --resume`.
+- An auto author's extra `pair wait` returns at once when nothing is pending, and no longer
+  archives the final verdict that its managed send was about to print.
+- When the author ends unexpectedly, `pair start` prints the restart command before it stops, and
+  `pair status` shows it next to a stale owner socket too.
 - A corrupt registration no longer stops others from registering, and when registrations block
   `pair start`, it names each one with `pair unregister --as NAME`.
 
