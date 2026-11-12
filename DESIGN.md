@@ -292,6 +292,7 @@ when that round was given the same settings. Effort names are checked per backen
 before startup and on every change; each CLI decides whether it supports the combination.
 
 `pair reviewer` changes the settings on the live owner, over the control socket, without a restart.
+The time limit (`--timeout`) isn't part of a thread's snapshot: each launch reads the current value.
 A thread takes a snapshot of the settings at its first launch and keeps it for its follow-up rounds
 and retries, so by default a change applies to new threads; the restart command `pair stop` prints
 uses the current ones. `--thread current|ID` changes one thread instead, and only the pending one

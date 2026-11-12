@@ -36,6 +36,9 @@ history and registrations work as they are.
   `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers
   every lane, replies owed first. `pair register --as NAME` wakes a named Codex participant.
 - **Lanes** are `<author>-to-<reviewer>/`; `status`, `history`, `reset` and `clean` cover them all.
+- **Review time limit.** The default limit per review round is now 30 minutes (was 15).
+  `pair reviewer --timeout SECONDS` changes it in a running session from the next round, a failed
+  thread's retry included, and a timed-out round's error names it. `pair status` shows the limit.
 
 Fixes found while testing with the real CLIs:
 

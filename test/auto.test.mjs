@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, FAILED_REVIEW_RULE, knownModels, ranSettings, withRecordedSession } from "../dist/auto.js";
+import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, setReviewer, withRecordedSession } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -391,10 +391,55 @@ test("reviewer timeout preserves the request and kills descendants", { timeout: 
   await f.command(["stop"]);
 });
 
+test("pair reviewer --timeout changes the limit from the next round, a retry included", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "hang", timeout: 0.4 });
+  await until(() => existsSync(f.file("first.error")), "timeout delivered");
+  await assert.rejects(f.command(["reviewer", "--timeout", "90000"]), /at most 86400/);
+  await assert.rejects(f.command(["reviewer", "--thread", "current", "--timeout", "60"]), /leave out --thread/);
+  assert.match((await f.command(["reviewer", "--timeout", "600"])).stdout, /review time limit: 600s \(was 0\.4s\), from the next round/);
+  assert.match((await f.command(["status"])).stdout, /review time limit: 600s per round, not counting sleep/);
+  const { start } = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8"));
+  assert.deepEqual(start.filter((arg) => arg === "--timeout").length, 1);
+  assert.equal(start[start.indexOf("--timeout") + 1], "600", "pair stop's restart command keeps the new limit");
+  const retry = spawn(process.execPath, [CLI, "wait", "--as", "claude", "--timeout", "30"], { cwd: f.root, env: { ...f.env, ...JSON.parse(f.read("author.env.json")) } });
+  t.after(() => retry.kill());
+  await until(() => JSON.parse(f.read("calls.json")).length === 2, "retry started");
+  await pause(2000);
+  assert.equal(retry.exitCode, null, "the retry runs past the old 0.4s limit");
+  await f.command(["stop"]);
+});
+
+test("pair reviewer --timeout changes nothing unless the session's own owner supports it", async (t) => {
+  const socketDir = mkdtempSync("/tmp/pair-at-");
+  const previous = process.env.PAIR_AUTO_SOCKET_DIR;
+  process.env.PAIR_AUTO_SOCKET_DIR = socketDir;
+  const stateDir = join(socketDir, "state");
+  const actions = [];
+  let status = { state: { reviewerModel: "m" } };
+  const owner = createServer((socket) => socket.once("data", (data) => {
+    const { action } = JSON.parse(data);
+    actions.push(action);
+    socket.end(JSON.stringify(action === "status" ? status : { message: "reviewer for new threads: ..." }));
+  }));
+  await new Promise((resolve) => owner.listen(autoSocketPath(stateDir), resolve));
+  t.after(() => {
+    owner.close();
+    if (previous === undefined) delete process.env.PAIR_AUTO_SOCKET_DIR;
+    else process.env.PAIR_AUTO_SOCKET_DIR = previous;
+    rmSync(socketDir, { recursive: true, force: true });
+  });
+  await assert.rejects(setReviewer(stateDir, { model: "new", timeoutSeconds: 600 }), /runs an older pair that can't change its review time limit; nothing was changed/);
+  assert.deepEqual(actions, ["status"], "the model isn't changed either");
+  await assert.rejects(setReviewer(stateDir, { thread: "current", model: "new", timeoutSeconds: 600 }), /leave out --thread/);
+  status = { served: { root: "/the/root", pid: 1 } }; // a served worktree's owner may be older too
+  await assert.rejects(setReviewer(stateDir, { model: "new", timeoutSeconds: 600 }), /served by the auto session in \/the\/root; run pair reviewer --timeout there/);
+  assert.deepEqual(actions, ["status", "status"], "neither reaches the reviewer action");
+});
+
 test("pair wait reruns a timed-out review", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "retry", worker: "hangfirst" });
   assert.equal((await f.completed).code, 0, f.output());
-  assert.match(f.read("first.error"), /reviewer timed out\. Pair wait retries it\./);
+  assert.match(f.read("first.error"), /reviewer timed out\. Pair wait retries it; to give it more than 5s, first run pair reviewer --timeout SECONDS in your own terminal\./);
   assert.match(f.read("retry.out"), /verdict approve/);
   assert.equal(JSON.parse(f.read("calls.json")).length, 2);
 });

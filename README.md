@@ -180,7 +180,7 @@ Advanced options:
 | `--serve-worktrees` | off | Also review subagents' own worktrees of this repository ([Parallel work](#63-parallel-work)) |
 | `--reviewers N` | 1 (max 8) | Review rounds at once, across all served worktrees; needs `--serve-worktrees` |
 | `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
-| `--timeout SECONDS` | 900 (max 86400) | Limit per review round, not counting system sleep; the author has none |
+| `--timeout SECONDS` | 1800 (max 86400) | Limit per review round, not counting system sleep; the author has none. `pair reviewer --timeout` changes it later |
 | `--grace SECONDS` | 2 (max 30) | Wait between termination and forced termination |
 
 ```sh
@@ -262,7 +262,7 @@ From another terminal in the session's worktree:
 ```sh
 pair status    # lanes, auto session state, author conversation, last failure, log location
 pair ps -v     # pair processes by worktree, with full commands
-pair reviewer  # change the reviewer's model or effort (Changing the reviewer)
+pair reviewer  # change the reviewer's model, effort or time limit (Changing the reviewer)
 pair stop      # stop the author, its reviewers and their tools
 ```
 
@@ -293,6 +293,7 @@ that judges its work. `pair status` shows the current settings.
 pair reviewer --reviewer-model gpt-6.1-sol --reviewer-effort high   # threads opened from now on
 pair reviewer --reviewer-effort default                             # back to the CLI's default
 pair reviewer --thread current --reviewer-model gpt-6.1-sol         # the thread whose round failed
+pair reviewer --timeout 3600                                        # each round's limit, from the next one
 ```
 
 A thread keeps the settings of its first round for its follow-up rounds and retries, so a plain
@@ -300,6 +301,8 @@ change applies to new threads and to the restart command that `pair stop` prints
 `--thread current` (or the thread's ID) changes only a pending thread whose last round failed, for
 example after a mistyped model. Its next round starts a new reviewer conversation that reads the
 thread so far. Then tell the author to retry.
+`--timeout` applies to every round from the next one, a failed thread's retry included; a running
+round keeps its limit.
 
 ## 4. Participants
 
@@ -587,6 +590,7 @@ Agents run `send` and `wait`; users mostly run `start`, `stop`, `status`, `revie
 pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME] [options] [-- AUTHOR_ARGS...]
 pair stop
 pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
+pair reviewer --timeout SECONDS
 pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict VERDICT] <file|->
                              # approve|changes, or continue|complete in a brainstorm
 pair wait --as NAME [--timeout seconds]   # default 540; prints "no message … yet"
