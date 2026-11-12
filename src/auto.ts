@@ -22,7 +22,10 @@ interface Result { code: number | null; signal?: string; error?: string }
 /** Reviewer settings; an absent value leaves it to the reviewer CLI's own default. */
 export interface ReviewerSettings { model?: string; effort?: string }
 /** A pair reviewer change: a value sets it, null returns it to the CLI default, absent keeps it. */
-export interface ReviewerChange { model?: string | null; effort?: string | null; thread?: string }
+export interface ReviewerChange { model?: string | null; effort?: string | null; thread?: string; timeoutSeconds?: number }
+/** Each review round's time limit, awake time only. */
+export const DEFAULT_REVIEW_SECONDS = 1800;
+export const MAX_REVIEW_SECONDS = 86400;
 interface RecordState {
   run: string;
   pid: number;
@@ -34,6 +37,8 @@ interface RecordState {
   reviewerName?: string;
   reviewerModel?: string;
   reviewerEffort?: string;
+  /** Each review round's limit (an older owner has none). */
+  timeoutMs?: number;
   worktree: string;
   phase: string;
   log: string;
@@ -261,6 +266,7 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
       ...(state.authorSession ? [`  author session: ${state.authorSession}`] : []), // an older owner has none
       `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
       ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
+      ...(state.timeoutMs ? [`  review time limit: ${state.timeoutMs / 1000}s per round, not counting sleep`] : []),
       ...(state.served ? servingLines(state.served) : []),
       ...(state.workerPid ? [`  reviewer pid: ${state.workerPid}`] : []),
       ...(state.session ? [`  reviewer session: ${state.session}`] : []),
@@ -393,7 +399,18 @@ export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): M
 
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */
 export async function setReviewer(stateDir: string, change: ReviewerChange): Promise<string> {
-  try { return (await autoCall(stateDir, { action: "reviewer", ...change })).message; }
+  try {
+    if (change.timeoutSeconds !== undefined) {
+      // An older owner would ignore the field and apply the rest; check first, so nothing changes.
+      if (change.thread !== undefined) throw new Error("--timeout applies to every next round, a retry included; leave out --thread");
+      const { state, served } = await autoCall(stateDir, { action: "status" });
+      if (served) throw new Error(`this worktree is served by the auto session in ${served.root}; run pair reviewer --timeout there`);
+      if (state.timeoutMs === undefined) {
+        throw new Error("this auto session runs an older pair that can't change its review time limit; nothing was changed. Stop it and start it again, with pair start --timeout SECONDS if 1800 isn't enough");
+      }
+    }
+    return (await autoCall(stateDir, { action: "reviewer", ...change })).message;
+  }
   catch (error) {
     if (hasCode(error, "ENOENT")) throw new Error("auto mode is not running here; pair reviewer changes the reviewer of a running pair start session");
     if (hasCode(error, "ECONNREFUSED")) throw new Error(`auto owner is gone; stale socket ${autoSocketPath(stateDir)}`);
@@ -713,7 +730,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const run = randomUUID();
   const path = autoSocketPath(options.stateDir, true);
   const tty = terminalState();
-  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, authorName, reviewerName, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
+  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, authorName, reviewerName, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, timeoutMs: options.timeoutMs, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
   let guardian: ChildProcess | undefined;
   let stopping: Promise<void> | undefined;
   let guardianDone: Promise<void> = Promise.resolve();
@@ -976,7 +993,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const args = reviewer === "codex"
       ? ["--sandbox", "workspace-write", "--add-dir", target.channel, "exec", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, ...options.reviewerArgs, "--json", prompt]
       : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", bin].flatMap((each) => [`Bash(${each} wait *)`, `Bash(${each} send review *)`, `Bash(${each} history *)`])].join(","), "--", prompt];
-    sendGuardian({ type: "launch", job: { id, executable: paths[reviewer]!, args, cwd: target.root, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: entry.file }, interactive: false, timeoutMs: options.timeoutMs } satisfies Job });
+    sendGuardian({ type: "launch", job: { id, executable: paths[reviewer]!, args, cwd: target.root, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: entry.file }, interactive: false, timeoutMs: state.timeoutMs! } satisfies Job });
   };
   // A running child round whose worktree was removed or replaced is stopped, not left to its timeout.
   const watchTargets = () => {
@@ -996,6 +1013,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     };
     const model = value("model");
     const effort = value("effort");
+    const seconds = request.timeoutSeconds;
+    if (seconds !== undefined && (typeof seconds !== "number" || !(seconds > 0) || seconds > MAX_REVIEW_SECONDS)) {
+      throw new Error(`the review time limit must be a positive number of seconds, at most ${MAX_REVIEW_SECONDS}`);
+    }
+    if (seconds !== undefined && request.thread !== undefined) throw new Error("--timeout applies to every next round, a retry included; leave out --thread");
     const change = (from: ReviewerSettings): ReviewerSettings => {
       const next = { model: model === undefined ? from.model : model ?? undefined, effort: effort === undefined ? from.effort : effort ?? undefined };
       checkSettings(reviewer, next);
@@ -1005,13 +1027,23 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     if (request.thread === undefined) {
       if (scope) throw new Error(`this worktree is served by the auto session in ${options.root}; run pair reviewer there to change the settings for new threads`);
       const before = defaults;
-      defaults = change(defaults);
-      state.reviewerModel = defaults.model;
-      state.reviewerEffort = defaults.effort;
+      const replies: string[] = [];
+      if (model !== undefined || effort !== undefined) {
+        defaults = change(defaults);
+        state.reviewerModel = defaults.model;
+        state.reviewerEffort = defaults.effort;
+        log(`pair: reviewer for new threads: ${describeSettings(before)} -> ${describeSettings(defaults)}\n`);
+        replies.push(`reviewer for new threads: ${describeSettings(defaults)} (was ${describeSettings(before)}). A thread already under review keeps its settings; after one of its rounds fails, pair reviewer --thread current changes them.`);
+      }
+      if (seconds !== undefined) {
+        const was = state.timeoutMs! / 1000;
+        state.timeoutMs = seconds * 1000;
+        log(`pair: review time limit: ${was}s -> ${seconds}s\n`);
+        replies.push(`review time limit: ${seconds}s (was ${was}s), from the next round, a retry included; a running round keeps its limit.`);
+      }
       update();
-      log(`pair: reviewer for new threads: ${describeSettings(before)} -> ${describeSettings(defaults)}\n`);
       recordAuthor((problem) => log(`pair: ${problem}\n`)); // its restart command names the reviewer settings
-      return `reviewer for new threads: ${describeSettings(defaults)} (was ${describeSettings(before)}). A thread already under review keeps its settings; after one of its rounds fails, pair reviewer --thread current changes them.`;
+      return replies.join("\n");
     }
     const wanted = request.thread;
     if (typeof wanted !== "string") throw new Error("--thread must be current or a thread ID");
@@ -1059,8 +1091,12 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   let learned: AuthorRecord["learned"] = session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null;
   const recordAuthor = (report: (problem: string) => void) => {
     const selector = (id: string) => options.author === "claude" ? [...session.rest, "--resume", id] : ["resume", id, ...session.rest];
+    const restart = [...options.restartOptions]; // pair reviewer --timeout may have changed the limit
+    const timeout = restart.indexOf("--timeout");
+    if (timeout >= 0) restart[timeout + 1] = String(state.timeoutMs! / 1000);
+    else if (state.timeoutMs !== DEFAULT_REVIEW_SECONDS * 1000) restart.push("--timeout", String(state.timeoutMs! / 1000));
     const start = [
-      ...options.restartOptions,
+      ...restart,
       ...(defaults.model === undefined ? [] : ["--reviewer-model", defaults.model]),
       ...(defaults.effort === undefined ? [] : ["--reviewer-effort", defaults.effort]),
     ];
@@ -1192,8 +1228,9 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           const retry = overrides.length
             ? `pair wait retries it with the same ${overrides.join(" and ")}; to change that first, run pair reviewer --thread current with the new value in your own terminal${target.child ? `, in ${target.root}` : ""}`
             : "pair wait retries it";
+          const limit = error === "reviewer timed out" ? `; to give it more than ${state.timeoutMs! / 1000}s, first run pair reviewer --timeout SECONDS in your own terminal${target.child ? `, in ${options.root}` : ""}` : "";
           if (success) entry.resolve();
-          else entry.reject(new Error(`${reason}. ${retry[0].toUpperCase()}${retry.slice(1)}. Log: ${state.log}`)); // the author's send adds that the request remains
+          else entry.reject(new Error(`${reason}. ${retry[0].toUpperCase()}${retry.slice(1)}${limit}. Log: ${state.log}`)); // the author's send adds that the request remains
           dispatch();
         }
       }
@@ -1252,7 +1289,7 @@ export async function runGuardian(): Promise<void> {
   let stopping = false;
   let disconnected = false;
   let disconnecting = false;
-  const jobs = new Map<string, { stop(reason?: string): void }>();
+  const jobs = new Map<string, { stop(reason?: string): void; deadline?: number }>();
   let interactive: ChildProcess | undefined;
   const done = () => {
     if (!stopping || jobs.size) return;
@@ -1272,14 +1309,24 @@ export async function runGuardian(): Promise<void> {
     done();
   };
   let tick = performance.now();
-  const watchdog = setInterval(() => {
+  const check = () => {
     const now = performance.now();
     // The monotonic clock counts a system sleep (macOS). A late tick means this process was suspended
     // as well, so the owner gets a fresh deadline; only an owner hung while the guardian runs is stale.
-    if (now - tick > 3000) heartbeat = now;
+    // Review deadlines move by the time slept, so a round gets its whole limit awake.
+    const slept = now - tick > 3000 ? now - tick - 1000 : 0;
+    if (slept) heartbeat = now;
     tick = now;
     if (now - heartbeat > 5000) shutdown();
-  }, 1000);
+    for (const job of jobs.values()) {
+      if (job.deadline === undefined) continue;
+      job.deadline += slept;
+      if (now < job.deadline) continue;
+      job.deadline = undefined;
+      job.stop("reviewer timed out");
+    }
+  };
+  const watchdog = setInterval(check, 1000);
   process.on("disconnect", () => { if (!disconnecting) disconnected = true; shutdown(); });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, shutdown);
   process.on("SIGWINCH", () => { interactive?.kill("SIGWINCH"); });
@@ -1290,6 +1337,8 @@ export async function runGuardian(): Promise<void> {
     if (message.type === "claim" && typeof message.socket === "string") { claims.push(message.socket); return; }
     if (message.type === "stop") { jobs.get(message.id)?.stop("worktree removed or replaced"); return; }
     if (message.type !== "launch" || !config || stopping) return;
+    check(); // a launch handled on waking, before the late tick, must not get credit for the sleep before it
+    if (stopping) return;
     const job = message.job as Job;
     const child = spawn(job.executable, job.args, { cwd: job.cwd, env: job.env, detached: true, stdio: job.interactive ? "inherit" : ["ignore", "pipe", "pipe"] });
     if (job.interactive) interactive = child;
@@ -1302,7 +1351,6 @@ export async function runGuardian(): Promise<void> {
     let closed = false;
     let grace: NodeJS.Timeout | undefined;
     let hard: NodeJS.Timeout | undefined;
-    let timeout: NodeJS.Timeout | undefined;
     const signal = (name: NodeJS.Signals) => {
       if (!child.pid) return;
       try { process.kill(-child.pid, name); }
@@ -1318,7 +1366,6 @@ export async function runGuardian(): Promise<void> {
       finished = true;
       if (grace) clearTimeout(grace);
       if (hard) clearTimeout(hard);
-      if (timeout) clearTimeout(timeout);
       child.stdout?.destroy();
       child.stderr?.destroy();
       jobs.delete(job.id);
@@ -1338,7 +1385,8 @@ export async function runGuardian(): Promise<void> {
         if (exited && closed) finish();
       }, config!.graceMs);
     };
-    jobs.set(job.id, { stop });
+    // ponytail: checked by the watchdog, so a limit lands within a second of its time
+    jobs.set(job.id, { stop, ...(job.timeoutMs ? { deadline: performance.now() + job.timeoutMs } : {}) });
     child.once("spawn", () => send({ type: "spawned", id: job.id, pid: child.pid }));
     child.once("error", (error) => { reason = error.message; exited = true; result = { code: null }; });
     child.once("exit", (code, signal) => {
@@ -1354,6 +1402,5 @@ export async function runGuardian(): Promise<void> {
     for (const stream of ["stdout", "stderr"] as const) {
       child[stream]?.on("data", (chunk: Buffer) => send({ type: "output", id: job.id, stream, text: chunk.toString("utf8") }));
     }
-    if (job.timeoutMs) timeout = setTimeout(() => stop("reviewer timed out"), job.timeoutMs);
   });
 }

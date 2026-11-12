@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, DEFAULT_REVIEW_SECONDS, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, MAX_REVIEW_SECONDS, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 import { codexControlSocket, loadedThreads } from "./daemon.js";
 import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
@@ -2311,12 +2311,14 @@ advanced options:
   --serve-worktrees            also review subagents in other worktrees of this repository
   --reviewers N                review rounds at once with --serve-worktrees (default 1, max 8)
   --claude PATH, --codex PATH  absolute path of each CLI (default: the first on PATH)
-  --timeout SECONDS            limit for each review round (default 900, max 86400)
+  --timeout SECONDS            limit for each review round, not counting sleep (default 1800,
+                               max 86400); pair reviewer --timeout changes it later
   --grace SECONDS              wait between terminating and killing a process (default 2, max 30)
 
 README, Auto mode, has the details. From another terminal in the session's worktree, pair status and
 pair ps -v show it, and pair stop stops it.`,
   reviewer: `usage: pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
+       pair reviewer --timeout SECONDS
 
 Change the reviewer settings of this worktree's running auto session without restarting it. Run it
 in your own terminal; the author and its reviewer can't. A thread keeps the settings it had at its
@@ -2329,8 +2331,11 @@ options:
                                example over a mistyped model. Its next round starts a new reviewer
                                conversation, which reads the thread so far; the author's pair wait
                                retries it. Refused while a round runs.
+  --timeout SECONDS            each review round's limit, not counting sleep (max 86400). It
+                               applies from the next round, a failed thread's retry included.
 
   pair reviewer --reviewer-model gpt-6.1-sol
+  pair reviewer --timeout 3600
   pair reviewer --thread current --reviewer-model gpt-6.1-sol --reviewer-effort default`,
   stop: `usage: pair stop
 
@@ -2609,9 +2614,9 @@ async function main(argv: string[]): Promise<number> {
         ];
         const who = (name: string, cli: Backend) => name === cli ? cli : `${name} (${cli})`;
         try {
-          const timeout = positiveNumber(values.timeout ?? "900", "--timeout");
+          const timeout = positiveNumber(values.timeout ?? String(DEFAULT_REVIEW_SECONDS), "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
-          if (timeout > 86400 || grace > 30) throw new PairError("--timeout must be at most 86400 seconds and --grace at most 30 seconds");
+          if (timeout > MAX_REVIEW_SECONDS || grace > 30) throw new PairError(`--timeout must be at most ${MAX_REVIEW_SECONDS} seconds and --grace at most 30 seconds`);
           const serveWorktrees = Boolean(values["serve-worktrees"]);
           if (values.reviewers !== undefined && !serveWorktrees) {
             throw new PairError("--reviewers needs --serve-worktrees: without it, only this worktree is reviewed, one round at a time");
@@ -2699,9 +2704,11 @@ async function main(argv: string[]): Promise<number> {
         }
         if (rest.length) throw new PairError("pair reviewer takes only options; see pair help reviewer");
         const setting = (value: string | undefined): string | null | undefined => value === "default" ? null : value;
-        const change = { model: setting(values["reviewer-model"]), effort: setting(values["reviewer-effort"]), thread: values.thread };
-        if (change.model === undefined && change.effort === undefined) {
-          throw new PairError("pass --reviewer-model or --reviewer-effort (a value, or default); pair status shows the current settings");
+        const timeoutSeconds = values.timeout === undefined ? undefined : positiveNumber(values.timeout, "--timeout");
+        if (timeoutSeconds !== undefined && timeoutSeconds > MAX_REVIEW_SECONDS) throw new PairError(`--timeout must be at most ${MAX_REVIEW_SECONDS} seconds`);
+        const change = { model: setting(values["reviewer-model"]), effort: setting(values["reviewer-effort"]), thread: values.thread, timeoutSeconds };
+        if (change.model === undefined && change.effort === undefined && timeoutSeconds === undefined) {
+          throw new PairError("pass --reviewer-model or --reviewer-effort (a value, or default), or --timeout; pair status shows the current settings");
         }
         try { console.log(await setReviewer(stateDir(channel), change)); }
         catch (error) { throw new PairError(errorMessage(error)); }

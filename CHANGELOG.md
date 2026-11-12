@@ -36,6 +36,9 @@ history and registrations work as they are.
   `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers
   every lane, replies owed first. `pair register --as NAME` wakes a named Codex participant.
 - **Lanes** are `<author>-to-<reviewer>/`; `status`, `history`, `reset` and `clean` cover them all.
+- **Review time limit.** The default limit per review round is now 30 minutes (was 15).
+  `pair reviewer --timeout SECONDS` changes it in a running session from the next round, a failed
+  thread's retry included, and a timed-out round's error names it. `pair status` shows the limit.
 
 Fixes found while testing with the real CLIs:
 
@@ -54,6 +57,8 @@ Fixes found while testing with the real CLIs:
 - Auto mode no longer ends when a Mac wakes from sleep. Node's monotonic clock counts the sleep, so
   the guardian took the owner for hung and stopped the session, author included. It now gives the
   owner a fresh deadline when its own watchdog woke late. Earlier versions were affected too.
+- A review round's `--timeout` counts only time awake. A Mac that slept through a review used to
+  time it out on waking, and the author had to rerun it with `pair wait`.
 - A corrupt registration no longer stops others from registering, and when registrations block
   `pair start`, it names each one with `pair unregister --as NAME`.
 
