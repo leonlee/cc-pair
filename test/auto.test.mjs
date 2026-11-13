@@ -448,11 +448,12 @@ test("pair reviewer --timeout changes nothing unless the session's own owner sup
     rmSync(socketDir, { recursive: true, force: true });
   });
   await assert.rejects(setReviewer(stateDir, { model: "new", timeoutSeconds: 600 }), /runs an older pair that can't change its review time limit; nothing was changed/);
-  assert.deepEqual(actions, ["status"], "the model isn't changed either");
+  await assert.rejects(setReviewer(stateDir, { model: "new", maxLaunches: 3 }), /runs an older pair without a review launch limit; nothing was changed/);
+  assert.deepEqual(actions, ["status", "status"], "the model isn't changed either");
   await assert.rejects(setReviewer(stateDir, { thread: "current", model: "new", timeoutSeconds: 600 }), /leave out --thread/);
   status = { served: { root: "/the/root", pid: 1 } }; // a served worktree's owner may be older too
   await assert.rejects(setReviewer(stateDir, { model: "new", timeoutSeconds: 600 }), /served by the auto session in \/the\/root; run pair reviewer --timeout there/);
-  assert.deepEqual(actions, ["status", "status"], "neither reaches the reviewer action");
+  assert.deepEqual(actions, ["status", "status", "status"], "neither reaches the reviewer action");
 });
 
 test("pair wait reruns a timed-out review", { timeout: 15_000 }, async (t) => {
@@ -877,15 +878,22 @@ test("auto start rejects nested launches from agent shells", () => {
   assert.match(result.stderr, /outside Claude or Codex/);
 });
 
-test("a reviewer spawn failure preserves the pending request", { timeout: 15_000 }, async (t) => {
-  const f = fixture(t, { scenario: "hold" });
+test("a reviewer spawn failure preserves the pending request and doesn't use up a launch", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "hold", pairArgs: ["--max-reviews", "1"] });
   await until(() => existsSync(f.file("author.pid")), "author started");
   // Supply a body without relying on the interactive author's stdin.
   writeFileSync(f.file("request.md"), "Review a.ts");
   const sent = (await f.command(["send", "request", "--as", "claude", f.file("request.md")])).stdout.trim().replace("sent: ", "");
+  const fake = readFileSync(f.fake);
   rmSync(f.fake);
   await assert.rejects(f.call({ action: "review", run: f.state().run, file: sent }, 10_000), /ENOENT/);
-  assert.match((await f.command(["status"])).stdout, /awaiting-review/);
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /awaiting-review/);
+  assert.match(status, /reviewer launches this run: 0 of 1/, "no reviewer process started, so none is counted");
+  writeFileSync(f.fake, fake);
+  chmodSync(f.fake, 0o700);
+  await f.call({ action: "review", run: f.state().run, file: sent }, 10_000);
+  assert.match((await f.command(["status"])).stdout, /reviewer launches this run: 1 of 1/, "the first real launch still fits");
   await f.command(["stop"]);
 });
 
@@ -1961,5 +1969,31 @@ test("a closed terminal doesn't let the bell stop the session or lose the verdic
   await pause(500);
   assert.equal(f.launcher.exitCode, null, "the owner keeps running");
   assert.ok(alive(Number(f.read("author.pid"))), "and so does the author");
+  await f.command(["stop"]);
+});
+
+test("--max-reviews stops launches past the limit, retries included, until pair reviewer raises it", { timeout: 25_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "failfirst", pairArgs: ["--max-reviews", "1"] });
+  await until(() => existsSync(f.file("first.error")), "first round failed");
+  assert.match((await f.command(["status"])).stdout, /reviewer launches this run: 1 of 1/);
+  const refused = await asAuthor(f, ["wait", "--as", "claude", "--timeout", "1"]);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.output, /this session's limit of 1 reviewer launches is used up, and nothing was launched\. A retry is unlikely to help[^]*Don't retry with pair wait; ask the user, who can raise it with pair reviewer --max-reviews N/);
+  assert.equal(JSON.parse(f.read("calls.json")).length, 1, "a retry past the limit launches nothing");
+
+  await assert.rejects(f.command(["reviewer", "--max-reviews", "1.5"]), /--max-reviews must be a whole number from 0 \(no limit\) to 10000/);
+  await assert.rejects(f.command(["reviewer", "--thread", "current", "--max-reviews", "2"]), /--max-reviews applies to the whole session; leave out --thread/);
+  await assert.rejects(f.command(["status", "--max-reviews", "2"]), /--max-reviews is only supported by pair start and pair reviewer/);
+  assert.match((await f.command(["reviewer", "--max-reviews", "2"])).stdout, /review launch limit: 2 \(was 1\), 1 used this run/);
+  const retried = await asAuthor(f, ["wait", "--as", "claude", "--timeout", "1"]);
+  assert.equal(retried.code, 0, retried.output);
+  assert.match(retried.output, /verdict approve/);
+  assert.equal(JSON.parse(f.read("calls.json")).length, 2);
+  assert.match((await f.command(["status"])).stdout, /reviewer launches this run: 2 of 2/);
+  const { start } = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8"));
+  assert.deepEqual(start.slice(start.indexOf("--max-reviews"), start.indexOf("--max-reviews") + 2), ["--max-reviews", "2"], "pair stop's restart command keeps the new limit");
+  assert.equal(start.filter((arg) => arg === "--max-reviews").length, 1);
+  assert.match((await f.command(["reviewer", "--max-reviews", "0"])).stdout, /review launch limit: no limit \(was 2\)/);
+  assert.ok(!JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8")).start.includes("--max-reviews"), "no limit, no option");
   await f.command(["stop"]);
 });

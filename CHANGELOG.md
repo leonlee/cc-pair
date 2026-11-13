@@ -44,6 +44,10 @@ history and registrations work as they are.
   state to scripts. `PAIR_BELL=1` rings the terminal bell when a round finishes.
 - **Review requests carry their validation**: each command and its result in a line, and what wasn't
   checked; reviewers say which checks they ran themselves.
+- **Review launch limit.** `pair start --max-reviews N` caps the reviewer launches of a run,
+  retries and served worktrees included; past it, pair launches nothing, keeps the request and
+  tells the author to ask you. `pair reviewer --max-reviews N` changes it live, and `pair status`
+  shows how many are used.
 - **Review time limit.** The default limit per review round is now 30 minutes (was 15).
   `pair reviewer --timeout SECONDS` changes it in a running session from the next round, a failed
   thread's retry included, and a timed-out round's error names it. `pair status` shows the limit.
