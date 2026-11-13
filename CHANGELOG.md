@@ -56,7 +56,10 @@ Fixes found while testing with the real CLIs:
 
 - Security: a Claude reviewer loaded the worktree's own `.claude` settings, so a branch's hooks ran
   with your permissions when a review started. It now loads only your user settings and no MCP
-  servers.
+  servers, and reads the worktree's `CLAUDE.md` as instructions. A Codex reviewer likewise loaded the
+  worktree's `.codex/config.toml`, MCP servers included; each round now starts in a fresh empty
+  directory in pair's state, with the worktree added as writable, and reads its `AGENTS.md`. pair
+  refuses a round when a `.codex` other than your own Codex home is on that directory's path.
 - Security: pair wrote `AGENTS.md` and `.claude/skills/pair/SKILL.md` through symlinks and hard
   links, so a cloned branch or an agent could point `pair init`, a refresh or `pair uninit` at any
   file you can write. It now refuses paths that lead outside the worktree, into `.git` or to a

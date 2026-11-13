@@ -255,6 +255,9 @@ function gitPath(flag: string, cwd?: string): string | undefined {
 }
 
 function worktreeRoot(): string {
+  // A managed reviewer's owner names its worktree: a Codex reviewer starts outside it, so the worktree's .codex config isn't loaded.
+  const managed = process.env.PAIR_AUTO_ROLE === "reviewer" ? process.env.PAIR_AUTO_ROOT : undefined;
+  if (managed && isAbsolute(managed)) return realpathSync(managed);
   return realpathSync(gitPath("--show-toplevel") ?? process.cwd());
 }
 

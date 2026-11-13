@@ -76,11 +76,12 @@ write(reviewer ? 'worker.pid' : 'author.pid', process.pid);
 if (reviewer) {
   let calls = [];
   try { calls = JSON.parse(readFileSync(join(root, 'calls.json'), 'utf8')); } catch {}
-  calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT, cwd:process.cwd()});
+  // cwd: the worktree the owner names; startedIn: where the reviewer CLI was started (outside it for Codex).
+  calls.push({args:process.argv.slice(2), agent:process.env.PAIR_AGENT, cwd:process.env.PAIR_AUTO_ROOT ?? process.cwd(), startedIn:process.cwd()});
   write('calls.json', JSON.stringify(calls));
   // Reviewers running at once would race on calls.json; this log only appends.
-  appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({args:process.argv.slice(2), cwd:process.cwd(), env:{owner:process.env.PAIR_AUTO_OWNER ?? null, message:process.env.PAIR_AUTO_MESSAGE}}) + '\\n');
-  const inC1 = process.cwd().endsWith('-c1');
+  appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({args:process.argv.slice(2), cwd:process.env.PAIR_AUTO_ROOT ?? process.cwd(), startedIn:process.cwd(), env:{owner:process.env.PAIR_AUTO_OWNER ?? null, message:process.env.PAIR_AUTO_MESSAGE}}) + '\\n');
+  const inC1 = (process.env.PAIR_AUTO_ROOT ?? process.cwd()).endsWith('-c1');
   const count = calls.length;
   const session = '11111111-1111-4111-8111-' + String(count).padStart(12, '0');
   // Corrupt the lane before announcing the session, so recording the session must not read the lane.
@@ -259,6 +260,10 @@ for (const author of ["claude", "codex"]) {
       assert.ok(!args.includes("--model"), "omitted model must inherit CLI defaults");
       assert.ok(!args.includes("--effort") && !args.includes("--config"), "omitted effort must inherit CLI defaults");
     }
+    if (author === "claude") {
+      assert.equal(new Set(calls.map(({ startedIn }) => startedIn)).size, calls.length, "each Codex round starts in a fresh directory");
+      for (const { startedIn } of calls) assert.ok(!existsSync(startedIn), `${startedIn} is removed after its round`);
+    }
     if (author === "codex") {
       const tools = calls[0].args[calls[0].args.indexOf("--allowedTools") + 1].split(",");
       assert.ok(tools.some((tool) => tool.endsWith(" history *)")), "a Claude reviewer can read a cited spec thread");
@@ -266,6 +271,7 @@ for (const author of ["claude", "codex"]) {
       for (const { args } of calls) {
         assert.equal(args[args.indexOf("--setting-sources") + 1], "user", "the worktree's own .claude settings can't run hooks in the reviewer");
         assert.ok(args.includes("--strict-mcp-config"), "nor start its MCP servers");
+        assert.match(args.at(-1), /Read the worktree's CLAUDE\.md first, if it has one/, "the project's conventions still reach it");
       }
     }
     const resume = author === "claude" ? "resume" : "--resume";
@@ -695,7 +701,10 @@ for (const remoteBranch of [false, true]) test(`auto start --worktree runs the w
   }
   assert.match(f.output(), /this session runs in worktree .*-feat-x; run pair status and pair stop there/);
   assert.equal(realpathSync(f.read("author.cwd")), worktree);
-  for (const call of JSON.parse(f.read("calls.json"))) assert.equal(realpathSync(call.cwd), worktree, "the reviewer runs in the author's worktree");
+  for (const call of JSON.parse(f.read("calls.json"))) {
+    assert.equal(realpathSync(call.cwd), worktree, "the reviewer reviews the author's worktree");
+    assert.ok(!call.startedIn.startsWith(worktree), "a Codex reviewer starts outside it, so the worktree's .codex config isn't loaded");
+  }
   assert.match(spawnSync("git", ["branch", "--show-current"], { cwd: worktree, encoding: "utf8" }).stdout, /^feat\/x$/m);
   assert.ok(existsSync(join(worktree, "AGENTS.md")), "pair init ran in the new worktree");
   assert.match(f.output(), /pair: wrote: .*AGENTS\.md/);
@@ -1536,8 +1545,11 @@ test("--serve-worktrees: a subagent's loop runs through the root's owner, writes
   assert.equal(sent.code, 0, sent.out);
   assert.match(sent.out, /== pair: review from codex · claude-to-codex · round 1 · verdict approve ==/);
   const [call] = reviewerCalls(f);
-  assert.equal(realpathSync(call.cwd), c1, "the reviewer runs in the subagent's worktree");
-  assert.equal(call.args[call.args.indexOf("--add-dir") + 1], join(f.root, "home", channelName(c1)), "with that worktree's channel");
+  assert.equal(realpathSync(call.cwd), c1, "the reviewer reviews the subagent's worktree");
+  const writable = call.args.flatMap((arg, index) => arg === "--add-dir" ? [call.args[index + 1]] : []);
+  assert.deepEqual(writable.map((dir) => realpathSync(dir)), [c1, realpathSync(join(f.root, "home", channelName(c1)))], "it may write that worktree and its channel");
+  assert.ok(call.args.includes("--skip-git-repo-check") && !call.startedIn.startsWith(c1), "and starts outside it, so the worktree's .codex config isn't loaded");
+  assert.match(call.args.at(-1), new RegExp(`The worktree under review is '?${c1.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'?, outside your starting directory[^]*read its AGENTS\\.md first`));
   assert.equal(call.env.owner, null, "a reviewer's commands act only on its own worktree");
   assert.match(call.args.at(-1), /## Review for your partner[\s\S]*Managed round: the pair CLI is/, "the rules come with the prompt");
   assert.equal(readFileSync(join(c1, "AGENTS.md"), "utf8"), stale, "no refresh in a served worktree");
@@ -1936,6 +1948,8 @@ test("status shows a running round, then its verdict, and --json carries the sam
   await until(() => existsSync(f.file("first.out")), "verdict delivered");
   const text = (await f.command(["status"])).stdout;
   assert.match(text, /last round: thread \S+ · verdict approve · finished /);
+  const [{ startedIn }] = JSON.parse(f.read("calls.json"));
+  assert.ok(!existsSync(startedIn), "a Codex round's start directory is removed when the round ends, while the session runs on");
   assert.doesNotMatch(text, /round running/);
   assert.ok(!f.output().includes("\x07"), "no bell unless PAIR_BELL is set");
   const json = JSON.parse((await f.command(["status", "--json"])).stdout);
@@ -1996,4 +2010,22 @@ test("--max-reviews stops launches past the limit, retries included, until pair 
   assert.match((await f.command(["reviewer", "--max-reviews", "0"])).stdout, /review launch limit: no limit \(was 2\)/);
   assert.ok(!JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8")).start.includes("--max-reviews"), "no limit, no option");
   await f.command(["stop"]);
+});
+
+test("a Codex reviewer isn't launched where a .codex on its start directory's path would configure it", { timeout: 20_000 }, async (t) => {
+  // XDG_STATE_HOME is inside the repository here, as a user may set it, so the repository's own .codex is on the path.
+  const plant = ({ root }) => { mkdirSync(join(root, ".codex")); writeFileSync(join(root, ".codex", "config.toml"), "# a branch's config\n"); };
+  const f = fixture(t, { scenario: "review", setup: plant });
+  await until(() => existsSync(f.file("first.error")), "failed round delivered");
+  assert.match(f.read("first.error"), /pair can't start the Codex reviewer: .*\.codex is on its start directory's path[^]*A retry is unlikely to help[^]*XDG_STATE_HOME outside any directory that holds a \.codex/);
+  assert.ok(!existsSync(f.file("calls.json")), "no reviewer was launched");
+  await f.command(["stop"]);
+
+  // The same for a served worktree's review: the start directory sits in the root's state, under the root's .codex.
+  const { f: g, owner } = await served(t, { pairArgs: ["--serve-worktrees"], setup: plant });
+  const c1 = addChild(g, "c1");
+  const sent = await asSubagent(g, owner, c1, ["send", "request", "-"], "## Summary\nchild work");
+  assert.notEqual(sent.code, 0);
+  assert.match(sent.out, /pair can't start the Codex reviewer: .*\.codex is on its start directory's path/);
+  assert.equal(reviewerCalls(g).length, 0, "no reviewer was launched for the child either");
 });

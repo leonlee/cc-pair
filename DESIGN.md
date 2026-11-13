@@ -308,6 +308,19 @@ when that round was given the same settings. Effort names are checked per backen
 before startup and on every change; each CLI decides whether it supports the combination.
 
 `pair reviewer` changes the settings on the live owner, over the control socket, without a restart.
+A reviewer never loads the reviewed worktree's own agent configuration, which a branch or an agent
+can write. Claude gets `--setting-sources user --strict-mcp-config` and is told to read `CLAUDE.md`.
+`codex exec` loads `.codex/config.toml` from its start directory and that directory's ancestors (MCP
+servers, `notify`, providers, writable roots) unless the user's own config marks the path untrusted,
+and a command-line `-c` can't mark it. So each Codex round starts in a fresh, empty `reviewer-*`
+directory in the run directory, which agents can't write by default (unlike `TMPDIR`), removed when
+the round ends, with `--add-dir` for the worktree and the channel and `--skip-git-repo-check`; its
+prompt names the worktree and its `AGENTS.md`. Before the launch, pair refuses the round if any
+directory on that start directory's path holds a `.codex`, other than the user's own Codex home: the
+state directory may be inside a repository, the session's or a served worktree's. This checks before
+use; an agent racing it is the documented limit.
+`PAIR_AUTO_ROOT` tells the reviewer's pair commands which worktree they act on.
+
 The time limit (`--timeout`) isn't part of a thread's snapshot: each launch reads the current value.
 The launch limit (`--max-reviews`) is the owner's: it counts every reviewer process it launches this
 run, retries and served worktrees included, and checks the count just before a launch, so a review
