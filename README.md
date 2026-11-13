@@ -730,7 +730,13 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
   configured permissions it may only read, search, and run `pair wait`, `pair send review` and
   `pair history` (to read a spec review a request cites). It loads only your user settings
   (`--setting-sources user`) and no MCP servers (`--strict-mcp-config`), so a branch's
-  `.claude/settings.json` can't run hooks or add permissions when a review starts. Pair itself refuses every reviewer command
+  `.claude/settings.json` can't run hooks or add permissions when a review starts; it's told to read
+  the worktree's `CLAUDE.md` for the project's conventions. Codex loads a worktree's
+  `.codex/config.toml`, MCP servers included, unless your own config marks that path untrusted, so
+  pair starts each Codex round in a fresh, empty directory in its state directory, with the
+  worktree and channel added as writable, and tells it where the worktree is and to read its
+  `AGENTS.md`. If a `.codex` sits anywhere on that directory's path (say, `XDG_STATE_HOME` inside
+  a repository that has one), pair refuses the round and says so. Pair itself refuses every reviewer command
   except `wait`, `send`, `status` and `history`, and a reviewer never refreshes instruction files.
   These guard against mistakes and casual prompt injection, not a determined agent: the role comes
   from an environment variable, and the Codex sandbox can write the channel.
