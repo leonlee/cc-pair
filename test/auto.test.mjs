@@ -55,11 +55,12 @@ function fixture(t, { author = "claude", scenario = "roundtrip", worker = "norma
   writeFileSync(fake, `#!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const exec = promisify(execFile);
 const root = process.env.TEST_ROOT;
-const write = (name, value) => writeFileSync(join(root, name), String(value));
+// Whole or absent: tests read a file as soon as it exists.
+const write = (name, value) => { const path = join(root, name), tmp = path + '.' + process.pid + '.tmp'; writeFileSync(tmp, String(value)); renameSync(tmp, path); };
 const call = (args, input = '') => new Promise((resolve, reject) => {
   const child = execFile('pair', args, {env: process.env}, (error, stdout, stderr) => {
     if (error) { error.output = stdout + stderr; reject(error); } else resolve(stdout + stderr);
@@ -131,15 +132,14 @@ if (reviewer) {
     if (process.env.TEST_WORKER === 'leaky') process.exit(0);
   }
 } else {
-  // Before author.args.json, which tests wait for.
   const promptFlag = process.argv.indexOf('--append-system-prompt-file');
   const promptFile = promptFlag >= 0 ? process.argv[promptFlag + 1] : process.env.PAIR_AUTO_PROMPT_FILE;
   if (promptFile) write('author.prompt', readFileSync(promptFile, 'utf8'));
-  write('author.args.json', JSON.stringify(process.argv.slice(2)));
   write('author.env.json', JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('PAIR_')))));
   if (process.env.TEST_AUTHOR_SESSION) process.env[cli === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
   write('author.cwd', process.cwd());
   write('author.bin', process.env.PAIR_BIN);
+  write('author.args.json', JSON.stringify(process.argv.slice(2))); // last: tests wait for it, then read the others
   if (process.env.TEST_SCENARIO === 'hold') setInterval(()=>{},1000);
   else {
     const stateBase = join(process.env.XDG_STATE_HOME, 'pair');
@@ -969,7 +969,7 @@ function asAuthor(f, args, input) {
 
 test("a Codex author's command line points at its instructions and names no pair command", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { author: "codex", scenario: "hold" });
-  await until(() => existsSync(f.file("author.prompt")), "author started");
+  await until(() => existsSync(f.file("author.args.json")), "author started");
   const args = JSON.parse(f.read("author.args.json"));
   assert.ok(!args.some((arg) => /pair (wait|send)/.test(arg)), "no pair command on the author's command line, where pkill -f would match it");
   const file = JSON.parse(f.read("author.env.json")).PAIR_AUTO_PROMPT_FILE;

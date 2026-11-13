@@ -51,6 +51,8 @@ test("guided start: every choice, answered by name or number, becomes its option
   assert.deepEqual(await guideStart(s.prompter, facts({ recorded }), none),
     ["codex", "codex", "--worktree", "feat", "--resume", "--reviewer-model", "gpt-x", "--reviewer-effort", "high"]);
   assert.match(s.log[3], /Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[Y\/n\]/);
+  const enter = scripted(["codex", "2", "feat", "", "", ""]);
+  assert.deepEqual(await guideStart(enter.prompter, facts({ recorded }), none), ["codex", "codex", "--worktree", "feat", "--resume"], "Enter resumes the worktree's conversation too");
 });
 
 test("guided start: a recorded conversation is offered first, and resuming it names the author's CLI and checkout", async () => {
@@ -88,6 +90,8 @@ test("guided start: the reviewer's CLI offers its models, any other is typed, an
   const unknown = scripted(["1", "", "", "gpt-z", "n", "gpt-z", "y", ""]);
   assert.deepEqual(await guideStart(unknown.prompter, facts({ models }), none), ["claude", "--reviewer-model", "gpt-z"]);
   assert.equal(unknown.log.filter((line) => line === "? gpt-z isn't one of the models codex lists for your account; use it anyway? [y/N] ").length, 2);
+  const declined = scripted(["1", "", "", "gpt-z", "", "", ""]);
+  assert.deepEqual(await guideStart(declined.prompter, facts({ models }), none), ["claude"], "Enter doesn't use an unlisted model");
   assert.ok(unknown.log.at(-1).includes(`${EFFORTS.codex.length + 1}) ${EFFORTS.codex.at(-1)}`), "a typed model: every effort");
   assert.equal(await guideStart(scripted(["1", "", "", "gpt-z"]).prompter, facts({ models }), none), undefined, "cancelled at the question");
   // A model without efforts, or the default: every effort pair accepts.
