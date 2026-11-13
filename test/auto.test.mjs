@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, setReviewer, withRecordedSession } from "../dist/auto.js";
+import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, retryAdvice, setReviewer, withRecordedSession } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -114,6 +114,17 @@ if (reviewer) {
     // A pipe write can still be pending at process.exit.
     await new Promise((resolve) => process.stdout.write(line.slice(20) + '\\n' + JSON.stringify({type:'error', message:42}) + '\\n', resolve));
     if (process.env.TEST_WORKER === 'model-error') process.exit(1);
+  }
+  if (process.env.TEST_WORKER === 'recovered-login' || process.env.TEST_WORKER === 'login-hang') {
+    const events = [{type:'error', message:'Invalid API key · Please run /login'}, ...(process.env.TEST_WORKER === 'recovered-login' ? [{type:'turn.completed'}] : [])];
+    await new Promise((resolve) => process.stdout.write(events.map((event) => JSON.stringify(event)).join('\\n') + '\\n', resolve));
+    if (process.env.TEST_WORKER === 'recovered-login') process.exit(1);
+    setInterval(()=>{},1000);
+    await new Promise(() => {});
+  }
+  if (process.env.TEST_WORKER === 'refused') {
+    await new Promise((resolve) => process.stdout.write(JSON.stringify({type:'turn.failed', error:{message:'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.'}}) + '\\n', resolve));
+    process.exit(1);
   }
   const model = process.argv.indexOf('--model');
   if ((process.env.TEST_WORKER === 'bad-model' || (process.env.TEST_WORKER === 'fail-c1' && inC1)) && model >= 0 && process.argv[model + 1] === 'BAD') {
@@ -1879,4 +1890,76 @@ fs.fstatSync = (fd, ...rest) => {
 require("node:module").syncBuiltinESMExports();
 `);
   assert.match(read(["--require", hook]), /isn't a gitdir file: it is larger than 4096 bytes/);
+});
+
+test("retry advice recognizes only failures the reviewer CLIs were seen to report", () => {
+  const advice = (error, diagnostic) => retryAdvice(error, diagnostic).kind;
+  // As Codex printed it for a security review, twice in a row.
+  assert.equal(advice("reviewer exited 1", "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request."), "attention");
+  assert.equal(advice("reviewer exited 1", "Invalid API key · Please run /login"), "attention");
+  assert.equal(advice("reviewer exited 1", "You've hit your usage limit. Upgrade to Pro or try again later."), "attention");
+  assert.equal(advice("reviewer exited 1", "Rate limit reached for requests"), "retry");
+  assert.equal(advice("reviewer exited 1", "API Error: 529 Overloaded"), "retry");
+  assert.equal(advice("reviewer timed out", undefined), "retry");
+  assert.equal(advice("reviewer timed out", "Invalid API key · Please run /login"), "retry", "the timeout explains the failure, not an earlier message");
+  assert.equal(advice("reviewer exited 1", "MCP server authentication failed"), "unknown", "only the CLIs' own sign-in messages");
+  assert.equal(advice("reviewer exited 1", "Rate limit reached; check your usage limit"), "retry", "when unsure, keep the retry");
+  for (const unknown of ["unknown model BAD", "No conversation found with session ID: x", undefined]) {
+    assert.equal(advice("reviewer exited 1", unknown), "unknown", String(unknown));
+  }
+});
+
+test("a refused round tells the author not to retry, and status shows the last round", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "refused", extraEnv: { PAIR_BELL: "1" } });
+  await until(() => existsSync(f.file("first.error")), "failed round delivered");
+  const error = f.read("first.error");
+  assert.match(error, /flagged for possible cybersecurity risk[^]*\. A retry is unlikely to help: the reviewer's provider refused this content, and the same request is unlikely to pass\. Don't retry with pair wait; ask the user/);
+  assert.doesNotMatch(error, /Pair wait retries it/);
+  assert.match((await f.command(["status"])).stdout, /last round: thread \S+ · failed; a retry is unlikely to help · finished \d\d:\d\d:\d\d, took \d+s/);
+  assert.ok(f.output().includes("\x07"), "PAIR_BELL rings when a round finishes");
+  await f.command(["stop"]);
+});
+
+test("status shows a running round, then its verdict, and --json carries the same state", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "gated-release" });
+  await until(() => existsSync(f.file("worker.pid")), "round running");
+  assert.match((await f.command(["status"])).stdout, /round running: thread \S+ · launched \d\d:\d\d:\d\d, \d+s ago/);
+  writeFileSync(f.file("release"), "");
+  await until(() => existsSync(f.file("first.out")), "verdict delivered");
+  const text = (await f.command(["status"])).stdout;
+  assert.match(text, /last round: thread \S+ · verdict approve · finished /);
+  assert.doesNotMatch(text, /round running/);
+  assert.ok(!f.output().includes("\x07"), "no bell unless PAIR_BELL is set");
+  const json = JSON.parse((await f.command(["status", "--json"])).stdout);
+  assert.equal(json.auto.mode, "running");
+  assert.equal(json.auto.lastRound.verdict, "approve");
+  assert.ok(json.auto.lastRound.finishedAt >= json.auto.lastRound.launchedAt);
+  assert.equal(json.lanes["claude-to-codex"], "idle");
+  assert.equal(json.instructions.skill, "current");
+  await assert.rejects(f.command(["history", "--json"]), /--json is only supported by pair status/);
+  await f.command(["stop"]);
+});
+
+test("an error the reviewer recovered from, or one before a timeout, doesn't stop the retry", { timeout: 20_000 }, async (t) => {
+  for (const [worker, timeout, expected] of [["recovered-login", 5, /Pair wait retries it\./], ["login-hang", 1, /reviewer timed out[^]*Pair wait retries it; to give it more than 1s/]]) {
+    const f = fixture(t, { scenario: "review", worker, timeout });
+    await until(() => existsSync(f.file("first.error")), `${worker}: failed round delivered`);
+    const error = f.read("first.error");
+    assert.match(error, expected, worker);
+    assert.doesNotMatch(error, /unlikely to help/, worker);
+    await f.command(["stop"]);
+  }
+});
+
+test("a closed terminal doesn't let the bell stop the session or lose the verdict", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { scenario: "review", worker: "gated-release", extraEnv: { PAIR_BELL: "1" } });
+  await until(() => existsSync(f.file("worker.pid")), "round running");
+  f.launcher.stderr.destroy(); // the bell's write now fails with EPIPE
+  writeFileSync(f.file("release"), "");
+  await until(() => existsSync(f.file("first.out")), "verdict delivered");
+  assert.match(f.read("first.out"), /verdict approve/);
+  await pause(500);
+  assert.equal(f.launcher.exitCode, null, "the owner keeps running");
+  assert.ok(alive(Number(f.read("author.pid"))), "and so does the author");
+  await f.command(["stop"]);
 });

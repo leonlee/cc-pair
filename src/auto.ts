@@ -50,6 +50,9 @@ interface RecordState {
   thread?: { id: string; ran?: ReviewerSettings } & ReviewerSettings;
   /** What the latest round's reviewer ran with, and the settings it was given. */
   lastRan?: { requested: ReviewerSettings; ran: ReviewerSettings };
+  /** This worktree's running round and its last finished one (epoch milliseconds; an older owner has neither). */
+  round?: { thread: string; queuedAt: number; launchedAt: number };
+  lastRound?: { thread: string; verdict?: string; failed?: RetryAdvice["kind"]; queuedAt: number; launchedAt?: number; finishedAt: number };
   /** With --serve-worktrees: the capacity, the worktrees served, and the reviews running, queued or failed. */
   served?: ServedState;
 }
@@ -64,6 +67,10 @@ interface Target { root: string; channel: string; stateDir: string; child?: { gi
 interface Entry {
   target: Target; file: string; thread: string; brainstorm: boolean;
   id?: string; pid?: number; settings?: ReviewerSettings; diagnostic?: string; invalid?: string;
+  /** A later turn succeeded: the diagnostic is still shown, but no longer explains a failure. */
+  recovered?: boolean;
+  /** Epoch milliseconds: when the review was queued and when its reviewer launched. */
+  queuedAt: number; launchedAt?: number;
   promise: Promise<void>; resolve(): void; reject(error: Error): void;
 }
 interface Failure { file: string; thread: string; error: string }
@@ -96,6 +103,8 @@ export interface AutoOptions {
   reviewerRules: string;
   target(channel: string): ReviewTarget | undefined;
   reviewed(channel: string, file: string): boolean;
+  /** The verdict of the review that answers this message, if any: for pair status's last round. */
+  verdict?(channel: string, file: string): string | undefined;
   channelOf(root: string): string;
   stateDirOf(channel: string): string;
   /** The refusal when manual Codex sessions are registered in the channel, naming how to clear them. */
@@ -131,6 +140,44 @@ function reviewerError(event: unknown): string | undefined {
     : [];
   const found = texts.filter((text): text is string => typeof text === "string" && text.trim() !== "").map((text) => text.trim());
   return found.length ? found.join("; ") : undefined;
+}
+
+/**
+ * What a failed round's own error says about retrying it. Matches only messages the reviewer CLIs were seen to print;
+ * anything else is "unknown" and keeps the one-retry rule. A match is advice, not proof.
+ */
+export type RetryAdvice = { kind: "attention" | "retry"; why: string } | { kind: "unknown" };
+
+export function retryAdvice(error: string | undefined, diagnostic: string | undefined): RetryAdvice {
+  // The guardian's own verdict first: a message the reviewer printed earlier doesn't explain running out of time.
+  if (error === "reviewer timed out") return { kind: "retry", why: "the round ran out of time" };
+  const text = diagnostic ?? "";
+  if (/flagged for possible cybersecurity risk/i.test(text)) {
+    return { kind: "attention", why: "the reviewer's provider refused this content, and the same request is unlikely to pass" };
+  }
+  // The CLIs' own sign-in messages, not any "authentication failed", which an MCP server or a tool can print too.
+  if (/please run \/login|^not logged in\b/im.test(text)) return { kind: "attention", why: "the reviewer CLI isn't signed in" };
+  // A rate limit is checked before a usage limit: when unsure, keep the retry.
+  if (/rate limit|too many requests|\boverloaded\b/i.test(text)) return { kind: "retry", why: "a rate limit or an overloaded service" };
+  if (/you've hit your usage limit|usage limit reached|insufficient_quota|credit balance is too low/i.test(text)) {
+    return { kind: "attention", why: "the reviewer's account has reached its usage limit" };
+  }
+  return { kind: "unknown" };
+}
+
+/** Best effort: a closed terminal must not take the session, or the round's result, down with it. */
+const ignoreStreamError = (): void => {};
+function ringBell(): void {
+  // An asynchronous EPIPE would otherwise be an uncaught error.
+  if (!process.stderr.listeners("error").includes(ignoreStreamError)) process.stderr.on("error", ignoreStreamError);
+  try { if (!process.stderr.destroyed) process.stderr.write("\x07"); } catch { /* the terminal is gone */ }
+}
+
+/** A completed turn after an error: Codex's turn.completed, or Claude's result without an error. */
+function turnSucceeded(event: unknown): boolean {
+  if (typeof event !== "object" || event === null) return false;
+  const { type, is_error: isError } = event as Record<string, unknown>;
+  return type === "turn.completed" || (type === "result" && isError !== true);
 }
 
 /** Reviewer output is shown to the author and the user: bounded, with control characters escaped. */
@@ -255,6 +302,34 @@ function claimLines(served: ClaimView): string[] {
   ];
 }
 
+const clock = (ms: number): string => new Date(ms).toTimeString().slice(0, 8);
+function duration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m${seconds % 60}s` : `${Math.floor(seconds / 3600)}h${Math.floor(seconds / 60) % 60}m`;
+}
+
+/** The running round and the last finished one, in wall-clock time (a sleep counts here, unlike for the time limit). */
+function roundLines(state: RecordState, now = Date.now()): string[] {
+  const { round, lastRound: last } = state;
+  const outcome = last && (last.verdict ? `verdict ${last.verdict}` : last.failed === "attention" ? "failed; a retry is unlikely to help" : "failed");
+  return [
+    ...(round ? [`  round running: thread ${round.thread} · launched ${clock(round.launchedAt)}, ${duration(now - round.launchedAt)} ago${round.launchedAt - round.queuedAt >= 1000 ? ` after ${duration(round.launchedAt - round.queuedAt)} queued` : ""}`] : []),
+    ...(last ? [`  last round: thread ${last.thread} · ${outcome} · finished ${clock(last.finishedAt)}${last.launchedAt ? `, took ${duration(last.finishedAt - last.launchedAt)}` : ""}`] : []),
+  ];
+}
+
+/** The owner's own state for pair status --json: running, served by another session, stopped or unavailable. */
+export async function autoState(stateDir: string): Promise<Record<string, unknown>> {
+  try {
+    const reply = await autoCall(stateDir, { action: "status" });
+    return reply.served ? { mode: "served", ...reply.served } : { mode: "running", ...reply.state };
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return { mode: "stopped" };
+    if (hasCode(error, "ECONNREFUSED")) return { mode: "unavailable", error: `stale socket ${autoSocketPath(stateDir)}` };
+    return { mode: "unavailable", error: errorMessage(error) };
+  }
+}
+
 export async function autoStatus(stateDir: string, root: string): Promise<string[]> {
   try {
     const reply = await autoCall(stateDir, { action: "status" });
@@ -267,6 +342,7 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
       `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
       ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
       ...(state.timeoutMs ? [`  review time limit: ${state.timeoutMs / 1000}s per round, not counting sleep`] : []),
+      ...roundLines(state),
       ...(state.served ? servingLines(state.served) : []),
       ...(state.workerPid ? [`  reviewer pid: ${state.workerPid}`] : []),
       ...(state.session ? [`  reviewer session: ${state.session}`] : []),
@@ -687,7 +763,7 @@ function lastAuthor(stateDir: string, root: string): string[] {
 }
 
 /** How an auto author handles a failed managed review. prompts/pair.md says the same; a test keeps them equal. */
-export const FAILED_REVIEW_RULE = "If a managed review fails, the request stays on disk. Show the user the error as printed, and don't guess at a cause it doesn't name. Retry once with `pair wait --as {{AGENT}}`. If the same failure comes back, stop and ask the user, naming any reviewer model or effort the error says a retry keeps.";
+export const FAILED_REVIEW_RULE = "If a managed review fails, the request stays on disk. Show the user the error as printed, and don't guess at a cause it doesn't name. If the error says a retry is unlikely to help, don't retry: ask the user. Otherwise retry once with `pair wait --as {{AGENT}}`. If the same failure comes back, stop and ask the user, naming any reviewer model or effort the error says a retry keeps.";
 
 export type StartChoices = Pick<AutoOptions, "author" | "reviewerCli" | "claude" | "codex" | "reviewerModel" | "reviewerEffort" | "authorArgs" | "reviewerArgs">;
 
@@ -965,7 +1041,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     let resolve!: () => void;
     let reject!: (error: Error) => void;
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
-    queue.push({ target, file, thread: pending.thread, brainstorm: pending.brainstorm, promise, resolve, reject });
+    queue.push({ target, file, thread: pending.thread, brainstorm: pending.brainstorm, promise, resolve, reject, queuedAt: Date.now() });
     dispatch();
     return promise;
   };
@@ -991,7 +1067,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     entry.settings = settings;
     running.set(id, entry);
     failures.delete(target);
-    if (target === rootTarget) delete state.error;
+    entry.launchedAt = Date.now();
+    if (target === rootTarget) {
+      delete state.error;
+      state.round = { thread: entry.thread, queuedAt: entry.queuedAt, launchedAt: entry.launchedAt };
+    }
     state.thread = { id: entry.thread, ...settings, ran: ranBy.get(key) };
     const session = sessions.get(key);
     state.session = session;
@@ -1189,7 +1269,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         for (const line of lines) {
           let parsed: unknown;
           try { parsed = JSON.parse(line); } catch { continue; } // Tool output may contain non-JSON diagnostics.
-          entry.diagnostic = reviewerError(parsed) ?? entry.diagnostic;
+          const reported = reviewerError(parsed);
+          if (reported) {
+            entry.diagnostic = reported;
+            entry.recovered = false;
+          } else if (turnSucceeded(parsed)) entry.recovered = true;
           const session = sessionId(parsed);
           if (session) {
             sessions.set(keyOf(entry.target, entry.thread), session); // recorded when the review started: no lane read that could fail here
@@ -1248,8 +1332,22 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             ? `pair wait retries it with the same ${overrides.join(" and ")}; to change that first, run pair reviewer --thread current with the new value in your own terminal${target.child ? `, in ${target.root}` : ""}`
             : "pair wait retries it";
           const limit = error === "reviewer timed out" ? `; to give it more than ${state.timeoutMs! / 1000}s, first run pair reviewer --timeout SECONDS in your own terminal${target.child ? `, in ${options.root}` : ""}` : "";
+          const advice = success ? undefined : retryAdvice(error, entry.recovered ? undefined : entry.diagnostic);
+          // A retry that can't help would only spend a paid launch: say so, and leave the decision to the user.
+          const next = advice?.kind === "attention"
+            ? `A retry is unlikely to help: ${advice.why}. Don't retry with pair wait; ask the user, who can change the request, the reviewer's model (pair reviewer --thread current) or the reviewer's account first`
+            : `${retry[0].toUpperCase()}${retry.slice(1)}${limit}`;
+          if (target === rootTarget) {
+            let verdict = "sent"; // status detail only: a lane that can't be read here must not stop the owner
+            if (success) {
+              try { verdict = options.verdict?.(target.channel, entry.file) ?? verdict; } catch { /* keep "sent" */ }
+            }
+            state.lastRound = { thread: entry.thread, ...(success ? { verdict } : { failed: advice!.kind }), queuedAt: entry.queuedAt, launchedAt: entry.launchedAt, finishedAt: Date.now() };
+            delete state.round;
+            if (process.env.PAIR_BELL) ringBell(); // opt-in: a round finished
+          }
           if (success) entry.resolve();
-          else entry.reject(new Error(`${reason}. ${retry[0].toUpperCase()}${retry.slice(1)}${limit}. Log: ${state.log}`)); // the author's send adds that the request remains
+          else entry.reject(new Error(`${reason}. ${next}. Log: ${state.log}`)); // the author's send adds that the request remains
           dispatch();
         }
       }
@@ -1258,7 +1356,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     heartbeat = setInterval(() => { sendGuardian({ type: "heartbeat" }); watchTargets(); }, 1000);
     for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(name, signal);
     // No run-specific path: Claude records the system prompt and reuses it when the conversation is resumed in a later run.
-    const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewerName} (${reviewer === "claude" ? "Claude Code" : "Codex"}) as your automatically managed reviewer. Your pair name is ${authorName}. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus and file list through stdin to pair send request --as ${authorName} --to ${reviewerName} -. Follow-up replies use pair send response --as ${authorName} --to ${reviewerName} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. To brainstorm a design with ${reviewerName} before a task, use pair send request --brainstorm: each contribution comes back inline the same way, and you answer with pair send response until ${reviewerName} completes it. If you delegate implementation, tell subagents not to run pair commands and to return their changes and validation results; you own the review loop, integrate their work here (or, for separate PRs, review each branch here in turn), and keep this checkout stable during each review round.${options.serveWorktrees ? ` This session serves subagent worktrees: a subagent working in its own git worktree of this repository runs its own review loop there. Give each such subagent these rules in its task: from your worktree, send requests and responses with "$PAIR_BIN" send request --as ${authorName} --to ${reviewerName} - and "$PAIR_BIN" send response --as ${authorName} --to ${reviewerName} -, each with your tool's background-task facility (in Claude Code, Bash run_in_background: true), never shell &; each returns the review inline, possibly after waiting its turn. Keep your worktree unchanged while a review is queued or running, fix between rounds, and finish the loop. Don't remove the worktree. Report the outcome to the parent: approved, escalated, or the failure as printed. Subagents working in this checkout still return their work without running pair.` : ""} Do not register, call pair_listen, or start idle waits in auto mode. Never append & to a pair command, and don't start a separate pair wait after a managed send: the send already returns the review. Use pair wait only for this retry: ${FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", authorName)} For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
+    const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewerName} (${reviewer === "claude" ? "Claude Code" : "Codex"}) as your automatically managed reviewer. Your pair name is ${authorName}. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus, validation (each command and its result in a line) and file list through stdin to pair send request --as ${authorName} --to ${reviewerName} -. Follow-up replies use pair send response --as ${authorName} --to ${reviewerName} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. To brainstorm a design with ${reviewerName} before a task, use pair send request --brainstorm: each contribution comes back inline the same way, and you answer with pair send response until ${reviewerName} completes it. If you delegate implementation, tell subagents not to run pair commands and to return their changes and validation results; you own the review loop, integrate their work here (or, for separate PRs, review each branch here in turn), and keep this checkout stable during each review round.${options.serveWorktrees ? ` This session serves subagent worktrees: a subagent working in its own git worktree of this repository runs its own review loop there. Give each such subagent these rules in its task: from your worktree, send requests and responses with "$PAIR_BIN" send request --as ${authorName} --to ${reviewerName} - and "$PAIR_BIN" send response --as ${authorName} --to ${reviewerName} -, each with your tool's background-task facility (in Claude Code, Bash run_in_background: true), never shell &; each returns the review inline, possibly after waiting its turn. Keep your worktree unchanged while a review is queued or running, fix between rounds, and finish the loop. Don't remove the worktree. Report the outcome to the parent: approved, escalated, or the failure as printed. Subagents working in this checkout still return their work without running pair.` : ""} Do not register, call pair_listen, or start idle waits in auto mode. Never append & to a pair command, and don't start a separate pair wait after a managed send: the send already returns the review. Use pair wait only for this retry: ${FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", authorName)} For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
     // The user's options go first; codex gets -- before the prompt so a multi-value option like --image can't take it.
     const authorEnv = childEnv("author");
     // From a file: on the command line, pair commands in the prompt matched every author for pkill -f "pair wait …".

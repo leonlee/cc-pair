@@ -36,6 +36,14 @@ history and registrations work as they are.
   `--to`, and a reply goes to whoever sent the message, as the `== next:` line says. `wait` covers
   every lane, replies owed first. `pair register --as NAME` wakes a named Codex participant.
 - **Lanes** are `<author>-to-<reviewer>/`; `status`, `history`, `reset` and `clean` cover them all.
+- **Retry advice.** When a reviewer's own error shows a retry won't help (its provider refused the
+  content, it isn't signed in, or its account is used up), the failed round says so and the author
+  asks you instead of spending another launch. A rate limit or a timeout keeps the usual retry.
+- **`pair status` shows the running round and the last finished one**, with its verdict or failure
+  and when it finished. `pair status --json` gives the lanes, instruction states and the session's
+  state to scripts. `PAIR_BELL=1` rings the terminal bell when a round finishes.
+- **Review requests carry their validation**: each command and its result in a line, and what wasn't
+  checked; reviewers say which checks they ran themselves.
 - **Review time limit.** The default limit per review round is now 30 minutes (was 15).
   `pair reviewer --timeout SECONDS` changes it in a running session from the next round, a failed
   thread's retry included, and a timed-out round's error names it. `pair status` shows the limit.

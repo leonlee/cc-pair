@@ -63,8 +63,9 @@ that file at session start and after a clear or compaction, and follow it: it ho
 author instructions.
 
 If a managed review fails, the request stays on disk. Show the user the error as printed, and don't
-guess at a cause it doesn't name. Retry once with `pair wait --as {{AGENT}}`. If the same failure
-comes back, stop and ask the user, naming any reviewer model or effort the error says a retry keeps.
+guess at a cause it doesn't name. If the error says a retry is unlikely to help, don't retry: ask
+the user. Otherwise retry once with `pair wait --as {{AGENT}}`. If the same failure comes back, stop
+and ask the user, naming any reviewer model or effort the error says a retry keeps.
 
 If an auto session ended unexpectedly, for example killed with its author, run `pair status` in its
 worktree and use the restart command it prints, or `pair start --resume` there. A bare
@@ -120,17 +121,22 @@ and a pattern kills those agents too.
 
 When you own the pair loop and finish a task, including integrating any delegated work:
 
-1. Send a request with what changed and why, what to focus on, and the files touched.
+1. Send a request with what changed and why, what to focus on, how you validated it, and the files
+   touched.
    ```
    pair send request --as {{AGENT}} --to {{PARTNER}} - <<'EOF'
    ## Summary
    ...
    ## Focus
    ...
+   ## Validation
+   npm test: 188 passed, 0 failed. Not checked: Linux.
    ## Files
    - src/a.ts
    EOF
    ```
+   Under Validation, give each command you ran and its result in a line, not its full output, and
+   say what you didn't check.
    A spec, plan or design doc goes the same way, in any format: a Markdown plan, an OpenSpec change,
    an ADR. Under Files, list its paths and the commit they're at, or say they're uncommitted. If the
    format has its own validator, such as `openspec validate`, run it first and include the result.
@@ -147,6 +153,7 @@ When you own the pair loop and finish a task, including integrating any delegate
    ### F3 deferred: <why, and where it is tracked>
    EOF
    ```
+   For each fix, name the check that covers it, so your partner can focus on what changed.
    Then go back to step 2.
 4. Stop when `wait` reports the thread approved. If it reports ESCALATED, stop and ask the user.
 
@@ -174,7 +181,8 @@ request can cite the thread ID.
 
 Loop: wait for a message (see How to wait), review, send your review, then wait again.
 
-- On a request, read the listed files in the repo and review the change.
+- On a request, read the listed files in the repo and review the change. In your review, say which
+  checks you ran yourself, and treat the request's Validation as the author's claim, not yours.
 - On a request to review a spec or plan, review the document, not code. Look for requirements that
   are ambiguous or contradict each other, missing edge cases and error handling, acceptance criteria
   that can't be tested, scope beyond or short of the stated goal, and plans the current code can't
