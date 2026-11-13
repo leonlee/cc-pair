@@ -1855,3 +1855,28 @@ test("an auto session ignores unrelated lanes: an older unread approval elsewher
   assert.doesNotMatch(f.read("first.out"), /carol/);
   assert.match((await f.command(["wait", "--as", "claude", "--timeout", "1"])).stdout, /review from carol · claude-to-carol[\s\S]*approved and closed/, "still there for a manual wait");
 });
+
+test("a served worktree's .git file is read bounded, even if it grows after its size check", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pair-gitdir-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const gitDir = join(root, "real-git-dir");
+  mkdirSync(gitDir);
+  writeFileSync(join(root, ".git"), `gitdir: ${gitDir}\n`);
+  const read = (preload) => spawnSync(process.execPath, [...preload, "--input-type=module", "-e",
+    `import { resolvedGitDir } from ${JSON.stringify(join(import.meta.dirname, "..", "dist", "auto.js"))};
+try { console.log(resolvedGitDir(${JSON.stringify(root)})); } catch (error) { console.log(error.message); }`], { encoding: "utf8" }).stdout.trim();
+  assert.equal(read([]), realpathSync(gitDir));
+  const hook = join(root, "grow.cjs");
+  writeFileSync(hook, `const fs = require("node:fs");
+const target = fs.statSync(${JSON.stringify(join(root, ".git"))}).ino;
+const fstat = fs.fstatSync;
+let grown = false;
+fs.fstatSync = (fd, ...rest) => {
+  const stats = fstat(fd, ...rest);
+  if (!grown && stats.ino === target) { grown = true; fs.appendFileSync(${JSON.stringify(join(root, ".git"))}, " ".repeat(8 * 1024 * 1024)); }
+  return stats;
+};
+require("node:module").syncBuiltinESMExports();
+`);
+  assert.match(read(["--require", hook]), /isn't a gitdir file: it is larger than 4096 bytes/);
+});

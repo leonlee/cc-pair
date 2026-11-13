@@ -44,11 +44,12 @@ Fixes found while testing with the real CLIs:
 
 - Security: a Claude reviewer loaded the worktree's own `.claude` settings, so a branch's hooks ran
   with your permissions when a review started. It now loads only your user settings and no MCP
-  servers but its own.
+  servers.
 - Security: pair wrote `AGENTS.md` and `.claude/skills/pair/SKILL.md` through symlinks and hard
   links, so a cloned branch or an agent could point `pair init`, a refresh or `pair uninit` at any
-  file you can write. It now refuses paths that lead outside the worktree and replaces the files by
-  rename. `pair status` and `pair init` say which path they refused.
+  file you can write. It now refuses paths that lead outside the worktree, into `.git` or to a
+  non-Markdown file, never refreshes or overwrites a `SKILL.md` it didn't write, and replaces the
+  files by rename. `pair status`, `pair init` and `pair start` say which path they refused.
 - Security: in the channel, a symlinked channel, `archive` or lane let a thread's files move outside it (or
   an outside directory in), a predictable temporary file let a message overwrite another file, and a
   FIFO could block `pair mcp`, the auto owner or `pair status`. Pair now refuses them and reads only

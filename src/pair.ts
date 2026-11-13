@@ -747,9 +747,9 @@ interface Registration {
  * `pair mcp` runs outside the agents' sandboxes, but agents can write the channel. So the files it
  * opens there must never be symlinks, or an agent could make it read or write any file.
  */
-function openChannelFile(path: string, flags: number): number {
+function openChannelFile(path: string, flags: number, mode = 0o600): number {
   try {
-    return openSync(path, flags | constants.O_NOFOLLOW, 0o600);
+    return openSync(path, flags | constants.O_NOFOLLOW, mode);
   } catch (error) {
     if (hasCode(error, "ELOOP")) {
       throw new PairError(`refusing to follow the symlink at ${path}`);
@@ -799,8 +799,8 @@ function realDirectory(path: string): string {
   return path;
 }
 
-function writeChannelFile(path: string, text: string, flags: number): void {
-  const fd = openChannelFile(path, constants.O_WRONLY | constants.O_CREAT | flags);
+function writeChannelFile(path: string, text: string, flags: number, mode?: number): void {
+  const fd = openChannelFile(path, constants.O_WRONLY | constants.O_CREAT | flags, mode);
   try {
     writeSync(fd, text);
   } finally {
@@ -1529,6 +1529,10 @@ function instructionPath(root: string, path: string): string {
   if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
     throw new PairError(`${path} leads to ${real}, outside this worktree`);
   }
+  // Inside the worktree, a link still mustn't aim pair at git's own files or at a non-instruction file such as .env.
+  // Any case: on a case-insensitive file system realpath keeps the spelling it was given, such as .GIT.
+  if (inside.split(sep).some((part) => part.toLowerCase() === ".git")) throw new PairError(`${path} leads to ${real}, inside .git`);
+  if (!/\.md$/i.test(real)) throw new PairError(`${path} leads to ${real}, which isn't a Markdown file`);
   return real;
 }
 
@@ -1544,8 +1548,9 @@ function writeInstruction(root: string, path: string, text: string): void {
   const mode = lstatSync(real, { throwIfNoEntry: false })?.mode;
   if (mode !== undefined) accessSync(real, constants.W_OK); // a read-only file stays unwritten, as before
   const tmpPath = join(dirname(real), `.${basename(real)}.${randomBytes(6).toString("hex")}.tmp`);
-  writeChannelFile(tmpPath, text, constants.O_EXCL);
-  chmodSync(tmpPath, mode === undefined ? 0o644 : mode & 0o777);
+  // A new file gets the umask's mode, as before; a replacement stays private until it has the old file's mode.
+  writeChannelFile(tmpPath, text, constants.O_EXCL, mode === undefined ? 0o666 : 0o600);
+  if (mode !== undefined) chmodSync(tmpPath, mode & 0o777);
   renameSync(tmpPath, real);
 }
 
@@ -1558,6 +1563,10 @@ function instructionState(root: string, path: string, expected: string, sectionO
     }
     if (unstamped(actual) === unstamped(expected)) {
       return "current";
+    }
+    // A section is pair's by its markers; a whole file only by pair's own header, stamp or a released copy's hash.
+    if (!sectionOnly && !actual.startsWith("---\nname: pair\n") && !STAMP.test(actual) && !RELEASED_SKILL_SHA256.includes(createHash("sha256").update(actual).digest("hex"))) {
+      return "not written by pair";
     }
     const writer = STAMP.exec(actual)?.[1];
     return writer && isNewer(writer, PACKAGE.version) ? `newer (pair ${writer})` : "stale";
@@ -1627,7 +1636,7 @@ function status(channel: string, root: string, served = false): string {
     ...(agents.startsWith("unreadable") || skill.startsWith("unreadable")
       ? ["Check permissions on the unreadable instruction paths before refreshing them."] : []),
     ...(agents.startsWith("refused") || skill.startsWith("refused")
-      ? ["pair reads and writes its instructions only as regular files inside this worktree: replace a refused path with one."] : []),
+      ? ["pair reads and writes its instructions only as single-link regular files inside this worktree, outside .git, reached directly or through a link to a Markdown file: point the link at one, or replace it with a regular file."] : []),
     ...(agents.startsWith("newer") || skill.startsWith("newer")
       ? ["A newer pair wrote these instructions: run `pair upgrade` in your own terminal."] : []),
   ].join("\n");
@@ -2006,7 +2015,8 @@ function init(channel: string, root: string): string {
 
   // Current files keep their stamp too: a newer pair may have written the same text.
   const kept = (state: string): string | undefined =>
-    state === "current" ? " (current)" : state.startsWith("newer") ? " (a newer pair wrote it; run `pair upgrade`, or delete it to downgrade)" : undefined;
+    state === "current" ? " (current)" : state.startsWith("newer") ? " (a newer pair wrote it; run `pair upgrade`, or delete it to downgrade)"
+      : state === "not written by pair" ? " (not written by pair; delete it to let pair init write it)" : undefined;
   const done: string[] = [];
   const skillDir = join(root, ".claude", "skills", "pair");
   const skillPath = join(skillDir, "SKILL.md");
@@ -2106,8 +2116,8 @@ function uninit(channel: string, root: string, purge: boolean): string {
     try { return readInstruction(root, path); }
     catch (error) {
       if (isMissing(error)) return undefined;
-      if (error instanceof PairError) { notes.push(`kept: ${path} (${error.message})`); return undefined; }
-      throw error;
+      notes.push(`kept: ${path} (${errorMessage(error)})`); // a refused path, a link loop, a file where a directory goes
+      return undefined;
     }
   };
   const skill = readOrNote(skillPath);
@@ -2786,7 +2796,7 @@ async function main(argv: string[]): Promise<number> {
           const startRoot = plan ? openWorktree(root, plan) : root;
           // The agents follow these instructions (finding, severity and verdict rules), so auto mode can't do without them.
           if (needsInit(startRoot)) {
-            const wrote = init(channelDir(startRoot), startRoot).split("\n").filter((line) => line.startsWith("wrote: "));
+            const wrote = init(channelDir(startRoot), startRoot).split("\n").filter((line) => /^(?:wrote|refused): |^kept: .*not written by pair/.test(line));
             console.error(wrote.map((line) => `pair: ${line}`).join("\n"));
           }
           process.chdir(startRoot); // so pair ps groups this launcher with the worktree it runs

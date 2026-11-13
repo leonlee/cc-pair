@@ -329,7 +329,9 @@ test("status diagnoses instructions without writing, and ignores user content ou
   assert.equal(readFileSync(agentsPath, "utf8"), stale, "status does not repair instructions");
   ok(["init"]);
   assert.equal(readFileSync(agentsPath, "utf8"), customized, "init refreshes only the marked section");
-  writeFileSync(skillPath, "old skill\n");
+  writeFileSync(skillPath, "my own skill\n");
+  assert.match(ok(["status"]), /\.claude\/skills\/pair\/SKILL\.md: not written by pair/);
+  writeFileSync(skillPath, "---\nname: pair\ndescription: old\n---\n\nold skill\n");
   const oldSkill = ok(["status"]);
   assert.match(oldSkill, /AGENTS\.md \(pair section\): current/);
   assert.match(oldSkill, /\.claude\/skills\/pair\/SKILL\.md: stale/);
@@ -1363,7 +1365,7 @@ test("upgrade installs only a newer version, then reports just the new init's fi
   assert.deepEqual(current.calls, [view], "nothing to install");
   assert.equal(current.out, `already up to date: claude-codex-pair ${version}\n`);
   const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
-  writeFileSync(skillPath, "old skill\n");
+  writeFileSync(skillPath, "---\nname: pair\ndescription: old\n---\n\nold skill\n");
   if (process.getuid?.() !== 0) {
     chmodSync(skillPath, 0o444);
     const unwritable = upgrade({ NPM_LATEST: version });
@@ -1652,7 +1654,7 @@ test("pair writes its instructions only inside the worktree, never through a lin
   const init = ok(["init"]);
   assert.match(init, /refused: .*SKILL\.md \(.*outside this worktree\)/);
   assert.match(init, /refused: .*AGENTS\.md \(.*outside this worktree\)/);
-  assert.match(ok(["status"]), /SKILL\.md: refused: .*outside this worktree\n[^]*replace a refused path/);
+  assert.match(ok(["status"]), /SKILL\.md: refused: .*outside this worktree\n[^]*replace it with a regular file/);
   run(["history"]); // refreshes stale instructions
   assert.match(ok(["uninit"]), /kept: .*SKILL\.md \(.*outside this worktree\)/);
   assert.equal(readFileSync(victim, "utf8"), "precious\n", "neither written, appended to nor emptied");
@@ -1788,4 +1790,74 @@ test("a link to a directory inside the worktree whose name starts with two dots 
   symlinkSync(join("..notes", "instructions.md"), join(root, "AGENTS.md"));
   assert.match(ok(["init"]), /wrote: .*AGENTS\.md \(pair section\)/);
   assert.match(readFileSync(join(root, "..notes", "instructions.md"), "utf8"), /<!-- pair:start -->/);
+});
+
+test("inside the worktree, pair still never writes git's files, a non-Markdown file, or a SKILL.md it didn't write", () => {
+  const { root, ok, env } = sandbox();
+  mkdirSync(join(root, ".git"));
+  writeFileSync(join(root, ".git", "config"), "[core]\n\tbare = false\n");
+  writeFileSync(join(root, ".env"), "SECRET=1\n");
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  mkdirSync(dirname(skillPath), { recursive: true });
+  symlinkSync(join("..", "..", "..", ".env"), skillPath);
+  symlinkSync(join(".git", "config"), join(root, "AGENTS.md"));
+  const init = ok(["init"]);
+  assert.match(init, /refused: .*SKILL\.md \(.*\.env, which isn't a Markdown file\)/);
+  assert.match(init, /refused: .*AGENTS\.md \(.*inside \.git\)/);
+  ok(["history"]); // refreshes stale instructions
+  assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=1\n");
+  assert.equal(readFileSync(join(root, ".git", "config"), "utf8"), "[core]\n\tbare = false\n");
+  // In any case: a case-insensitive file system resolves .GIT to .git and realpath keeps .GIT.
+  writeFileSync(join(root, ".git", "local.md"), "[user]\n");
+  if (!existsSync(join(root, ".GIT", "local.md"))) { // a case-sensitive file system: .GIT is its own directory
+    mkdirSync(join(root, ".GIT"));
+    writeFileSync(join(root, ".GIT", "local.md"), "[user]\n");
+  }
+  rmSync(join(root, "AGENTS.md"));
+  symlinkSync(join(".GIT", "local.md"), join(root, "AGENTS.md"));
+  assert.match(ok(["init"]), /refused: .*AGENTS\.md \(.*inside \.git\)/);
+  assert.equal(readFileSync(join(root, ".git", "local.md"), "utf8"), "[user]\n");
+  assert.equal(readFileSync(join(root, ".GIT", "local.md"), "utf8"), "[user]\n");
+  rmSync(join(root, "AGENTS.md"));
+
+  // A SKILL.md pair didn't write, even a plain file at pair's path, is neither refreshed nor overwritten.
+  rmSync(skillPath);
+  writeFileSync(skillPath, "my own skill\n");
+  assert.match(ok(["init"]), /kept: .*SKILL\.md \(not written by pair; delete it to let pair init write it\)/);
+  ok(["history"]);
+  assert.equal(readFileSync(skillPath, "utf8"), "my own skill\n");
+
+  // A new file gets the umask's mode, as writeFileSync gave it.
+  rmSync(skillPath);
+  const strict = spawnSync("/bin/sh", ["-c", `umask 077 && exec node ${JSON.stringify(CLI)} init`], { cwd: root, env, encoding: "utf8" });
+  assert.equal(strict.status, 0, strict.stderr);
+  assert.equal(lstatSync(skillPath).mode & 0o777, 0o600);
+});
+
+test("uninit notes an instruction path it can't read, such as a link loop, and goes on", () => {
+  const { root, ok } = sandbox();
+  symlinkSync("AGENTS.md", join(root, "AGENTS.md"));
+  assert.match(ok(["uninit"]), /kept: .*AGENTS\.md \(.*ELOOP/);
+});
+
+test("replacing a private instruction file never exposes its content, even briefly", (t) => {
+  const { root, env, ok } = sandbox();
+  ok(["init"]);
+  const agentsPath = join(root, "AGENTS.md");
+  writeFileSync(agentsPath, readFileSync(agentsPath, "utf8").replace("# pair: review loop", "# pair: old review loop"));
+  chmodSync(agentsPath, 0o600);
+  // Records the mode of every file pair writes to, at the moment it writes.
+  const hook = join(root, "modes.cjs");
+  const modes = join(root, "modes.log");
+  writeFileSync(hook, `const fs = require("node:fs");
+const write = fs.writeSync;
+fs.writeSync = (fd, ...rest) => { fs.appendFileSync(${JSON.stringify(modes)}, (fs.fstatSync(fd).mode & 0o777).toString(8) + "\\n"); return write(fd, ...rest); };
+require("node:module").syncBuiltinESMExports();
+`);
+  t.after(() => rmSync(hook, { force: true }));
+  const result = spawnSync("/bin/sh", ["-c", `umask 022 && exec node --require ${JSON.stringify(hook)} ${JSON.stringify(CLI)} init`], { cwd: root, env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /wrote: .*AGENTS\.md \(pair section\)/);
+  assert.deepEqual(readFileSync(modes, "utf8").trim().split("\n"), ["600"], "written while private");
+  assert.equal(lstatSync(agentsPath).mode & 0o777, 0o600, "and keeps its mode");
 });
