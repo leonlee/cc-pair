@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, autoState, checkOwnTerminal, checkSettings, checkStart, DEFAULT_REVIEW_SECONDS, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, MAX_REVIEW_SECONDS, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, autoState, checkOwnTerminal, checkSettings, checkStart, DEFAULT_REVIEW_SECONDS, describeSession, MAX_REVIEW_LAUNCHES, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, MAX_REVIEW_SECONDS, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 import { codexControlSocket, loadedThreads } from "./daemon.js";
 import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
@@ -148,6 +148,15 @@ function channelAccess<T>(channel: string, operation: () => T, checked = true): 
   } catch (error) {
     throw channelError(channel, error);
   }
+}
+
+/** --max-reviews: a whole number of reviewer launches, 0 for no limit. */
+function launchLimit(value: string): number {
+  const parsed = Number(value);
+  if (!/^\d+$/.test(value) || parsed > MAX_REVIEW_LAUNCHES) {
+    throw new PairError(`--max-reviews must be a whole number from 0 (no limit) to ${MAX_REVIEW_LAUNCHES} (got "${value}")`);
+  }
+  return parsed;
 }
 
 function positiveNumber(value: string, what: string): number {
@@ -2470,12 +2479,15 @@ advanced options:
   --claude PATH, --codex PATH  absolute path of each CLI (default: the first on PATH)
   --timeout SECONDS            limit for each review round, not counting sleep (default 1800,
                                max 86400); pair reviewer --timeout changes it later
+  --max-reviews N              reviewer launches allowed this run, retries and served worktrees
+                               included (default 0: no limit); pair reviewer --max-reviews
+                               changes it later
   --grace SECONDS              wait between terminating and killing a process (default 2, max 30)
 
 README, Auto mode, has the details. From another terminal in the session's worktree, pair status and
 pair ps -v show it, and pair stop stops it.`,
   reviewer: `usage: pair reviewer [--reviewer-model MODEL|default] [--reviewer-effort LEVEL|default] [--thread current|ID]
-       pair reviewer --timeout SECONDS
+       pair reviewer [--timeout SECONDS] [--max-reviews N]
 
 Change the reviewer settings of this worktree's running auto session without restarting it. Run it
 in your own terminal; the author and its reviewer can't. A thread keeps the settings it had at its
@@ -2490,9 +2502,13 @@ options:
                                retries it. Refused while a round runs.
   --timeout SECONDS            each review round's limit, not counting sleep (max 86400). It
                                applies from the next round, a failed thread's retry included.
+  --max-reviews N              reviewer launches allowed this run, retries and served worktrees
+                               included; 0 removes the limit. pair wait then retries a review
+                               the limit stopped.
 
   pair reviewer --reviewer-model gpt-6.1-sol
   pair reviewer --timeout 3600
+  pair reviewer --max-reviews 20
   pair reviewer --thread current --reviewer-model gpt-6.1-sol --reviewer-effort default`,
   stop: `usage: pair stop
 
@@ -2588,7 +2604,7 @@ options:
   -v, --verbose                show full command lines`,
 };
 
-const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, purge: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" }, json: { type: "boolean" } } as const;
+const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, purge: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" }, json: { type: "boolean" }, "max-reviews": { type: "string" } } as const;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals, tokens } = parseArgs({
@@ -2624,6 +2640,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (values.brainstorm && (command !== "send" || rest[0] !== "request")) {
     throw new PairError("--brainstorm is only supported by pair send request");
+  }
+  if (values["max-reviews"] !== undefined && command !== "start" && command !== "reviewer") {
+    throw new PairError("--max-reviews is only supported by pair start and pair reviewer");
   }
   if (values.json && command !== "status") {
     throw new PairError("--json is only supported by pair status");
@@ -2778,6 +2797,7 @@ async function main(argv: string[]): Promise<number> {
           const timeout = positiveNumber(values.timeout ?? String(DEFAULT_REVIEW_SECONDS), "--timeout");
           const grace = positiveNumber(values.grace ?? "2", "--grace");
           if (timeout > MAX_REVIEW_SECONDS || grace > 30) throw new PairError(`--timeout must be at most ${MAX_REVIEW_SECONDS} seconds and --grace at most 30 seconds`);
+          const maxLaunches = launchLimit(values["max-reviews"] ?? "0");
           const serveWorktrees = Boolean(values["serve-worktrees"]);
           if (values.reviewers !== undefined && !serveWorktrees) {
             throw new PairError("--reviewers needs --serve-worktrees: without it, only this worktree is reviewed, one round at a time");
@@ -2830,10 +2850,11 @@ async function main(argv: string[]): Promise<number> {
           return await startAuto({
             ...choices, authorName, reviewerName, authorArgs, root: startRoot, channel: startChannel, stateDir: stateDir(startChannel), entry: fileURLToPath(import.meta.url), session,
             restartOptions: pairing.concat([
-              ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace],
+              ["--claude", values.claude], ["--codex", values.codex], ["--timeout", values.timeout], ["--grace", values.grace], ["--max-reviews", values["max-reviews"]],
             ].flatMap(([name, value]) => value === undefined ? [] : [name!, value])).concat(values["reviewer-args"] === undefined ? [] : [`--reviewer-args=${values["reviewer-args"]}`])
               .concat(serveWorktrees ? ["--serve-worktrees", ...(values.reviewers === undefined ? [] : ["--reviewers", values.reviewers])] : []),
             timeoutMs: timeout * 1000,
+            maxLaunches,
             graceMs: grace * 1000,
             serveWorktrees, reviewers, reviewerRules: reviewerRules(reviewer),
             target: (laneChannel) => {
@@ -2872,9 +2893,10 @@ async function main(argv: string[]): Promise<number> {
         const setting = (value: string | undefined): string | null | undefined => value === "default" ? null : value;
         const timeoutSeconds = values.timeout === undefined ? undefined : positiveNumber(values.timeout, "--timeout");
         if (timeoutSeconds !== undefined && timeoutSeconds > MAX_REVIEW_SECONDS) throw new PairError(`--timeout must be at most ${MAX_REVIEW_SECONDS} seconds`);
-        const change = { model: setting(values["reviewer-model"]), effort: setting(values["reviewer-effort"]), thread: values.thread, timeoutSeconds };
-        if (change.model === undefined && change.effort === undefined && timeoutSeconds === undefined) {
-          throw new PairError("pass --reviewer-model or --reviewer-effort (a value, or default), or --timeout; pair status shows the current settings");
+        const maxLaunches = values["max-reviews"] === undefined ? undefined : launchLimit(values["max-reviews"]);
+        const change = { model: setting(values["reviewer-model"]), effort: setting(values["reviewer-effort"]), thread: values.thread, timeoutSeconds, maxLaunches };
+        if (change.model === undefined && change.effort === undefined && timeoutSeconds === undefined && maxLaunches === undefined) {
+          throw new PairError("pass --reviewer-model or --reviewer-effort (a value, or default), --timeout or --max-reviews; pair status shows the current settings");
         }
         try { console.log(await setReviewer(stateDir(channel), change)); }
         catch (error) { throw new PairError(errorMessage(error)); }

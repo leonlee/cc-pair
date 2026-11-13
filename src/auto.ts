@@ -22,10 +22,12 @@ interface Result { code: number | null; signal?: string; error?: string }
 /** Reviewer settings; an absent value leaves it to the reviewer CLI's own default. */
 export interface ReviewerSettings { model?: string; effort?: string }
 /** A pair reviewer change: a value sets it, null returns it to the CLI default, absent keeps it. */
-export interface ReviewerChange { model?: string | null; effort?: string | null; thread?: string; timeoutSeconds?: number }
+export interface ReviewerChange { model?: string | null; effort?: string | null; thread?: string; timeoutSeconds?: number; maxLaunches?: number }
 /** Each review round's time limit, awake time only. */
 export const DEFAULT_REVIEW_SECONDS = 1800;
 export const MAX_REVIEW_SECONDS = 86400;
+/** The largest --max-reviews; 0 means no limit. */
+export const MAX_REVIEW_LAUNCHES = 10000;
 interface RecordState {
   run: string;
   pid: number;
@@ -39,6 +41,9 @@ interface RecordState {
   reviewerEffort?: string;
   /** Each review round's limit (an older owner has none). */
   timeoutMs?: number;
+  /** Reviewer launches this run, retries and served worktrees included, and their limit (0: none; an older owner has neither). */
+  launches?: number;
+  maxLaunches?: number;
   worktree: string;
   phase: string;
   log: string;
@@ -95,6 +100,8 @@ export interface AutoOptions {
   /** The pair options to repeat in the printed restart command (never --worktree: it starts with cd). */
   restartOptions: string[];
   timeoutMs: number;
+  /** --max-reviews: reviewer launches allowed this run, 0 for no limit. */
+  maxLaunches: number;
   graceMs: number;
   /** --serve-worktrees: also review other worktrees of this repository, up to `reviewers` rounds at once. */
   serveWorktrees: boolean;
@@ -342,6 +349,7 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
       `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
       ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
       ...(state.timeoutMs ? [`  review time limit: ${state.timeoutMs / 1000}s per round, not counting sleep`] : []),
+      ...(state.launches === undefined ? [] : [`  reviewer launches this run: ${state.launches}${state.maxLaunches ? ` of ${state.maxLaunches}` : ", no limit"}`]),
       ...roundLines(state),
       ...(state.served ? servingLines(state.served) : []),
       ...(state.workerPid ? [`  reviewer pid: ${state.workerPid}`] : []),
@@ -476,13 +484,17 @@ export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): M
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */
 export async function setReviewer(stateDir: string, change: ReviewerChange): Promise<string> {
   try {
-    if (change.timeoutSeconds !== undefined) {
+    if (change.timeoutSeconds !== undefined || change.maxLaunches !== undefined) {
       // An older owner would ignore the field and apply the rest; check first, so nothing changes.
-      if (change.thread !== undefined) throw new Error("--timeout applies to every next round, a retry included; leave out --thread");
+      const option = change.timeoutSeconds !== undefined ? "--timeout" : "--max-reviews";
+      if (change.thread !== undefined) throw new Error(`${option} applies to the whole session; leave out --thread`);
       const { state, served } = await autoCall(stateDir, { action: "status" });
-      if (served) throw new Error(`this worktree is served by the auto session in ${served.root}; run pair reviewer --timeout there`);
-      if (state.timeoutMs === undefined) {
+      if (served) throw new Error(`this worktree is served by the auto session in ${served.root}; run pair reviewer ${option} there`);
+      if (change.timeoutSeconds !== undefined && state.timeoutMs === undefined) {
         throw new Error("this auto session runs an older pair that can't change its review time limit; nothing was changed. Stop it and start it again, with pair start --timeout SECONDS if 1800 isn't enough");
+      }
+      if (change.maxLaunches !== undefined && state.launches === undefined) {
+        throw new Error("this auto session runs an older pair without a review launch limit; nothing was changed. Stop it and start it again with pair start --max-reviews N");
       }
     }
     return (await autoCall(stateDir, { action: "reviewer", ...change })).message;
@@ -820,7 +832,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const run = randomUUID();
   const path = autoSocketPath(options.stateDir, true);
   const tty = terminalState();
-  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, authorName, reviewerName, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, timeoutMs: options.timeoutMs, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
+  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, authorName, reviewerName, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, timeoutMs: options.timeoutMs, launches: 0, maxLaunches: options.maxLaunches, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
   let guardian: ChildProcess | undefined;
   let stopping: Promise<void> | undefined;
   let guardianDone: Promise<void> = Promise.resolve();
@@ -1052,6 +1064,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         if (!intact(entry.target)) throw gone(entry.target);
         if (options.reviewed(entry.target.channel, entry.file)) { entry.resolve(); continue; }
         if (options.target(entry.target.channel)?.file !== entry.file) throw new Error("message is no longer waiting for this reviewer");
+        if (state.maxLaunches && state.launches! >= state.maxLaunches) {
+          const used = `this session's limit of ${state.maxLaunches} reviewer launch${state.maxLaunches === 1 ? "" : "es"} is used up, and nothing was launched`;
+          if (entry.target === rootTarget) state.error = used;
+          throw new Error(`${used}. A retry is unlikely to help: the limit stays until it is raised. Don't retry with pair wait; ask the user, who can raise it with pair reviewer --max-reviews N in their own terminal${entry.target.child ? `, in ${options.root}` : ""}`);
+        }
         launch(entry);
       } catch (error) { entry.reject(error instanceof Error ? error : new Error(String(error))); }
     }
@@ -1068,6 +1085,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     running.set(id, entry);
     failures.delete(target);
     entry.launchedAt = Date.now();
+    state.launches! += 1; // reserved now, so concurrent rounds can't pass the limit; returned if the spawn fails
     if (target === rootTarget) {
       delete state.error;
       state.round = { thread: entry.thread, queuedAt: entry.queuedAt, launchedAt: entry.launchedAt };
@@ -1114,6 +1132,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       throw new Error(`the review time limit must be a positive number of seconds, at most ${MAX_REVIEW_SECONDS}`);
     }
     if (seconds !== undefined && request.thread !== undefined) throw new Error("--timeout applies to every next round, a retry included; leave out --thread");
+    const limit = request.maxLaunches;
+    if (limit !== undefined && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 0 || limit > MAX_REVIEW_LAUNCHES)) {
+      throw new Error(`the review launch limit must be a whole number from 0 (no limit) to ${MAX_REVIEW_LAUNCHES}`);
+    }
+    if (limit !== undefined && request.thread !== undefined) throw new Error("--max-reviews applies to the whole session; leave out --thread");
     const change = (from: ReviewerSettings): ReviewerSettings => {
       const next = { model: model === undefined ? from.model : model ?? undefined, effort: effort === undefined ? from.effort : effort ?? undefined };
       checkSettings(reviewer, next);
@@ -1136,6 +1159,13 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         state.timeoutMs = seconds * 1000;
         log(`pair: review time limit: ${was}s -> ${seconds}s\n`);
         replies.push(`review time limit: ${seconds}s (was ${was}s), from the next round, a retry included; a running round keeps its limit.`);
+      }
+      if (limit !== undefined) {
+        const was = state.maxLaunches!;
+        state.maxLaunches = limit;
+        const describe = (value: number): string => value === 0 ? "no limit" : `${value}`;
+        log(`pair: review launch limit: ${describe(was)} -> ${describe(limit)}\n`);
+        replies.push(`review launch limit: ${describe(limit)} (was ${describe(was)}), ${state.launches} used this run; pair wait retries a review the limit stopped.`);
       }
       update();
       recordAuthor((problem) => log(`pair: ${problem}\n`)); // its restart command names the reviewer settings
@@ -1187,10 +1217,13 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   let learned: AuthorRecord["learned"] = session.kind === "new" ? "generated" : session.kind === "resume" ? "resume-arg" : null;
   const recordAuthor = (report: (problem: string) => void) => {
     const selector = (id: string) => options.author === "claude" ? [...session.rest, "--resume", id] : ["resume", id, ...session.rest];
-    const restart = [...options.restartOptions]; // pair reviewer --timeout may have changed the limit
+    let restart = [...options.restartOptions]; // pair reviewer may have changed these since
     const timeout = restart.indexOf("--timeout");
     if (timeout >= 0) restart[timeout + 1] = String(state.timeoutMs! / 1000);
     else if (state.timeoutMs !== DEFAULT_REVIEW_SECONDS * 1000) restart.push("--timeout", String(state.timeoutMs! / 1000));
+    const cap = restart.indexOf("--max-reviews");
+    if (cap >= 0) restart = restart.filter((_, index) => index !== cap && index !== cap + 1);
+    if (state.maxLaunches) restart.push("--max-reviews", String(state.maxLaunches));
     const start = [
       ...restart,
       ...(defaults.model === undefined ? [] : ["--reviewer-model", defaults.model]),
@@ -1298,6 +1331,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           const entry = running.get(event.id);
           if (!entry) return;
           running.delete(event.id);
+          if (entry.pid === undefined) state.launches! -= 1; // never spawned: return the launch it reserved
           const { target } = entry;
           let success = false;
           let error = entry.invalid ?? event.result.error ?? (event.result.code !== 0 ? `reviewer exited ${event.result.code ?? event.result.signal}` : undefined);

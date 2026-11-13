@@ -309,6 +309,12 @@ before startup and on every change; each CLI decides whether it supports the com
 
 `pair reviewer` changes the settings on the live owner, over the control socket, without a restart.
 The time limit (`--timeout`) isn't part of a thread's snapshot: each launch reads the current value.
+The launch limit (`--max-reviews`) is the owner's: it counts every reviewer process it launches this
+run, retries and served worktrees included, and checks the count just before a launch, so a review
+past it is refused without spending anything and keeps its request. A launch is reserved when the
+owner asks the guardian to spawn it, so concurrent rounds can't pass the limit, and returned if the
+spawn fails. It isn't a cost estimate: a
+launch's cost depends on the reviewer. A restart counts from zero.
 A thread takes a snapshot of the settings at its first launch and keeps it for its follow-up rounds
 and retries, so by default a change applies to new threads; the restart command `pair stop` prints
 uses the current ones. `--thread current|ID` changes one thread instead, and only the pending one

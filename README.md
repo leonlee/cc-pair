@@ -181,6 +181,7 @@ Advanced options:
 | `--reviewers N` | 1 (max 8) | Review rounds at once, across all served worktrees; needs `--serve-worktrees` |
 | `--claude PATH`, `--codex PATH` | first on `PATH` | Absolute path to each executable |
 | `--timeout SECONDS` | 1800 (max 86400) | Limit per review round, not counting system sleep; the author has none. `pair reviewer --timeout` changes it later |
+| `--max-reviews N` | 0 (no limit) | Reviewer launches allowed this run, retries and served worktrees included. `pair reviewer --max-reviews` changes it later |
 | `--grace SECONDS` | 2 (max 30) | Wait between termination and forced termination |
 
 ```sh
@@ -303,6 +304,7 @@ pair reviewer --reviewer-model gpt-6.1-sol --reviewer-effort high   # threads op
 pair reviewer --reviewer-effort default                             # back to the CLI's default
 pair reviewer --thread current --reviewer-model gpt-6.1-sol         # the thread whose round failed
 pair reviewer --timeout 3600                                        # each round's limit, from the next one
+pair reviewer --max-reviews 20                                      # reviewer launches allowed this run; 0: none
 ```
 
 A thread keeps the settings of its first round for its follow-up rounds and retries, so a plain
@@ -312,6 +314,11 @@ example after a mistyped model. Its next round starts a new reviewer conversatio
 thread so far. Then tell the author to retry.
 `--timeout` applies to every round from the next one, a failed thread's retry included; a running
 round keeps its limit.
+`--max-reviews` caps the reviewer launches of this `pair start` run, every retry and served
+worktree's round included; `pair status` shows how many are used. Past the limit pair launches
+nothing: the request stays on disk, and the error tells the author to ask you. Raise the limit
+(or remove it with 0), then the author retries with `pair wait`. A restart counts from zero again,
+and the restart command `pair stop` prints keeps the limit.
 
 ## 4. Participants
 
