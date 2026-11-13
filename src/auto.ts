@@ -1,6 +1,6 @@
 import { spawn, fork, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { accessSync, appendFileSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
@@ -450,10 +450,24 @@ async function gitAsync(cwd: string, args: string[]): Promise<string> {
 
 /** Where a worktree's .git points: its own directory, or a linked worktree's "gitdir:" file. No process: the
  * owner checks this on its heartbeat, and a slow git must not stall it past the guardian's watchdog. */
-function resolvedGitDir(root: string): string {
+export function resolvedGitDir(root: string): string {
   const dotGit = join(root, ".git");
   if (lstatSync(dotGit).isDirectory()) return realpathSync(dotGit);
-  const pointer = /^gitdir: (.+)$/m.exec(readFileSync(dotGit, "utf8"));
+  // Never blocks on a FIFO an agent put there: this runs on the owner's heartbeat.
+  const fd = openSync(dotGit, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const limit = 4096;
+  const buffer = Buffer.alloc(limit + 1);
+  let length = 0;
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`${dotGit} isn't a gitdir file`);
+    // Bounded while reading too: the file can grow after fstat.
+    for (let read; length <= limit && (read = readSync(fd, buffer, length, buffer.length - length, null)) > 0;) length += read;
+  } finally {
+    closeSync(fd);
+  }
+  if (length > limit) throw new Error(`${dotGit} isn't a gitdir file: it is larger than ${limit} bytes`);
+  const text = buffer.subarray(0, length).toString("utf8");
+  const pointer = /^gitdir: (.+)$/m.exec(text);
   if (!pointer) throw new Error(`${dotGit} doesn't name a git directory`);
   return realpathSync(resolve(root, pointer[1].trim()));
 }
@@ -992,7 +1006,9 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       : ["--effort", settings.effort];
     const args = reviewer === "codex"
       ? ["--sandbox", "workspace-write", "--add-dir", target.channel, "exec", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, ...options.reviewerArgs, "--json", prompt]
-      : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk", "--allowedTools", ["Read", "Grep", "Glob", ...["pair", bin].flatMap((each) => [`Bash(${each} wait *)`, `Bash(${each} send review *)`, `Bash(${each} history *)`])].join(","), "--", prompt];
+      : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+        // The worktree's own .claude settings could run hooks with the user's permissions before any tool rule applies.
+        "--setting-sources", "user", ...(options.reviewerArgs.includes("--strict-mcp-config") ? [] : ["--strict-mcp-config"]), "--allowedTools", ["Read", "Grep", "Glob", ...["pair", bin].flatMap((each) => [`Bash(${each} wait *)`, `Bash(${each} send review *)`, `Bash(${each} history *)`])].join(","), "--", prompt];
     sendGuardian({ type: "launch", job: { id, executable: paths[reviewer]!, args, cwd: target.root, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: entry.file }, interactive: false, timeoutMs: state.timeoutMs! } satisfies Job });
   };
   // A running child round whose worktree was removed or replaced is stopped, not left to its timeout.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, openSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, openSync, lstatSync, utimesSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createServer } from "node:net";
@@ -329,7 +329,9 @@ test("status diagnoses instructions without writing, and ignores user content ou
   assert.equal(readFileSync(agentsPath, "utf8"), stale, "status does not repair instructions");
   ok(["init"]);
   assert.equal(readFileSync(agentsPath, "utf8"), customized, "init refreshes only the marked section");
-  writeFileSync(skillPath, "old skill\n");
+  writeFileSync(skillPath, "my own skill\n");
+  assert.match(ok(["status"]), /\.claude\/skills\/pair\/SKILL\.md: not written by pair/);
+  writeFileSync(skillPath, "---\nname: pair\ndescription: old\n---\n\nold skill\n");
   const oldSkill = ok(["status"]);
   assert.match(oldSkill, /AGENTS\.md \(pair section\): current/);
   assert.match(oldSkill, /\.claude\/skills\/pair\/SKILL\.md: stale/);
@@ -1363,7 +1365,7 @@ test("upgrade installs only a newer version, then reports just the new init's fi
   assert.deepEqual(current.calls, [view], "nothing to install");
   assert.equal(current.out, `already up to date: claude-codex-pair ${version}\n`);
   const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
-  writeFileSync(skillPath, "old skill\n");
+  writeFileSync(skillPath, "---\nname: pair\ndescription: old\n---\n\nold skill\n");
   if (process.getuid?.() !== 0) {
     chmodSync(skillPath, 0o444);
     const unwritable = upgrade({ NPM_LATEST: version });
@@ -1634,4 +1636,228 @@ test("an unreadable unrelated channel doesn't stop a valid session from listenin
   } finally {
     await server.stop();
   }
+});
+
+const channelOf = (ok) => ok(["status"]).match(/^channel: (.*)$/m)[1];
+
+test("pair writes its instructions only inside the worktree, never through a link that leaves it", (t) => {
+  const { root, ok, run } = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "pair-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const victim = join(outside, "victim.txt");
+  writeFileSync(victim, "precious\n");
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  const agentsPath = join(root, "AGENTS.md");
+  mkdirSync(dirname(skillPath), { recursive: true });
+  symlinkSync(victim, skillPath);
+  symlinkSync(victim, agentsPath);
+  const init = ok(["init"]);
+  assert.match(init, /refused: .*SKILL\.md \(.*outside this worktree\)/);
+  assert.match(init, /refused: .*AGENTS\.md \(.*outside this worktree\)/);
+  assert.match(ok(["status"]), /SKILL\.md: refused: .*outside this worktree\n[^]*replace it with a regular file/);
+  run(["history"]); // refreshes stale instructions
+  assert.match(ok(["uninit"]), /kept: .*SKILL\.md \(.*outside this worktree\)/);
+  assert.equal(readFileSync(victim, "utf8"), "precious\n", "neither written, appended to nor emptied");
+
+  // A linked parent directory leads outside too.
+  rmSync(join(root, ".claude"), { recursive: true });
+  symlinkSync(outside, join(root, ".claude"));
+  assert.match(ok(["init"]), /refused: .*SKILL\.md/);
+  assert.ok(!existsSync(join(outside, "skills")), "nothing created through it");
+  rmSync(join(root, ".claude"));
+
+  // A hard link would copy another file's content in, or out.
+  rmSync(agentsPath);
+  linkSync(victim, agentsPath);
+  assert.match(ok(["init"]), /refused: .*AGENTS\.md \(.*hard link\)/);
+  assert.equal(readFileSync(victim, "utf8"), "precious\n");
+
+  // A link that stays inside the worktree is followed.
+  rmSync(agentsPath);
+  writeFileSync(join(root, "CLAUDE.md"), "# Mine\n");
+  symlinkSync("CLAUDE.md", agentsPath);
+  assert.match(ok(["init"]), /wrote: .*AGENTS\.md \(pair section\)/);
+  assert.ok(lstatSync(agentsPath).isSymbolicLink(), "the link stays a link");
+  assert.match(readFileSync(join(root, "CLAUDE.md"), "utf8"), /^# Mine\n[^]*<!-- pair:start -->/);
+});
+
+test("a FIFO planted in the channel is refused instead of blocking pair", (t) => {
+  const { root, env, ok } = sandbox();
+  ok(["init"]);
+  const channel = channelOf(ok);
+  const fifo = spawnSync("mkfifo", [join(channel, "codex.session")]);
+  if (fifo.status !== 0) return t.skip("mkfifo is unavailable");
+  const status = spawnSync("node", [CLI, "status"], { cwd: root, env, encoding: "utf8", timeout: 10_000 });
+  assert.equal(status.signal, null, "pair status must not hang on the FIFO");
+  assert.match(status.stdout, /codex\.session: it isn't a regular file/);
+});
+
+test("a finished thread is never archived, listed or pruned through a symlink", (t) => {
+  const { ok, run } = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "pair-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  ok(["send", "request", "--as", "claude", "-"], "req");
+  ok(["send", "review", "--as", "codex", "--verdict", "approve", "-"], "Approved");
+  const channel = channelOf(ok);
+  symlinkSync(outside, join(channel, "archive"));
+  const waited = run(["wait", "--as", "claude", "--timeout", "1"]);
+  assert.equal(waited.code, 0, waited.out);
+  assert.match(waited.out, /verdict approve[^]*couldn't archive the finished thread: refusing to use .*archive: it must be a real directory/);
+  assert.deepEqual(readdirSync(outside), [], "the thread stays in the channel");
+  mkdirSync(join(outside, "x-claude-to-codex-approved"));
+  assert.notEqual(run(["clean", "--keep", "0"]).code, 0);
+  assert.ok(existsSync(join(outside, "x-claude-to-codex-approved")), "clean deletes nothing through it");
+});
+
+test("a symlinked lane is refused, and a planted temp file can't redirect a message", (t) => {
+  const { ok, run } = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "pair-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const victim = join(outside, "victim.txt");
+  writeFileSync(victim, "precious\n");
+  ok(["send", "request", "--as", "claude", "-"], "req");
+  const channel = channelOf(ok);
+  const lane = join(channel, "claude-to-codex");
+  const [thread] = readdirSync(lane);
+  symlinkSync(victim, join(lane, thread, ".002-review.md.tmp")); // the name pair once used
+  ok(["send", "review", "--as", "codex", "--verdict", "changes", "-"], "### F1 [low] x");
+  assert.equal(readFileSync(victim, "utf8"), "precious\n");
+
+  symlinkSync(outside, join(channel, "codex-to-claude"));
+  const refused = run(["send", "request", "--as", "codex", "--to", "claude", "-"], "req");
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.out, /refusing to use .*codex-to-claude: it must be a real directory/);
+  assert.deepEqual(readdirSync(outside), ["victim.txt"], "nothing written through the lane");
+});
+
+test("a symlinked channel is refused for every lane, the archive and clean, and --purge only unlinks it", (t) => {
+  const { ok, run } = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "pair-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  ok(["init"]);
+  const channel = channelOf(ok);
+  rmSync(channel, { recursive: true });
+  symlinkSync(outside, channel);
+  mkdirSync(join(outside, "archive", "demo-claude-to-codex-approved"), { recursive: true });
+  writeFileSync(join(outside, "archive", "demo-claude-to-codex-approved", "precious.txt"), "precious\n");
+  const sent = run(["send", "request", "--as", "claude", "-"], "req");
+  assert.notEqual(sent.code, 0);
+  assert.match(sent.out, /refusing to use .*: it must be a real directory/);
+  assert.notEqual(run(["clean", "--keep", "0"]).code, 0);
+  assert.deepEqual(readdirSync(outside), ["archive"], "no lane created through the link");
+  assert.match(ok(["uninit", "--purge"]), /kept: registrations behind .*, a symlink/);
+  assert.ok(!existsSync(channel), "the link itself is removed");
+  assert.equal(readFileSync(join(outside, "archive", "demo-claude-to-codex-approved", "precious.txt"), "utf8"), "precious\n");
+});
+
+test("send refuses a message too large for readers, and the lane keeps working", () => {
+  const { ok, run } = sandbox();
+  const tooLarge = run(["send", "request", "--as", "claude", "-"], "a".repeat(16 * 1024 * 1024));
+  assert.notEqual(tooLarge.code, 0);
+  assert.match(tooLarge.out, /message too large: at most 16777216 bytes with its header/);
+  ok(["send", "request", "--as", "claude", "-"], "req");
+  assert.match(ok(["wait", "--as", "codex", "--timeout", "1"]), /^== pair: request from claude/);
+});
+
+test("a channel file that grows after its size check is still refused past the limit", (t) => {
+  const { root, env, ok } = sandbox();
+  ok(["init"]);
+  const registration = join(channelOf(ok), "codex.session");
+  writeFileSync(registration, `${JSON.stringify({ thread: "01a13922-c08f-79e3-a41f-6780876fd9c5", worktree: realpathSync(root), registeredAt: new Date().toISOString() })}\n`);
+  // Grows the registration right after pair's fstat of it returns, as a concurrent writer could.
+  const hook = join(root, "grow.cjs");
+  writeFileSync(hook, `const fs = require("node:fs");
+const target = fs.statSync(process.env.GROW).ino;
+const fstat = fs.fstatSync;
+let grown = false;
+fs.fstatSync = (fd, ...rest) => {
+  const stats = fstat(fd, ...rest);
+  if (!grown && stats.ino === target) { grown = true; fs.appendFileSync(process.env.GROW, " ".repeat(17 * 1024 * 1024)); }
+  return stats;
+};
+require("node:module").syncBuiltinESMExports();
+`);
+  t.after(() => rmSync(hook, { force: true }));
+  const status = spawnSync("node", ["--require", hook, CLI, "status"], { cwd: root, env: { ...env, GROW: registration }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /codex\.session: it is larger than 16777216 bytes/);
+});
+
+test("a link to a directory inside the worktree whose name starts with two dots is inside", () => {
+  const { root, ok } = sandbox();
+  mkdirSync(join(root, "..notes"));
+  writeFileSync(join(root, "..notes", "instructions.md"), "# Mine\n");
+  symlinkSync(join("..notes", "instructions.md"), join(root, "AGENTS.md"));
+  assert.match(ok(["init"]), /wrote: .*AGENTS\.md \(pair section\)/);
+  assert.match(readFileSync(join(root, "..notes", "instructions.md"), "utf8"), /<!-- pair:start -->/);
+});
+
+test("inside the worktree, pair still never writes git's files, a non-Markdown file, or a SKILL.md it didn't write", () => {
+  const { root, ok, env } = sandbox();
+  mkdirSync(join(root, ".git"));
+  writeFileSync(join(root, ".git", "config"), "[core]\n\tbare = false\n");
+  writeFileSync(join(root, ".env"), "SECRET=1\n");
+  const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
+  mkdirSync(dirname(skillPath), { recursive: true });
+  symlinkSync(join("..", "..", "..", ".env"), skillPath);
+  symlinkSync(join(".git", "config"), join(root, "AGENTS.md"));
+  const init = ok(["init"]);
+  assert.match(init, /refused: .*SKILL\.md \(.*\.env, which isn't a Markdown file\)/);
+  assert.match(init, /refused: .*AGENTS\.md \(.*inside \.git\)/);
+  ok(["history"]); // refreshes stale instructions
+  assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=1\n");
+  assert.equal(readFileSync(join(root, ".git", "config"), "utf8"), "[core]\n\tbare = false\n");
+  // In any case: a case-insensitive file system resolves .GIT to .git and realpath keeps .GIT.
+  writeFileSync(join(root, ".git", "local.md"), "[user]\n");
+  if (!existsSync(join(root, ".GIT", "local.md"))) { // a case-sensitive file system: .GIT is its own directory
+    mkdirSync(join(root, ".GIT"));
+    writeFileSync(join(root, ".GIT", "local.md"), "[user]\n");
+  }
+  rmSync(join(root, "AGENTS.md"));
+  symlinkSync(join(".GIT", "local.md"), join(root, "AGENTS.md"));
+  assert.match(ok(["init"]), /refused: .*AGENTS\.md \(.*inside \.git\)/);
+  assert.equal(readFileSync(join(root, ".git", "local.md"), "utf8"), "[user]\n");
+  assert.equal(readFileSync(join(root, ".GIT", "local.md"), "utf8"), "[user]\n");
+  rmSync(join(root, "AGENTS.md"));
+
+  // A SKILL.md pair didn't write, even a plain file at pair's path, is neither refreshed nor overwritten.
+  rmSync(skillPath);
+  writeFileSync(skillPath, "my own skill\n");
+  assert.match(ok(["init"]), /kept: .*SKILL\.md \(not written by pair; delete it to let pair init write it\)/);
+  ok(["history"]);
+  assert.equal(readFileSync(skillPath, "utf8"), "my own skill\n");
+
+  // A new file gets the umask's mode, as writeFileSync gave it.
+  rmSync(skillPath);
+  const strict = spawnSync("/bin/sh", ["-c", `umask 077 && exec node ${JSON.stringify(CLI)} init`], { cwd: root, env, encoding: "utf8" });
+  assert.equal(strict.status, 0, strict.stderr);
+  assert.equal(lstatSync(skillPath).mode & 0o777, 0o600);
+});
+
+test("uninit notes an instruction path it can't read, such as a link loop, and goes on", () => {
+  const { root, ok } = sandbox();
+  symlinkSync("AGENTS.md", join(root, "AGENTS.md"));
+  assert.match(ok(["uninit"]), /kept: .*AGENTS\.md \(.*ELOOP/);
+});
+
+test("replacing a private instruction file never exposes its content, even briefly", (t) => {
+  const { root, env, ok } = sandbox();
+  ok(["init"]);
+  const agentsPath = join(root, "AGENTS.md");
+  writeFileSync(agentsPath, readFileSync(agentsPath, "utf8").replace("# pair: review loop", "# pair: old review loop"));
+  chmodSync(agentsPath, 0o600);
+  // Records the mode of every file pair writes to, at the moment it writes.
+  const hook = join(root, "modes.cjs");
+  const modes = join(root, "modes.log");
+  writeFileSync(hook, `const fs = require("node:fs");
+const write = fs.writeSync;
+fs.writeSync = (fd, ...rest) => { fs.appendFileSync(${JSON.stringify(modes)}, (fs.fstatSync(fd).mode & 0o777).toString(8) + "\\n"); return write(fd, ...rest); };
+require("node:module").syncBuiltinESMExports();
+`);
+  t.after(() => rmSync(hook, { force: true }));
+  const result = spawnSync("/bin/sh", ["-c", `umask 022 && exec node --require ${JSON.stringify(hook)} ${JSON.stringify(CLI)} init`], { cwd: root, env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /wrote: .*AGENTS\.md \(pair section\)/);
+  assert.deepEqual(readFileSync(modes, "utf8").trim().split("\n"), ["600"], "written while private");
+  assert.equal(lstatSync(agentsPath).mode & 0o777, 0o600, "and keeps its mode");
 });

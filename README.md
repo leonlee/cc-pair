@@ -711,7 +711,9 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
 - **Managed reviewers.** Codex runs with its `workspace-write` sandbox plus channel access; source
   edits are forbidden by its instructions, not by the OS. Claude runs with `dontAsk`, so beyond your
   configured permissions it may only read, search, and run `pair wait`, `pair send review` and
-  `pair history` (to read a spec review a request cites). Pair itself refuses every reviewer command
+  `pair history` (to read a spec review a request cites). It loads only your user settings
+  (`--setting-sources user`) and no MCP servers (`--strict-mcp-config`), so a branch's
+  `.claude/settings.json` can't run hooks or add permissions when a review starts. Pair itself refuses every reviewer command
   except `wait`, `send`, `status` and `history`, and a reviewer never refreshes instruction files.
   These guard against mistakes and casual prompt injection, not a determined agent: the role comes
   from an environment variable, and the Codex sandbox can write the channel.
@@ -729,6 +731,15 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
   control characters escaped and labeled as reviewer output rather than instructions.
 - **MCP server.** `pair mcp` runs outside Codex's sandbox, so it only reads the channel, writes only
   its state directory, and never forwards message text.
+- **Links and special files.** Agents can write the channel and the worktree, and a cloned branch can
+  hold symlinks. Pair reads only regular files there, bounded in size, never through a final symlink
+  and never waiting on a FIFO. It refuses a symlinked channel, lane or archive directory, refuses to
+  send a message larger than readers accept (16 MiB with its header), writes messages
+  through new unguessable temporary files. It reads and writes `AGENTS.md` and `SKILL.md` only
+  inside the worktree and outside `.git`, through a link only to a Markdown file, never through a
+  hard link, and replaces them by rename. It never refreshes or overwrites a `SKILL.md` it didn't
+  write. These close the plain cases; an agent swapping a directory for a link at the right moment
+  is not yet covered.
 - **Processes.** Pair never signals a process by a saved PID or by executable name.
 
 ## Appendix A. Example review
