@@ -98,6 +98,11 @@ Fixes found while testing with the real CLIs:
   archives the final verdict that its managed send was about to print.
 - When the author ends unexpectedly, `pair start` prints the restart command before it stops, and
   `pair status` shows it next to a stale owner socket too.
+- Security: in auto mode each agent may write only its own channel (pair's home for a serving
+  author), so you can drop a user-wide grant to `~/.pair` if you don't use manual mode. `pair init`
+  says how to grant manual sessions one channel each. Control characters in agent-written text are
+  escaped when `pair wait`, `pair history` or `pair status` print to a terminal, and pair start
+  refuses a state path that would break a Claude reviewer's tool rules.
 - A corrupt registration no longer stops others from registering, and when registrations block
   `pair start`, it names each one with `pair unregister --as NAME`.
 

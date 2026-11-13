@@ -92,6 +92,11 @@ writable_roots = ["/Users/you/.pair"]
 "sandbox": { "filesystem": { "allowWrite": ["~/.pair"] } }
 ```
 
+Auto mode needs neither: `pair start` grants each session its own channel (see
+[Security considerations](#11-security-considerations)). The grant above covers every repository's
+channel, so an agent working in one repository could also write another's; to prevent that, grant
+each manual session only its channel, the path `pair init` prints.
+
 The Codex desktop app gives each session its own sandbox and may not apply `writable_roots`. There,
 approve Codex's requests to run pair commands outside the sandbox, or, if the app lets you, give the
 session write access to the channel root.
@@ -746,6 +751,15 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
 - **Claude author socket.** Pair grants a Claude author only this session's control socket, through
   `--settings`; your settings files are unchanged. If managed policy denies it, the request fails
   with the required setting named and stays on disk.
+- **Channel access.** In auto mode each agent may write only its own channel: a Claude author or
+  reviewer through `--settings` (`sandbox.filesystem.allowWrite`), a Codex author or reviewer
+  through `--add-dir`. With `--serve-worktrees` the author's grant is pair's home, since its
+  subagents write their worktrees' channels there. A user-wide grant to all of pair's home, which
+  manual mode needs, would widen this again; auto mode doesn't need it.
+- **Terminal output.** `pair wait`, `pair history` and `pair status` show agent-written control
+  characters escaped when they print to a terminal, so a message can't drive the terminal; so do
+  pair's errors and warnings on a terminal's stderr, which can quote channel data. Piped output,
+  which agents read, is unchanged.
 - **Served worktrees.** With `--serve-worktrees`, the owner reviews a worktree only after checking
   that it is a git worktree of the same repository, that the request carries this run's ID, and
   that the owner can claim its socket. Each round re-checks the worktree's identity. Subagents hold

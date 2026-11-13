@@ -1861,3 +1861,40 @@ require("node:module").syncBuiltinESMExports();
   assert.deepEqual(readFileSync(modes, "utf8").trim().split("\n"), ["600"], "written while private");
   assert.equal(lstatSync(agentsPath).mode & 0o777, 0o600, "and keeps its mode");
 });
+
+test("agent-written control characters reach a terminal escaped, and a pipe unchanged", (t) => {
+  const { root, env, ok } = sandbox();
+  ok(["send", "request", "--as", "claude", "-"], "before\x1b]52;c;cGF5bG9hZA==\x07\x1b[2Jafter\n");
+  const piped = ok(["wait", "--as", "codex", "--timeout", "1"]);
+  assert.ok(piped.includes("before\x1b]52;c;"), "agents read the message as written");
+  const python = `
+import os, pty, subprocess, sys
+master, slave = pty.openpty()
+child = subprocess.Popen(sys.argv[1:], stdout=slave, stderr=slave, cwd=os.environ['TEST_CWD'])
+os.close(slave)
+output = b''
+while True:
+    try: chunk = os.read(master, 65536)
+    except OSError: break
+    if not chunk: break
+    output += chunk
+child.wait()
+sys.stdout.buffer.write(output)
+`;
+  const onTerminal = (...args) => spawnSync("python3", ["-c", python, "node", CLI, ...args], { env: { ...env, TEST_CWD: root }, encoding: "utf8" });
+  const shown = onTerminal("wait", "--as", "codex", "--timeout", "1");
+  if (shown.error) return t.skip("python3 is unavailable");
+  assert.ok(!shown.stdout.includes("\x1b"), "no escape sequence reaches the terminal");
+  assert.match(shown.stdout, /before\\x1b\]52;c;cGF5bG9hZA==\\x07\\x1b\[2Jafter/);
+
+  // An error quoting a corrupt field goes to stderr, and is escaped there too.
+  const lane = join(channelOf(ok), "claude-to-codex");
+  const [thread] = readdirSync(lane);
+  const request = join(lane, thread, readdirSync(join(lane, thread)).find((name) => name.endsWith("-request.md")));
+  writeFileSync(request, readFileSync(request, "utf8").replace(/^round: 1$/m, "round: before\x1b]52;c;cGF5bG9hZA==\x07after"));
+  for (const args of [["status"], ["wait", "--as", "codex", "--timeout", "1"], ["history", thread]]) {
+    const failed = onTerminal(...args);
+    assert.match(failed.stdout, /corrupt message[^]*round must be a positive integer/, args.join(" "));
+    assert.ok(!failed.stdout.includes("\x1b") && !failed.stdout.includes("\x07"), `${args.join(" ")}: no raw control bytes on the terminal`);
+  }
+});

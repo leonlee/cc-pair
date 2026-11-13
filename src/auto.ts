@@ -1132,7 +1132,9 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       ? ["--sandbox", "workspace-write", "--add-dir", target.root, "--add-dir", target.channel, "exec", "--skip-git-repo-check", ...(session ? ["resume", session] : []), ...modelArgs, ...effortArgs, ...options.reviewerArgs, "--json", prompt]
       : [...modelArgs, ...effortArgs, ...options.reviewerArgs, "-p", ...(session ? ["--resume", session] : []), "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
         // The worktree's own .claude settings could run hooks with the user's permissions before any tool rule applies.
-        "--setting-sources", "user", ...(options.reviewerArgs.includes("--strict-mcp-config") ? [] : ["--strict-mcp-config"]), "--allowedTools", ["Read", "Grep", "Glob", ...["pair", bin].flatMap((each) => [`Bash(${each} wait *)`, `Bash(${each} send review *)`, `Bash(${each} history *)`])].join(","), "--", prompt];
+        "--setting-sources", "user", ...(options.reviewerArgs.includes("--strict-mcp-config") ? [] : ["--strict-mcp-config"]),
+        // Write access to this round's channel only: a user-wide grant to all of pair's home isn't needed.
+        "--settings", JSON.stringify({ sandbox: { filesystem: { allowWrite: [target.channel] } } }), "--allowedTools", ["Read", "Grep", "Glob", ...["pair", bin].flatMap((each) => [`Bash(${each} wait *)`, `Bash(${each} send review *)`, `Bash(${each} history *)`])].join(","), "--", prompt];
     // pair finds the reviewer's worktree from PAIR_AUTO_ROOT, since a Codex reviewer's commands start outside it.
     const cwd = entry.startDir ?? target.root;
     sendGuardian({ type: "launch", job: { id, executable: paths[reviewer]!, args, cwd, env: { ...childEnv("reviewer"), PAIR_AUTO_MESSAGE: entry.file, PAIR_AUTO_ROOT: target.root }, interactive: false, timeoutMs: state.timeoutMs! } satisfies Job });
@@ -1281,6 +1283,10 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const signal = () => { authorCode = 130; void shutdown(); };
   let heartbeat: NodeJS.Timeout | undefined;
   try {
+    // A Claude reviewer's tool rules name this path and are joined with commas: these characters would end a rule early.
+    if (reviewer === "claude" && /[,()]/.test(join(runDir, "bin", "pair"))) {
+      throw new Error(`pair start can't run a Claude reviewer from ${runDir}: its path has a comma or a parenthesis, which Claude's tool rules can't hold. Set XDG_STATE_HOME to a path without them, or rename the worktree's directory`);
+    }
     mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
     mkdirSync(join(runDir, "bin"), { recursive: true, mode: 0o700 });
     writeFileSync(join(runDir, "bin", "pair"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(options.entry)} "$@"\n`, { mode: 0o700 });
@@ -1422,6 +1428,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const authorPrompt = `You are the interactive author in pair auto mode, with ${reviewerName} (${reviewer === "claude" ? "Claude Code" : "Codex"}) as your automatically managed reviewer. Your pair name is ${authorName}. The pair CLI is "$PAIR_BIN", which the launcher sets for each run; use it in place of pair in every example below. Follow the pair review rules. After completing a task, feed a Markdown summary, review focus, validation (each command and its result in a line) and file list through stdin to pair send request --as ${authorName} --to ${reviewerName} -. Follow-up replies use pair send response --as ${authorName} --to ${reviewerName} - with the fix/reject explanations on stdin. In this mode both commands return the review inline: read it, verify each finding, fix or reject it, and send a response until approval or escalation. To brainstorm a design with ${reviewerName} before a task, use pair send request --brainstorm: each contribution comes back inline the same way, and you answer with pair send response until ${reviewerName} completes it. If you delegate implementation, tell subagents not to run pair commands and to return their changes and validation results; you own the review loop, integrate their work here (or, for separate PRs, review each branch here in turn), and keep this checkout stable during each review round.${options.serveWorktrees ? ` This session serves subagent worktrees: a subagent working in its own git worktree of this repository runs its own review loop there. Give each such subagent these rules in its task: from your worktree, send requests and responses with "$PAIR_BIN" send request --as ${authorName} --to ${reviewerName} - and "$PAIR_BIN" send response --as ${authorName} --to ${reviewerName} -, each with your tool's background-task facility (in Claude Code, Bash run_in_background: true), never shell &; each returns the review inline, possibly after waiting its turn. Keep your worktree unchanged while a review is queued or running, fix between rounds, and finish the loop. Don't remove the worktree. Report the outcome to the parent: approved, escalated, or the failure as printed. Subagents working in this checkout still return their work without running pair.` : ""} Do not register, call pair_listen, or start idle waits in auto mode. Never append & to a pair command, and don't start a separate pair wait after a managed send: the send already returns the review. Use pair wait only for this retry: ${FAILED_REVIEW_RULE.replaceAll("{{AGENT}}", authorName)} For interactive Claude Code, run managed send and retry commands with run_in_background: true in the Bash tool, end your turn, and read their output on the completion notification. A reviewer can take longer than the foreground Bash timeout; backgrounding the active review command is different from idle polling. Do not start your own reviewer processes. Wait for the user's task.`;
     // The user's options go first; codex gets -- before the prompt so a multi-value option like --image can't take it.
     const authorEnv = childEnv("author");
+    // The author writes its own channel; with --serve-worktrees its subagents write their worktrees' channels, all in pair's home.
+    const channelGrant = options.serveWorktrees ? dirname(options.channel) : options.channel;
     // From a file: on the command line, pair commands in the prompt matched every author for pkill -f "pair wait …".
     const authorPromptFile = join(runDir, "author-prompt.md");
     writeFileSync(authorPromptFile, authorPrompt, { mode: 0o600 });
@@ -1430,7 +1438,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const authorArgs = options.author === "claude"
       ? [
         ...options.authorArgs, ...(options.session.kind === "new" ? ["--session-id", options.session.id] : []),
-        "--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] } } }), "--append-system-prompt-file", authorPromptFile,
+        "--settings", JSON.stringify({ sandbox: { network: { allowUnixSockets: [path] }, filesystem: { allowWrite: [channelGrant] } } }), "--append-system-prompt-file", authorPromptFile,
         // A new user turn on every launch, so a resumed conversation whose recorded instructions name an old run's path,
         // or another pairing, gets the current ones.
         `Act as the pair author described in your system instructions and wait for the user's task. Run pair as "$PAIR_BIN" in this launch; an absolute .../auto-*/bin/pair path from an earlier launch no longer exists. In this launch your pair name is ${authorName} and your reviewer is ${reviewerName}: pass --as ${authorName} --to ${reviewerName}, even if earlier instructions in this conversation named others.`,
@@ -1438,8 +1446,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       // --cd: a resumed Codex session may otherwise switch to the directory it was recorded in, off this channel.
       // The Codex TUI may run its session on Codex's shared app-server daemon, whose commands get the daemon's
       // environment instead of this one; pair's variables also go in as config, which reaches the session's commands.
-      : [...options.authorArgs, "--cd", options.root, ...codexShellEnv(authorEnv), "--", `Before taking any other action, read the instruction file at ${JSON.stringify(authorPromptFile)} and follow its instructions for this launch, which supersede earlier pair launch instructions. If you cannot read it, report that and stop. Then wait for the user's task.`];
-    if (options.author === "claude") console.error(`pair: Claude sandbox.network.allowUnixSockets includes ${path} for this session only`);
+      : [...options.authorArgs, "--cd", options.root, "--add-dir", channelGrant, ...codexShellEnv(authorEnv), "--", `Before taking any other action, read the instruction file at ${JSON.stringify(authorPromptFile)} and follow its instructions for this launch, which supersede earlier pair launch instructions. If you cannot read it, report that and stop. Then wait for the user's task.`];
+    if (options.author === "claude") console.error(`pair: for this session only, Claude's sandbox.network.allowUnixSockets includes ${path} and sandbox.filesystem.allowWrite includes ${channelGrant}`);
     sendGuardian({ type: "launch", job: { id: "author", executable: paths[options.author]!, args: authorArgs, cwd: options.root, env: authorEnv, interactive: true, timeoutMs: 0 } satisfies Job });
     state.phase = "idle";
     update();
