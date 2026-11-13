@@ -167,6 +167,18 @@ with `O_NOFOLLOW`. It runs `PAIR_CODEX`, an absolute path set when the server is
 `codex` from `PATH`, because an agent-writable `PATH` entry would turn the fixed call into
 unsandboxed code execution.
 
+Every pair command reads channel files the same way: `O_NOFOLLOW | O_NONBLOCK`, then `fstat` for a
+regular file of at most 16 MiB, counted while reading as well, so a planted FIFO or a growing file
+can't block or exhaust a server or the auto owner; `send` refuses a message that would exceed it. The
+channel itself, a lane and the archive must be real directories (`pair uninit --purge` only unlinks
+a symlinked channel): renaming a thread through a symlinked one would carry
+agent-written files out of the channel, or pull an outside directory in. A message's temporary file
+has a random name opened with `O_EXCL`. Instruction files are resolved through any links and must
+stay inside the worktree (`AGENTS.md -> CLAUDE.md` is fine), are read only as single-link regular
+files of at most 1 MiB, and are replaced by an exclusive temporary file and a rename. These checks
+don't hold against an agent swapping a parent directory between check and use; that needs pinned
+directories, still to come.
+
 A message is announced once. A failed `codex queue` is retried with backoff up to 60s. If a message
 is still pending 10 minutes after its note, the server logs a stall warning and doesn't announce it
 again: the turn may have failed or been cancelled, may be waiting for an approval, or the review may

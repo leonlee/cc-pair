@@ -252,6 +252,10 @@ for (const author of ["claude", "codex"]) {
       const tools = calls[0].args[calls[0].args.indexOf("--allowedTools") + 1].split(",");
       assert.ok(tools.some((tool) => tool.endsWith(" history *)")), "a Claude reviewer can read a cited spec thread");
       assert.ok(!tools.some((tool) => / (send request|send response|reset|clean|stop|reviewer)/.test(tool)), tools.join(","));
+      for (const { args } of calls) {
+        assert.equal(args[args.indexOf("--setting-sources") + 1], "user", "the worktree's own .claude settings can't run hooks in the reviewer");
+        assert.ok(args.includes("--strict-mcp-config"), "nor start its MCP servers");
+      }
     }
     const resume = author === "claude" ? "resume" : "--resume";
     assert.ok(calls[1].args.includes(resume));

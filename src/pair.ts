@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { execFile, execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, type Dirent, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, type Dirent, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -140,8 +140,10 @@ function channelError(channel: string, error: unknown): unknown {
   return error;
 }
 
-function channelAccess<T>(channel: string, operation: () => T): T {
+/** `checked`: the channel itself must be a real directory, so a link there can't send every lane and the archive elsewhere. */
+function channelAccess<T>(channel: string, operation: () => T, checked = true): T {
   try {
+    if (checked) realDirectory(channel);
     return operation();
   } catch (error) {
     throw channelError(channel, error);
@@ -209,7 +211,9 @@ function readdirOrEmpty(path: string): Dirent[] {
 
 /** Each thread gets a fresh directory, so a stale archive can never move a newer thread. */
 function currentThreadDir(thread: Thread): string | undefined {
-  const entries = readdirOrEmpty(thread.lane);
+  // A symlinked lane, or channel, would let pair read, write and archive outside the channel.
+  realDirectory(dirname(thread.lane));
+  const entries = readdirOrEmpty(realDirectory(thread.lane));
   const legacy = entries.find((entry) => entry.isFile() && MESSAGE_FILE.test(entry.name));
   if (legacy) {
     throw new PairError(
@@ -344,8 +348,8 @@ function openWorktree(root: string, plan: WorktreePlan): string {
 
 /** Whether the agents in root lack pair's instructions; a new branch has only what was committed. */
 function needsInit(root: string): boolean {
-  return instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()) === "missing"
-    || instructionState(join(root, "AGENTS.md"), codexSection(), true) === "missing";
+  return instructionState(root, join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()) === "missing"
+    || instructionState(root, join(root, "AGENTS.md"), codexSection(), true) === "missing";
 }
 
 /** Enter or y accepts; anything else, Ctrl-C or end of input cancels. Releases stdin before the author takes the terminal. */
@@ -485,8 +489,11 @@ function prune(channel: string, keep: number): number {
 
 function archive(channel: string, last: Message): void {
   const dir = dirname(last.file);
-  const archiveDir = join(channel, "archive");
-  mkdirSync(archiveDir, { recursive: true });
+  // Never through a symlink: renaming a thread through one would carry its files out of the channel.
+  realDirectory(channel);
+  const archiveDir = realDirectory(join(channel, "archive"));
+  try { mkdirSync(archiveDir); } catch (error) { if (!hasCode(error, "EEXIST")) throw error; }
+  realDirectory(archiveDir); // in case one appeared since
   try {
     renameSync(dir, join(archiveDir, `${basename(dir)}-${basename(dirname(dir))}-${last.status}`));
   } catch (error) {
@@ -510,7 +517,8 @@ function archive(channel: string, last: Message): void {
 }
 
 function writeMessage(dir: string, seq: number, message: Omit<Message, "file" | "body">, body: string): string {
-  mkdirSync(dir, { recursive: true });
+  realDirectory(dirname(dirname(dir))); // the channel
+  realDirectory(dirname(dir)); // the lane
   const name = `${String(seq).padStart(3, "0")}-${message.type}.md`;
   const lines = [
     "---",
@@ -524,9 +532,14 @@ function writeMessage(dir: string, seq: number, message: Omit<Message, "file" | 
     body.trimEnd(),
     "",
   ];
+  // Every reader refuses a larger file, so it is never written: the lane would be stuck on it.
+  const text = lines.join("\n");
+  if (Buffer.byteLength(text) > MAX_CHANNEL_FILE_BYTES) throw new PairError(`message too large: at most ${MAX_CHANNEL_FILE_BYTES} bytes with its header`);
+  mkdirSync(dir, { recursive: true });
   const finalPath = join(dir, name);
-  const tmpPath = join(dir, `.${name}.tmp`);
-  writeFileSync(tmpPath, lines.join("\n"));
+  // A new, unguessable name: one planted in the channel can't redirect the write.
+  const tmpPath = join(dir, `.${name}.${randomBytes(6).toString("hex")}.tmp`);
+  writeChannelFile(tmpPath, text, constants.O_EXCL);
   renameSync(tmpPath, finalPath); // atomic: readers never see a half-written message
   return finalPath;
 }
@@ -745,13 +758,45 @@ function openChannelFile(path: string, flags: number): number {
   }
 }
 
-function readChannelFile(path: string): string {
-  const fd = openChannelFile(path, constants.O_RDONLY);
+const MAX_CHANNEL_FILE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A regular file's text. Never through a final symlink, never blocked on a FIFO (agents can plant one), and
+ * bounded. `single` also refuses a hard link, whose content may be a file the agent couldn't read itself.
+ */
+function readRegularFile(path: string, { max = MAX_CHANNEL_FILE_BYTES, single = false } = {}): string {
+  const fd = openChannelFile(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
-    return readFileSync(fd, "utf8");
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) throw new PairError(`refusing to read ${path}: it isn't a regular file`);
+    if (stats.size > max) throw new PairError(`refusing to read ${path}: it is larger than ${max} bytes`);
+    if (single && stats.nlink > 1) throw new PairError(`refusing to read ${path}: it is a hard link`);
+    // Bounded while reading too: the file can grow after fstat.
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const chunk = Buffer.alloc(64 * 1024);
+      const read = readSync(fd, chunk, 0, chunk.length, null);
+      if (read === 0) break;
+      total += read;
+      if (total > max) throw new PairError(`refusing to read ${path}: it is larger than ${max} bytes`);
+      chunks.push(chunk.subarray(0, read));
+    }
+    return Buffer.concat(chunks).toString("utf8");
   } finally {
     closeSync(fd);
   }
+}
+
+function readChannelFile(path: string): string {
+  return readRegularFile(path);
+}
+
+/** Refuses a symlink or a file where pair keeps a directory; an absent one is fine. */
+function realDirectory(path: string): string {
+  const stats = lstatSync(path, { throwIfNoEntry: false });
+  if (stats && !stats.isDirectory()) throw new PairError(`refusing to use ${path}: it must be a real directory, not a symlink or a file`);
+  return path;
 }
 
 function writeChannelFile(path: string, text: string, flags: number): void {
@@ -859,7 +904,7 @@ function register(channel: string, root: string, name: Agent): string {
   if (name !== "codex") sessionsDir(channel); // created as a real directory, or refused
   const registration: Registration = { thread, worktree: root, registeredAt: new Date().toISOString() };
   const tmpPath = join(dirname(path), `.${basename(path)}.${randomBytes(3).toString("hex")}.tmp`);
-  writeFileSync(tmpPath, `${JSON.stringify(registration)}\n`);
+  writeChannelFile(tmpPath, `${JSON.stringify(registration)}\n`, constants.O_EXCL);
   renameSync(tmpPath, path);
   const replaced = previous && previous.thread !== thread ? ` (replaced ${previous.thread})` : "";
   const as = name === "codex" ? "" : ` as ${name}`;
@@ -1459,9 +1504,54 @@ function openState(thread: Thread, messages: Message[]): string {
   return `${kind}${state.kind} (round ${state.last.round}, ${turn}'s turn)`;
 }
 
-function instructionState(path: string, expected: string, sectionOnly = false): string {
+const MAX_INSTRUCTION_BYTES = 1024 * 1024;
+
+/**
+ * Where an instruction file really is, through any symlinks, which must stay inside the worktree: a cloned
+ * branch or an agent could otherwise point pair's writes at any file the user can write. A link within the
+ * worktree, such as AGENTS.md -> CLAUDE.md, is fine. Not proof against an agent swapping paths meanwhile.
+ */
+function instructionPath(root: string, path: string): string {
+  const missing: string[] = [];
+  let at = path;
+  let real: string;
+  for (;;) {
+    try {
+      real = join(realpathSync(at), ...missing);
+      break;
+    } catch (error) {
+      if (!isMissing(error) || dirname(at) === at) throw error;
+      missing.unshift(basename(at));
+      at = dirname(at);
+    }
+  }
+  const inside = relative(realpathSync(root), real);
+  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+    throw new PairError(`${path} leads to ${real}, outside this worktree`);
+  }
+  return real;
+}
+
+function readInstruction(root: string, path: string): string {
+  return readRegularFile(instructionPath(root, path), { max: MAX_INSTRUCTION_BYTES, single: true });
+}
+
+/** A new file renamed over the old: never written through a link, and a hard link's other name keeps its content. */
+function writeInstruction(root: string, path: string, text: string): void {
+  if (Buffer.byteLength(text) > MAX_INSTRUCTION_BYTES) throw new PairError(`${path} would be larger than ${MAX_INSTRUCTION_BYTES} bytes, which pair refuses to read`);
+  const real = instructionPath(root, path);
+  mkdirSync(dirname(real), { recursive: true });
+  const mode = lstatSync(real, { throwIfNoEntry: false })?.mode;
+  if (mode !== undefined) accessSync(real, constants.W_OK); // a read-only file stays unwritten, as before
+  const tmpPath = join(dirname(real), `.${basename(real)}.${randomBytes(6).toString("hex")}.tmp`);
+  writeChannelFile(tmpPath, text, constants.O_EXCL);
+  chmodSync(tmpPath, mode === undefined ? 0o644 : mode & 0o777);
+  renameSync(tmpPath, real);
+}
+
+function instructionState(root: string, path: string, expected: string, sectionOnly = false): string {
   try {
-    const text = readFileSync(path, "utf8");
+    const text = readInstruction(root, path);
     const actual = sectionOnly ? PAIR_SECTION.exec(text)?.[0] : text;
     if (actual === undefined) {
       return "missing"; // AGENTS.md exists but has no complete pair section
@@ -1475,6 +1565,7 @@ function instructionState(path: string, expected: string, sectionOnly = false): 
     if (isMissing(error)) {
       return "missing";
     }
+    if (error instanceof PairError) return `refused: ${error.message}`;
     const reason = error instanceof Error && "code" in error ? String(error.code) : String(error);
     return `unreadable (${reason})`;
   }
@@ -1518,8 +1609,8 @@ function status(channel: string, root: string, served = false): string {
     const others = lanesOf(channel).filter((thread) => !defaults.some((each) => each.lane === thread.lane));
     return [...defaults, ...others].map(describe);
   });
-  const agents = instructionState(join(root, "AGENTS.md"), codexSection(), true);
-  const skill = instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill());
+  const agents = instructionState(root, join(root, "AGENTS.md"), codexSection(), true);
+  const skill = instructionState(root, join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill());
   return [
     `channel: ${channel}`,
     `worktree: ${root}`,
@@ -1535,6 +1626,8 @@ function status(channel: string, root: string, served = false): string {
         ? ["Run `pair init` to refresh missing or stale instructions, then reload agent sessions."] : []),
     ...(agents.startsWith("unreadable") || skill.startsWith("unreadable")
       ? ["Check permissions on the unreadable instruction paths before refreshing them."] : []),
+    ...(agents.startsWith("refused") || skill.startsWith("refused")
+      ? ["pair reads and writes its instructions only as regular files inside this worktree: replace a refused path with one."] : []),
     ...(agents.startsWith("newer") || skill.startsWith("newer")
       ? ["A newer pair wrote these instructions: run `pair upgrade` in your own terminal."] : []),
   ].join("\n");
@@ -1559,12 +1652,12 @@ function refreshStale(root: string): string[] {
   const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
   const agentsPath = join(root, "AGENTS.md");
   const refreshed: string[] = [];
-  if (instructionState(skillPath, claudeSkill()) === "stale") {
-    writeFileSync(skillPath, claudeSkill());
+  if (instructionState(root, skillPath, claudeSkill()) === "stale") {
+    writeInstruction(root, skillPath, claudeSkill());
     refreshed.push(skillPath);
   }
-  if (instructionState(agentsPath, codexSection(), true) === "stale") {
-    writeFileSync(agentsPath, readFileSync(agentsPath, "utf8").replace(PAIR_SECTION, () => codexSection()));
+  if (instructionState(root, agentsPath, codexSection(), true) === "stale") {
+    writeInstruction(root, agentsPath, readInstruction(root, agentsPath).replace(PAIR_SECTION, () => codexSection()));
     refreshed.push(`${agentsPath} (pair section)`);
   }
   return refreshed;
@@ -1649,8 +1742,8 @@ function upgrade(root: string): number {
     return install.status ?? 1;
   }
   const states = [
-    instructionState(join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()),
-    instructionState(join(root, "AGENTS.md"), codexSection(), true),
+    instructionState(root, join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()),
+    instructionState(root, join(root, "AGENTS.md"), codexSection(), true),
   ];
   if (states.some((state) => state !== "missing")) {
     // The package just installed, not whatever `pair` comes first on PATH, which may be an older copy.
@@ -1664,7 +1757,7 @@ function upgrade(root: string): number {
       throw new PairError(`installed, but the new \`pair init\` failed${init.error ? `: ${init.error.message}` : ""}; run it yourself`);
     }
     // Only what it did to the files: the sandbox and `codex mcp add` setup it also prints is already done.
-    console.log(init.stdout.split("\n").filter((line) => /^(?:wrote|kept): /.test(line)).join("\n"));
+    console.log(init.stdout.split("\n").filter((line) => /^(?:wrote|kept|refused): /.test(line)).join("\n"));
   }
   console.log(
     `upgraded: ${PACKAGE.name} ${PACKAGE.version} → ${latest ?? "latest"}. Restart Claude Code and Codex sessions to load it; other worktrees refresh on their next pair send or wait.`,
@@ -1684,7 +1777,8 @@ interface ArchivedThread {
 
 /** Finished threads, most recently finished first. Entries that aren't archived threads are ignored. */
 function listArchived(channel: string): ArchivedThread[] {
-  const archiveDir = join(channel, "archive");
+  realDirectory(channel);
+  const archiveDir = realDirectory(join(channel, "archive")); // prune deletes what this lists
   return readdirOrEmpty(archiveDir)
     .filter((entry) => entry.isDirectory())
     .flatMap((entry): ArchivedThread[] => {
@@ -1916,24 +2010,30 @@ function init(channel: string, root: string): string {
   const done: string[] = [];
   const skillDir = join(root, ".claude", "skills", "pair");
   const skillPath = join(skillDir, "SKILL.md");
-  const skillKept = kept(instructionState(skillPath, claudeSkill()));
+  const skillState = instructionState(root, skillPath, claudeSkill());
+  const skillKept = kept(skillState);
   if (skillKept) {
     done.push(`kept: ${skillPath}${skillKept}`);
+  } else if (skillState.startsWith("refused")) {
+    done.push(`refused: ${skillPath} (${skillState.slice("refused: ".length)})`);
   } else {
-    mkdirSync(skillDir, { recursive: true });
-    writeFileSync(skillPath, claudeSkill());
+    writeInstruction(root, skillPath, claudeSkill());
     done.push(`wrote: ${skillPath}`);
   }
 
   const agentsPath = join(root, "AGENTS.md");
   const section = codexSection();
-  const agentsKept = kept(instructionState(agentsPath, section, true));
+  const agentsState = instructionState(root, agentsPath, section, true);
+  const agentsKept = kept(agentsState);
   if (agentsKept) {
     done.push(`kept: ${agentsPath} (pair section)${agentsKept}`);
+  } else if (agentsState.startsWith("refused")) {
+    done.push(`refused: ${agentsPath} (${agentsState.slice("refused: ".length)})`);
   } else {
-    const existing = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
+    let existing = "";
+    try { existing = readInstruction(root, agentsPath); } catch (error) { if (!isMissing(error)) throw error; }
     const updated = PAIR_SECTION.test(existing) ? existing.replace(PAIR_SECTION, () => section) : `${existing}${existing ? "\n" : ""}${section}`;
-    writeFileSync(agentsPath, updated);
+    writeInstruction(root, agentsPath, updated);
     done.push(`wrote: ${agentsPath} (pair section)`);
   }
 
@@ -2001,8 +2101,17 @@ function uninit(channel: string, root: string, purge: boolean): string {
 
   const skillDir = join(root, ".claude", "skills", "pair");
   const skillPath = join(skillDir, "SKILL.md");
-  if (existsSync(skillPath)) {
-    const skill = readFileSync(skillPath, "utf8");
+  // Read like init writes: a path leading outside the worktree, or not a regular file, is left alone.
+  const readOrNote = (path: string): string | undefined => {
+    try { return readInstruction(root, path); }
+    catch (error) {
+      if (isMissing(error)) return undefined;
+      if (error instanceof PairError) { notes.push(`kept: ${path} (${error.message})`); return undefined; }
+      throw error;
+    }
+  };
+  const skill = readOrNote(skillPath);
+  if (skill !== undefined) {
     if (unstamped(skill) === unstamped(claudeSkill()) || RELEASED_SKILL_SHA256.includes(createHash("sha256").update(skill).digest("hex"))) {
       rmSync(skillPath);
       removed.push(skillPath);
@@ -2020,19 +2129,22 @@ function uninit(channel: string, root: string, purge: boolean): string {
   }
 
   const agentsPath = join(root, "AGENTS.md");
-  const agents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "";
+  const agents = readOrNote(agentsPath) ?? "";
   if (PAIR_SECTION.test(agents)) {
     const rest = withoutAppendedSection(agents).replace(PAIR_SECTIONS, "");
     if (rest.trim() === "") {
       rmSync(agentsPath);
       removed.push(`${agentsPath} (it held only the pair section)`);
     } else {
-      writeFileSync(agentsPath, rest);
+      writeInstruction(root, agentsPath, rest);
       removed.push(`the pair section of ${agentsPath}`);
     }
   }
 
-  const registrations = channelAccess(channel, () => registeredNamesTolerant(channel, (error) => notes.push(`kept: ${errorMessage(error)}; remove it by hand`)));
+  // A symlinked channel is never entered, only unlinked by --purge.
+  const linked = lstatSync(channel, { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
+  if (linked) notes.push(`kept: registrations behind ${channel}, a symlink; pair doesn't follow it`);
+  const registrations = linked ? [] : channelAccess(channel, () => registeredNamesTolerant(channel, (error) => notes.push(`kept: ${errorMessage(error)}; remove it by hand`)));
   if (registrations.length > 0) {
     channelAccess(channel, () => { for (const name of registrations) rmSync(registrationPath(channel, name), { force: true }); });
     removed.push(registrations.length === 1 ? "the codex session registration, so pair stops notifying it" : `the ${registrations.length} codex session registrations, so pair stops notifying them`);
@@ -2043,7 +2155,7 @@ function uninit(channel: string, root: string, purge: boolean): string {
     try { lstatSync(dir); return true; } catch { return false; }
   });
   if (purge) {
-    channelAccess(channel, () => { for (const dir of history) rmSync(dir, { recursive: true, force: true }); });
+    channelAccess(channel, () => { for (const dir of history) rmSync(dir, { recursive: true, force: true }); }, false); // unlinks a link itself
     removed.push(...history.map((dir) => dir === channel ? `${dir} (the channel: message history)` : `${dir} (auto mode's state: the resume record and log)`));
   } else if (history.length > 0) {
     notes.push(`kept: message history. To delete it: pair uninit --purge, or rm -rf ${history.map(shellQuote).join(" ")}`);
