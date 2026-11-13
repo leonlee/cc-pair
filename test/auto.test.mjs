@@ -131,10 +131,11 @@ if (reviewer) {
     if (process.env.TEST_WORKER === 'leaky') process.exit(0);
   }
 } else {
-  write('author.args.json', JSON.stringify(process.argv.slice(2)));
+  // Before author.args.json, which tests wait for.
   const promptFlag = process.argv.indexOf('--append-system-prompt-file');
   const promptFile = promptFlag >= 0 ? process.argv[promptFlag + 1] : process.env.PAIR_AUTO_PROMPT_FILE;
   if (promptFile) write('author.prompt', readFileSync(promptFile, 'utf8'));
+  write('author.args.json', JSON.stringify(process.argv.slice(2)));
   write('author.env.json', JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith('PAIR_')))));
   if (process.env.TEST_AUTHOR_SESSION) process.env[cli === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'] = process.env.TEST_AUTHOR_SESSION;
   write('author.cwd', process.cwd());
