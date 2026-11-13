@@ -16,8 +16,8 @@ history and registrations work as they are.
 - **Shorter `pair help start`**: everyday options first, the rest under advanced options, with the
   details in the README.
 - **Guided `pair start`.** In a terminal, `pair start` without a CLI asks whether to resume the
-  recorded conversation (first, and only when there is one; resuming reuses that session's settings
-  and asks nothing else), then
+  recorded conversation (first, and only when there is one; Enter resumes it, and resuming reuses
+  that session's settings and asks nothing else), then
   for the CLIs, where to run, and the reviewer's model and effort. The model menu lists Claude's
   aliases or the models in Codex's own picker, and any other model ID can be typed; one that Codex
   doesn't list for your account asks for confirmation. For a Codex model, the effort menu lists

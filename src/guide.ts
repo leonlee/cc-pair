@@ -68,7 +68,7 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
     if (found.record.start) return found.record.start;
     author = found.cli;
   } else if (found) {
-    const resume = await yesNo(prompter, `Resume the ${found.cli} conversation ${found.record.id} (recorded ${found.record.at})? [y/N] `);
+    const resume = await yesNo(prompter, `Resume the ${found.cli} conversation ${found.record.id} (recorded ${found.record.at})? [Y/n] `, true);
     if (resume === undefined) return undefined;
     if (resume) {
       if (found.record.start) return [...found.record.start, "--resume"];
@@ -93,7 +93,7 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
     const record = worktree ? facts.recorded(author, worktree) : undefined;
     if (worktree) flags.push("--worktree", worktree);
     if (record) {
-      const resume = await yesNo(prompter, `Resume the ${author} conversation ${record.id} (recorded ${record.at})? [y/N] `);
+      const resume = await yesNo(prompter, `Resume the ${author} conversation ${record.id} (recorded ${record.at})? [Y/n] `, true);
       if (resume === undefined) return undefined;
       if (resume) flags.push("--resume");
     }
@@ -173,12 +173,14 @@ function reason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function yesNo(prompter: Prompter, question: string): Promise<boolean | undefined> {
+/** Enter takes `byDefault`, which the question's [Y/n] or [y/N] shows. */
+async function yesNo(prompter: Prompter, question: string, byDefault = false): Promise<boolean | undefined> {
   for (;;) {
     const answer = await prompter.ask(question);
     if (answer === undefined) return undefined;
     const text = answer.trim().toLowerCase();
-    if (text === "" || text === "n" || text === "no") return false;
+    if (text === "") return byDefault;
+    if (text === "n" || text === "no") return false;
     if (text === "y" || text === "yes") return true;
     prompter.say("Answer y or n.");
   }

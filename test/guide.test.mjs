@@ -50,15 +50,15 @@ test("guided start: every choice, answered by name or number, becomes its option
   const s = scripted(["codex", "2", "feat", "y", "gpt-x", "high"]);
   assert.deepEqual(await guideStart(s.prompter, facts({ recorded }), none),
     ["codex", "codex", "--worktree", "feat", "--resume", "--reviewer-model", "gpt-x", "--reviewer-effort", "high"]);
-  assert.match(s.log[3], /Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[y\/N\]/);
+  assert.match(s.log[3], /Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[Y\/n\]/);
 });
 
 test("guided start: a recorded conversation is offered first, and resuming it names the author's CLI and checkout", async () => {
   const record = { id: "11111111-1111-4111-8111-111111111111", at: "2026-11-10T00:00:00.000Z" };
   const recorded = (cli, worktree) => cli === "codex" && worktree === undefined ? record : undefined;
-  const yes = scripted(["y", "", "", ""]);
-  assert.deepEqual(await guideStart(yes.prompter, facts({ recorded }), none), ["codex", "--resume"]);
-  assert.match(yes.log[0], /^\? Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[y\/N\] $/);
+  const yes = scripted(["", "", "", ""]);
+  assert.deepEqual(await guideStart(yes.prompter, facts({ recorded }), none), ["codex", "--resume"], "Enter resumes");
+  assert.match(yes.log[0], /^\? Resume the codex conversation 11111111-1111-4111-8111-111111111111 \(recorded 2026-11-10T00:00:00.000Z\)\? \[Y\/n\] $/);
   assert.match(yes.log[1], /Reviewer CLI: .* \[claude\]/, "no author or location question");
   assert.equal(yes.asked(), 4);
   // Declined: the usual questions, without offering the same conversation again.
@@ -171,7 +171,7 @@ test("guided start: the command line's choices are kept and their questions skip
 
 test("guided start: cancelling at any question stops at once", async () => {
   const recorded = () => ({ id: "11111111-1111-4111-8111-111111111111", at: "x" });
-  const answers = ["", "1", "", "", "", ""]; // resume, author, reviewer, where, model, effort
+  const answers = ["n", "1", "", "", "", ""]; // resume, author, reviewer, where, model, effort
   for (let at = 0; at < answers.length; at++) {
     const s = scripted(answers.slice(0, at));
     assert.equal(await guideStart(s.prompter, facts({ recorded }), none), undefined, `cancelled at question ${at + 1}`);
