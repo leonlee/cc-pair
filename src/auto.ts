@@ -1338,7 +1338,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             ? `A retry is unlikely to help: ${advice.why}. Don't retry with pair wait; ask the user, who can change the request, the reviewer's model (pair reviewer --thread current) or the reviewer's account first`
             : `${retry[0].toUpperCase()}${retry.slice(1)}${limit}`;
           if (target === rootTarget) {
-            state.lastRound = { thread: entry.thread, ...(success ? { verdict: options.verdict?.(target.channel, entry.file) ?? "sent" } : { failed: advice!.kind }), queuedAt: entry.queuedAt, launchedAt: entry.launchedAt, finishedAt: Date.now() };
+            let verdict = "sent"; // status detail only: a lane that can't be read here must not stop the owner
+            if (success) {
+              try { verdict = options.verdict?.(target.channel, entry.file) ?? verdict; } catch { /* keep "sent" */ }
+            }
+            state.lastRound = { thread: entry.thread, ...(success ? { verdict } : { failed: advice!.kind }), queuedAt: entry.queuedAt, launchedAt: entry.launchedAt, finishedAt: Date.now() };
             delete state.round;
             if (process.env.PAIR_BELL) ringBell(); // opt-in: a round finished
           }
