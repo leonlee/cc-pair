@@ -272,6 +272,7 @@ for (const author of ["claude", "codex"]) {
         assert.equal(args[args.indexOf("--setting-sources") + 1], "user", "the worktree's own .claude settings can't run hooks in the reviewer");
         assert.ok(args.includes("--strict-mcp-config"), "nor start its MCP servers");
         assert.match(args.at(-1), /Read the worktree's CLAUDE\.md first, if it has one/, "the project's conventions still reach it");
+        assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1]), { sandbox: { filesystem: { allowWrite: [join(f.env.PAIR_HOME, channelName(realpathSync(f.root)))] } } }, "a Claude reviewer may write its round's channel only");
       }
     }
     const resume = author === "claude" ? "resume" : "--resume";
@@ -1092,6 +1093,7 @@ test("Claude author gets one canonical socket allow rule and persistent instruct
   await until(() => existsSync(f.file("author.args.json")), "author started");
   const args = JSON.parse(f.read("author.args.json"));
   const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+  assert.deepEqual(settings.sandbox.filesystem.allowWrite, [join(f.env.PAIR_HOME, channelName(realpathSync(f.root)))], "write access to its own channel only");
   const allowed = settings.sandbox.network.allowUnixSockets;
   assert.equal(allowed.length, 1);
   assert.equal(allowed[0], join(realpathSync(f.socketDir), readdirSync(f.socketDir)[0]));
@@ -1184,7 +1186,8 @@ test("a codex author resumes by ID, and pair stop can resume it again", { timeou
   assert.deepEqual(args.slice(0, 6), ["resume", id, "-m", "fixture-model", "--cd", realpathSync(f.root)], "--cd keeps a resumed session in this worktree");
   assert.equal(args.at(-2), "--", "the prompt is its new message");
   // A session on Codex's shared app-server daemon doesn't get the author's environment: pair's variables also go in as config.
-  const config = Object.fromEntries(args.slice(6, -2).map((arg, i, all) => i % 2 ? [] : (assert.equal(arg, "-c"), all[i + 1].split(/=(.*)/s).slice(0, 2))).filter((pair) => pair.length));
+  assert.deepEqual(args.slice(6, 8), ["--add-dir", join(f.env.PAIR_HOME, channelName(realpathSync(f.root)))], "write access to its own channel only");
+  const config = Object.fromEntries(args.slice(8, -2).map((arg, i, all) => i % 2 ? [] : (assert.equal(arg, "-c"), all[i + 1].split(/=(.*)/s).slice(0, 2))).filter((pair) => pair.length));
   const env = JSON.parse(f.read("author.env.json"));
   for (const name of ["PAIR_AGENT", "PAIR_PARTNER", "PAIR_AUTO_ROLE", "PAIR_AUTO_RUN", "PAIR_AUTO_OWNER", "PAIR_BIN", "PAIR_HOME"]) {
     assert.equal(config[`shell_environment_policy.set.${name}`], JSON.stringify(env[name]), name);
@@ -1553,6 +1556,8 @@ test("--serve-worktrees: a subagent's loop runs through the root's owner, writes
   assert.equal(call.env.owner, null, "a reviewer's commands act only on its own worktree");
   assert.match(call.args.at(-1), /## Review for your partner[\s\S]*Managed round: the pair CLI is/, "the rules come with the prompt");
   assert.equal(readFileSync(join(c1, "AGENTS.md"), "utf8"), stale, "no refresh in a served worktree");
+  const authorArgs = JSON.parse(f.read("author.args.json"));
+  assert.deepEqual(JSON.parse(authorArgs[authorArgs.indexOf("--settings") + 1]).sandbox.filesystem.allowWrite, [f.env.PAIR_HOME], "a serving author's subagents write their own worktrees' channels in pair's home");
   assert.ok(!existsSync(join(c1, ".claude")), "no pair init there");
   assert.equal(JSON.parse(readFileSync(join(owner, "author.json"), "utf8")).session, recorded, "the root's resume record is its own");
 
@@ -2028,4 +2033,12 @@ test("a Codex reviewer isn't launched where a .codex on its start directory's pa
   assert.notEqual(sent.code, 0);
   assert.match(sent.out, /pair can't start the Codex reviewer: .*\.codex is on its start directory's path/);
   assert.equal(reviewerCalls(g).length, 0, "no reviewer was launched for the child either");
+});
+
+test("a Claude reviewer isn't started from a path its tool rules can't hold", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t, { author: "codex", scenario: "hold", setup: ({ root, env }) => { env.XDG_STATE_HOME = join(root, "st(a),b"); } });
+  const { code } = await f.completed;
+  assert.notEqual(code, 0);
+  assert.match(f.output(), /pair start can't run a Claude reviewer from .*st\(a\),b.*: its path has a comma or a parenthesis/);
+  assert.ok(!existsSync(f.file("author.pid")), "nothing was started");
 });

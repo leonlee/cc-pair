@@ -114,7 +114,8 @@ function isMissing(error: unknown): boolean {
 function sandboxConfig(channel: string): string {
   const pairHome = JSON.stringify(dirname(channel));
   return [
-    "Both agents need read and write access to the channel. Sandbox configuration:",
+    "Both agents need read and write access to the channel. Auto mode (pair start) grants each session its",
+    "own channel; manual mode needs a grant in each agent's sandbox configuration:",
     "",
     "  ~/.codex/config.toml",
     "    [sandbox_workspace_write]",
@@ -122,6 +123,9 @@ function sandboxConfig(channel: string): string {
     "",
     "  ~/.claude/settings.json",
     `    "sandbox": { "filesystem": { "allowWrite": [${pairHome}] } }`,
+    "",
+    `That covers every repository's channel. To keep an agent in one repository from writing another's, grant`,
+    `only this channel instead: ${JSON.stringify(channel)}`,
   ].join("\n");
 }
 
@@ -157,6 +161,15 @@ function launchLimit(value: string): number {
     throw new PairError(`--max-reviews must be a whole number from 0 (no limit) to ${MAX_REVIEW_LAUNCHES} (got "${value}")`);
   }
   return parsed;
+}
+
+/**
+ * Agent-written text for a terminal: control characters other than newline and tab are shown escaped, so a message
+ * can't move the cursor, retitle the window or write the clipboard. Piped output, which agents read, is unchanged.
+ * Each stream is judged on its own: stdout may be piped while stderr is a terminal.
+ */
+function forTerminal(text: string, stream: NodeJS.WriteStream = process.stdout): string {
+  return stream.isTTY ? text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (char) => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`) : text;
 }
 
 function positiveNumber(value: string, what: string): number {
@@ -524,7 +537,7 @@ function archive(channel: string, last: Message): void {
     // Cleanup is housekeeping. It must never block delivering a result or starting a thread.
     const failure = channelError(channel, error);
     const reason = errorMessage(failure);
-    console.error(`pair: warning: automatic cleanup failed: ${reason}\nFix it, then run \`pair clean --keep ${keep}\`.`);
+    console.error(forTerminal(`pair: warning: automatic cleanup failed: ${reason}\nFix it, then run \`pair clean --keep ${keep}\`.`, process.stderr));
   }
 }
 
@@ -730,14 +743,14 @@ async function wait(channel: string, me: Agent, timeoutSeconds: number, scope?: 
   while (true) {
     const pending = channelAccess(channel, () => pendingFor(channel, me, scope));
     if (pending) {
-      console.log(formatMessage(me, pending));
+      console.log(forTerminal(formatMessage(me, pending)));
       if (pending.state.kind === "closed" && archiveClosed) {
         try {
           channelAccess(channel, () => archive(channel, pending.state.last));
         } catch (error) {
           // The result is delivered; a failed archive must not look like a failed wait. The thread stays
           // closed in its lane, and the next wait or send request that can write the channel archives it.
-          console.error(`pair: warning: delivered, but couldn't archive the finished thread: ${errorMessage(error)}`);
+          console.error(forTerminal(`pair: warning: delivered, but couldn't archive the finished thread: ${errorMessage(error)}`, process.stderr));
         }
       }
       return true;
@@ -2949,11 +2962,11 @@ async function main(argv: string[]): Promise<number> {
         }
         const auto = await autoStatus(stateDir(channel), root);
         const served = auto[0]?.startsWith("auto mode: served by the session in ") ?? false;
-        console.log([status(channel, root, served), ...auto, ...(await updateNotice())].join("\n"));
+        console.log(forTerminal([status(channel, root, served), ...auto, ...(await updateNotice())].join("\n")));
         return 0;
       }
       case "history":
-        console.log(channelAccess(channel, () => history(channel, root, rest[0], (text) => console.error(`pair: warning: ${text}`))));
+        console.log(forTerminal(channelAccess(channel, () => history(channel, root, rest[0], (text) => console.error(forTerminal(`pair: warning: ${text}`, process.stderr))))));
         return 0;
       case "clean":
         console.log(channelAccess(channel, () => clean(channel, values.keep)));
@@ -3013,7 +3026,7 @@ main(process.argv.slice(2)).then(
     const isUsageError =
       error instanceof PairError || (error instanceof Error && "code" in error && String(error.code).startsWith("ERR_PARSE_ARGS"));
     if (isUsageError) {
-      console.error(`pair: ${error.message}`);
+      console.error(forTerminal(`pair: ${error.message}`, process.stderr)); // errors quote channel data, such as a corrupt field
       process.exitCode = 1;
       return;
     }

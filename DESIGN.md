@@ -321,6 +321,12 @@ state directory may be inside a repository, the session's or a served worktree's
 use; an agent racing it is the documented limit.
 `PAIR_AUTO_ROOT` tells the reviewer's pair commands which worktree they act on.
 
+Each auto-mode agent gets write access to its own channel only: Claude through `--settings`
+(`sandbox.filesystem.allowWrite`, which still applies under `--setting-sources user`), Codex through
+`--add-dir`. A serving author's grant is pair's home, where its subagents' channels are. A Claude
+reviewer's `--allowedTools` names the run's wrapper path inside comma-joined rules, so pair start
+refuses a path with a comma or a parenthesis rather than let it end a rule early.
+
 The time limit (`--timeout`) isn't part of a thread's snapshot: each launch reads the current value.
 The launch limit (`--max-reviews`) is the owner's: it counts every reviewer process it launches this
 run, retries and served worktrees included, and checks the count just before a launch, so a review
