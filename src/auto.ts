@@ -1065,7 +1065,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         if (options.reviewed(entry.target.channel, entry.file)) { entry.resolve(); continue; }
         if (options.target(entry.target.channel)?.file !== entry.file) throw new Error("message is no longer waiting for this reviewer");
         if (state.maxLaunches && state.launches! >= state.maxLaunches) {
-          const used = `this session's limit of ${state.maxLaunches} reviewer launches is used up, and nothing was launched`;
+          const used = `this session's limit of ${state.maxLaunches} reviewer launch${state.maxLaunches === 1 ? "" : "es"} is used up, and nothing was launched`;
           if (entry.target === rootTarget) state.error = used;
           throw new Error(`${used}. A retry is unlikely to help: the limit stays until it is raised. Don't retry with pair wait; ask the user, who can raise it with pair reviewer --max-reviews N in their own terminal${entry.target.child ? `, in ${options.root}` : ""}`);
         }

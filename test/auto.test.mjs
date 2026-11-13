@@ -1978,7 +1978,7 @@ test("--max-reviews stops launches past the limit, retries included, until pair 
   assert.match((await f.command(["status"])).stdout, /reviewer launches this run: 1 of 1/);
   const refused = await asAuthor(f, ["wait", "--as", "claude", "--timeout", "1"]);
   assert.notEqual(refused.code, 0);
-  assert.match(refused.output, /this session's limit of 1 reviewer launches is used up, and nothing was launched\. A retry is unlikely to help[^]*Don't retry with pair wait; ask the user, who can raise it with pair reviewer --max-reviews N/);
+  assert.match(refused.output, /this session's limit of 1 reviewer launch is used up, and nothing was launched\. A retry is unlikely to help[^]*Don't retry with pair wait; ask the user, who can raise it with pair reviewer --max-reviews N/);
   assert.equal(JSON.parse(f.read("calls.json")).length, 1, "a retry past the limit launches nothing");
 
   await assert.rejects(f.command(["reviewer", "--max-reviews", "1.5"]), /--max-reviews must be a whole number from 0 \(no limit\) to 10000/);
