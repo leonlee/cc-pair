@@ -260,7 +260,8 @@ the old path, tell it to.
 From another terminal in the session's worktree:
 
 ```sh
-pair status    # lanes, auto session state, author conversation, last failure, log location
+pair status    # lanes, the running and the last finished round, author conversation, log
+pair status --json   # the same for scripts: lanes, instructions and the session's state
 pair ps -v     # pair processes by worktree, with full commands
 pair reviewer  # change the reviewer's model, effort or time limit (Changing the reviewer)
 pair stop      # stop the author, its reviewers and their tools
@@ -271,7 +272,15 @@ pair stop      # stop the author, its reviewers and their tools
 - A reviewer that fails to start, ends without a verdict or times out keeps the request, and the
   error includes the reviewer's own message. The author retries the round with
   `pair wait --as <author>`, with the same reviewer settings; to change them first, see
-  [Changing the reviewer](#35-changing-the-reviewer).
+  [Changing the reviewer](#35-changing-the-reviewer). When the reviewer's own message shows a retry
+  won't help (its provider refused the content, it isn't signed in, or its account is used up), the
+  error says so, and the author asks you instead of spending another launch.
+- `pair status` shows the round running and the last one finished, with its verdict or failure.
+  Set `PAIR_BELL=1` before `pair start` to ring the terminal bell when a round finishes. Both cover
+  the session's own worktree; served subagent worktrees appear in the serving list. In
+  `pair status --json`, `auto.mode` is `running`, `served`, `stopped` or `unavailable`; a running
+  session's `auto.round` (`thread`, `queuedAt`, `launchedAt`) and `auto.lastRound` (`thread`,
+  `verdict` or `failed`: `attention`, `retry` or `unknown`, and the times) use epoch milliseconds.
 - With `--serve-worktrees`, `pair stop` in the session's worktree also stops reviews queued or
   running for subagent worktrees; their requests stay on disk ([Parallel work](#63-parallel-work)).
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
@@ -702,6 +711,7 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
 | `PAIR_MAX_ROUNDS` | `3` | Review rounds before escalation; a brainstorm's turns, fixed when it opens |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
 | `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
+| `PAIR_BELL` | unset | Any value: `pair start` rings the terminal bell when a review round finishes |
 | `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |
 
 <a id="9-security-considerations"></a>

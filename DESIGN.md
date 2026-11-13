@@ -328,6 +328,18 @@ last error the reviewer reported in its JSON stream (Codex `error` or `turn.fail
 and labeled as reviewer output. When a model or effort override is set, the error names it, says
 that a retry keeps it, and names `pair reviewer --thread current` to change it first.
 
+The owner also reads that message for retry advice, matching only failures the CLIs were seen to
+print: a provider's content refusal, a missing sign-in or a used-up account means a retry is unlikely
+to help, so the error tells the author to ask the user instead of retrying; a rate limit or a timeout
+keeps the usual retry. Anything else is unknown and keeps the one-retry rule. A match is advice, not
+proof, and a verdict on disk still decides a round. The owner records the running round (queued and
+launch times) and the last finished one (verdict, or failure and its advice, with its finish time)
+for `pair status` and `pair status --json`; times there are wall-clock, so a sleep counts, unlike
+for the time limit. Both, and the bell `PAIR_BELL` rings when a round finishes, cover the session's
+own worktree, like its last error. The bell is best effort: a closed terminal doesn't stop the owner.
+An error the reviewer printed before a later turn succeeded is still shown but doesn't decide the
+advice, and a timeout is judged as a timeout whatever the reviewer printed before it.
+
 ### Author conversations
 
 Pair records the author's conversation so a restart can resume it. The ID is known before launch

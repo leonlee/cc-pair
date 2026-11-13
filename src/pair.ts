@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { authorSession, withRecordedSession, autoCall, autoSocketPath, checkOwnTerminal, checkSettings, checkStart, DEFAULT_REVIEW_SECONDS, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, MAX_REVIEW_SECONDS, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
+import { authorSession, withRecordedSession, autoCall, autoSocketPath, autoState, checkOwnTerminal, checkSettings, checkStart, DEFAULT_REVIEW_SECONDS, describeSession, EFFORTS, errorMessage, executable, autoStatus, hasCode, knownModels, MAX_REVIEW_SECONDS, runGuardian, setReviewer, shellWord, startAuto, stopAuto, withAutoStopped } from "./auto.js";
 import { codexControlSocket, loadedThreads } from "./daemon.js";
 import { guideStart, guidedArgv, linePrompter, type StartFacts } from "./guide.js";
 
@@ -1611,6 +1611,23 @@ function notificationStatus(channel: string): string[] {
 }
 
 /** `served`: another worktree's auto session serves this one, so its agents don't need pair's files here. */
+/** pair status --json: the same facts as the text, for scripts; `auto.mode` is running, served, stopped or unavailable. */
+async function statusJson(channel: string, root: string): Promise<string> {
+  const lanes = channelAccess(channel, () => {
+    const defaults = [threadFor(channel, "claude", "codex"), threadFor(channel, "codex", "claude")];
+    const others = lanesOf(channel).filter((thread) => !defaults.some((each) => each.lane === thread.lane));
+    return Object.fromEntries([...defaults, ...others].map((thread) => [basename(thread.lane), openState(thread, listMessages(thread))]));
+  });
+  return JSON.stringify({
+    channel, worktree: root, version: PACKAGE.version, lanes,
+    instructions: {
+      agents: instructionState(root, join(root, "AGENTS.md"), codexSection(), true),
+      skill: instructionState(root, join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()),
+    },
+    auto: await autoState(stateDir(channel)),
+  }, null, 2);
+}
+
 function status(channel: string, root: string, served = false): string {
   // The default pair's lanes always show; any other lane once it exists.
   const lanes = channelAccess(channel, () => {
@@ -2380,7 +2397,7 @@ const USAGE = `usage:
                                                       (change a running auto session's reviewer, without a restart)
   pair send <request|review|response> --as NAME [--to NAME] [--brainstorm] [--verdict approve|changes|continue|complete] <file|->
   pair wait --as NAME [--timeout seconds]             (prints "no message … yet" on timeout)
-  pair status
+  pair status [--json]
   pair history [thread-id]                            (list finished threads, or show any thread)
   pair clean --keep N                                 (delete all but the N newest finished threads)
   pair reset [--as NAME] [--dry-run]                  (back up pending lanes; --as selects their author, default: all)
@@ -2514,11 +2531,12 @@ review round.
 options:
 ${AS_OPTION}
   --timeout SECONDS            give up after this long (default ${DEFAULT_WAIT_SECONDS})`,
-  status: `usage: pair status
+  status: `usage: pair status [--json]
 
 Show this worktree's channel, the installed version, each lane's state, whether the instruction
-files on disk are current, the Codex notification registration, and auto mode. It doesn't modify
-the worktree or the channel.`,
+files on disk are current, the Codex notification registration, and auto mode, including the
+running round and the last finished one. It doesn't modify the worktree or the channel. --json
+prints the lanes, instruction states and the auto session's own state as JSON, for scripts.`,
   history: `usage: pair history [THREAD]
 
 With no argument, list finished threads, newest first. With THREAD (any unique part of a thread
@@ -2570,7 +2588,7 @@ options:
   -v, --verbose                show full command lines`,
 };
 
-const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, purge: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" } } as const;
+const OPTIONS = { as: { type: "string" }, verdict: { type: "string" }, brainstorm: { type: "boolean" }, timeout: { type: "string" }, keep: { type: "string" }, verbose: { type: "boolean", short: "v" }, claude: { type: "string" }, codex: { type: "string" }, grace: { type: "string" }, help: { type: "boolean", short: "h" }, "reviewer-model": { type: "string" }, "reviewer-effort": { type: "string" }, "reviewer-args": { type: "string" }, worktree: { type: "string" }, thread: { type: "string" }, "dry-run": { type: "boolean" }, yes: { type: "boolean", short: "y" }, resume: { type: "boolean" }, purge: { type: "boolean" }, "serve-worktrees": { type: "boolean" }, reviewers: { type: "string" }, to: { type: "string" }, reviewer: { type: "string" }, json: { type: "boolean" } } as const;
 
 async function main(argv: string[]): Promise<number> {
   const { values, positionals, tokens } = parseArgs({
@@ -2606,6 +2624,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (values.brainstorm && (command !== "send" || rest[0] !== "request")) {
     throw new PairError("--brainstorm is only supported by pair send request");
+  }
+  if (values.json && command !== "status") {
+    throw new PairError("--json is only supported by pair status");
   }
   if (values.to !== undefined && command !== "send") {
     throw new PairError("--to is only supported by pair send");
@@ -2826,6 +2847,11 @@ async function main(argv: string[]): Promise<number> {
               const index = messages.findIndex((message) => message.file === file);
               return index >= 0 && messages[index + 1]?.type === "review";
             },
+            verdict: (laneChannel, file) => {
+              const messages = listMessages(threadFor(laneChannel, authorName, reviewerName));
+              const index = messages.findIndex((message) => message.file === file);
+              return index >= 0 ? messages[index + 1]?.verdict : undefined;
+            },
             // A served worktree's channel sits next to this one, under the same PAIR_HOME, whatever the caller's says.
             channelOf: (childRoot) => join(dirname(startChannel), basename(channelDir(childRoot))),
             stateDirOf: stateDir,
@@ -2892,6 +2918,10 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       case "status": {
+        if (values.json) {
+          console.log(await statusJson(channel, root));
+          return 0;
+        }
         const auto = await autoStatus(stateDir(channel), root);
         const served = auto[0]?.startsWith("auto mode: served by the session in ") ?? false;
         console.log([status(channel, root, served), ...auto, ...(await updateNotice())].join("\n"));
