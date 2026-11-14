@@ -253,8 +253,11 @@ before running it.
 
 `pair start --resume` uses that record without copying the ID. The record MUST be for the same
 CLI and have a known ID, the worktree MUST already exist, and the author arguments MUST NOT select
-a conversation themselves. Only the conversation is reused: every other option comes from the
-command line. The record is recovery data; pair does not check that the conversation still exists.
+a conversation themselves. With a CLI word (`pair start claude --resume`) or without a terminal,
+only the conversation is reused: every other option comes from the command line. In a terminal
+without a CLI word, guided start also reuses that session's recorded options, such as its CLIs,
+names and reviewer settings; options you type still win. The record is recovery data; pair does
+not check that the conversation still exists.
 
 A conversation started with pair 0.6.1 or earlier may still name an old run's pair command in its
 recorded instructions. Each launch tells the author to use `"$PAIR_BIN"` instead; if it still runs
@@ -633,7 +636,7 @@ the auto session:
 ```
 channel: /Users/you/.pair/your-repo-12345678
 worktree: /Users/you/your-repo
-version: claude-codex-pair 0.9.0
+version: claude-codex-pair 0.10.0
 claude-to-codex: brainstorm awaiting-review (round 1, codex's turn)
 codex-to-claude: idle
 instructions on disk (does not verify what running agents loaded):

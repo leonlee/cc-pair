@@ -137,6 +137,8 @@ if (reviewer) {
     if (process.env.TEST_WORKER === 'failfirst' && count === 1) process.exit(2);
     if (process.env.TEST_WORKER === 'no-verdict') process.exit(0);
     if (process.env.TEST_WORKER === 'corrupt') process.exit(0);
+    // Read-only scratch in the reviewer's start directory, as a permission-test fixture would leave.
+    if (process.env.TEST_WORKER === 'protected-scratch') { mkdirSync('scratch/fixture', {recursive:true}); chmodSync('scratch', 0o500); }
     const message = await call(['wait','--as',process.env.PAIR_AGENT,'--timeout','1']);
     const verdict = process.env.TEST_SCENARIO === 'brainstorm' ? (count === 1 ? 'continue' : 'complete')
       : count === 1 && ['roundtrip', 'gated'].includes(process.env.TEST_SCENARIO) ? 'changes' : 'approve';
@@ -2041,4 +2043,16 @@ test("a Claude reviewer isn't started from a path its tool rules can't hold", { 
   assert.notEqual(code, 0);
   assert.match(f.output(), /pair start can't run a Claude reviewer from .*st\(a\),b.*: its path has a comma or a parenthesis/);
   assert.ok(!existsSync(f.file("author.pid")), "nothing was started");
+});
+
+test("read-only scratch a Codex reviewer leaves behind doesn't stop the session, and the next round starts fresh", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "roundtrip", worker: "protected-scratch" });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(f.read("first.out"), /verdict changes/);
+  assert.match(f.read("second.out"), /verdict approve/);
+  assert.match(f.read("third.out"), /verdict approve/, "every verdict reached the author, who kept running");
+  const calls = JSON.parse(f.read("calls.json"));
+  assert.equal(calls.length, 3);
+  assert.equal(new Set(calls.map(({ startedIn }) => startedIn)).size, 3, "each round started in a fresh directory");
+  for (const { startedIn } of calls) assert.ok(!existsSync(startedIn), `${startedIn} was removed, read-only scratch included`);
 });
