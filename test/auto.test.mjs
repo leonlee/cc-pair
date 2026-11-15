@@ -2056,3 +2056,33 @@ test("read-only scratch a Codex reviewer leaves behind doesn't stop the session,
   assert.equal(new Set(calls.map(({ startedIn }) => startedIn)).size, 3, "each round started in a fresh directory");
   for (const { startedIn } of calls) assert.ok(!existsSync(startedIn), `${startedIn} was removed, read-only scratch included`);
 });
+
+test("a message to the guardian failing while the session stops doesn't fail the session", { timeout: 20_000 }, async (t) => {
+  // The guardian's channel closes as it exits; a send racing that, such as a heartbeat, reports an error.
+  const f = fixture(t, { setup: ({ root, env }) => {
+    const hook = join(root, "closing.cjs");
+    writeFileSync(hook, `if (process.argv.includes("start")) {
+  const childProcess = require("node:child_process");
+  const fork = childProcess.fork;
+  childProcess.fork = function (...args) {
+    const child = fork.apply(this, args);
+    const send = child.send.bind(child);
+    child.send = (message, ...rest) => {
+      const callback = rest.find((arg) => typeof arg === "function");
+      if (message && message.type === "shutdown" && callback) {
+        send(message);
+        process.nextTick(callback, Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" }));
+        return true;
+      }
+      return send(message, ...rest);
+    };
+    return child;
+  };
+  require("node:module").syncBuiltinESMExports();
+}
+`);
+    env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --require=${hook}`;
+  } });
+  assert.equal((await f.completed).code, 0, f.output());
+  assert.match(f.read("third.out"), /verdict approve/);
+});

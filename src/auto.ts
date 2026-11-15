@@ -927,7 +927,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const sockets = new Set<Socket>();
   const sendGuardian = (message: object) => {
     if (guardian?.connected) guardian.send(message, (error) => {
-      if (error) { state.error = error.message; authorCode = 1; }
+      // While stopping, the guardian is expected to go: a heartbeat racing its exit isn't the session failing.
+      if (error && !stopping) { state.error = error.message; authorCode = 1; }
     });
   };
   const forceJobs = () => {
@@ -1328,7 +1329,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     state.guardianPid = guardian.pid;
     update();
     guardianDone = new Promise<void>((resolve) => {
-      guardian!.on("error", (error) => { state.error = error.message; authorCode = 1; });
+      guardian!.on("error", (error) => { if (stopping) return; state.error = error.message; authorCode = 1; });
       guardian!.once("close", () => {
         if (jobs.size) { forceJobs(); authorCode = 1; }
         // On pair stop the guardian exits first; queued rounds were stopped, not lost to a failure.

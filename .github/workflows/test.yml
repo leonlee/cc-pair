@@ -7,6 +7,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false # one Node version's failure shouldn't hide the others' results
       matrix:
         node: [22, 24, 26]
     steps:
