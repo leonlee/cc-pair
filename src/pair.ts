@@ -2443,6 +2443,7 @@ environment:
   PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
   PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
+  PAIR_BELL              any value: pair start rings the terminal bell when a review round finishes
   PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
 
 const AS_OPTION = "  --as NAME                    the participant running the command (default: $PAIR_AGENT)";

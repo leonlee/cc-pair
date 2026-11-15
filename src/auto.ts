@@ -177,6 +177,25 @@ export function retryAdvice(error: string | undefined, diagnostic: string | unde
 const realOr = (path: string): string => { try { return realpathSync(path); } catch { return path; } };
 
 /**
+ * Removes a directory tree pair owns, best effort: a reviewer may leave read-only scratch there, which must not stop the
+ * owner or its author. Its real directories are made writable once if the first try fails. Returns why it couldn't.
+ */
+export function removeTree(path: string): string | undefined {
+  try { rmSync(path, { recursive: true, force: true }); return undefined; } catch { /* make it writable and retry */ }
+  const writable = (dir: string): void => {
+    const stats = lstatSync(dir, { throwIfNoEntry: false });
+    if (!stats?.isDirectory()) return; // never through a link
+    chmodSync(dir, 0o700);
+    for (const name of readdirSync(dir)) writable(join(dir, name));
+  };
+  try {
+    writable(path);
+    rmSync(path, { recursive: true, force: true });
+    return undefined;
+  } catch (error) { return errorMessage(error); }
+}
+
+/**
  * A fresh, empty start directory for one Codex reviewer, in the run directory, which agents can't write by default.
  * codex exec loads .codex/config.toml from its start directory and that directory's ancestors, and its MCP servers and
  * notify commands run outside the sandbox, even for a path marked untrusted only on the command line. So no .codex may
@@ -908,7 +927,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const sockets = new Set<Socket>();
   const sendGuardian = (message: object) => {
     if (guardian?.connected) guardian.send(message, (error) => {
-      if (error) { state.error = error.message; authorCode = 1; }
+      // While stopping, the guardian is expected to go: a heartbeat racing its exit isn't the session failing.
+      if (error && !stopping) { state.error = error.message; authorCode = 1; }
     });
   };
   const forceJobs = () => {
@@ -1309,7 +1329,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     state.guardianPid = guardian.pid;
     update();
     guardianDone = new Promise<void>((resolve) => {
-      guardian!.on("error", (error) => { state.error = error.message; authorCode = 1; });
+      guardian!.on("error", (error) => { if (stopping) return; state.error = error.message; authorCode = 1; });
       guardian!.once("close", () => {
         if (jobs.size) { forceJobs(); authorCode = 1; }
         // On pair stop the guardian exits first; queued rounds were stopped, not lost to a failure.
@@ -1365,7 +1385,10 @@ export async function startAuto(options: AutoOptions): Promise<number> {
           const entry = running.get(event.id);
           if (!entry) return;
           running.delete(event.id);
-          if (entry.startDir) rmSync(entry.startDir, { recursive: true, force: true }); // nothing a reviewer left there reaches the next one
+          if (entry.startDir) { // nothing a reviewer left there reaches the next one, which gets a fresh directory anyway
+            const left = removeTree(entry.startDir);
+            if (left) log(`pair: couldn't remove the reviewer's start directory ${entry.startDir}: ${left}\n`);
+          }
           if (entry.pid === undefined) state.launches! -= 1; // never spawned: return the launch it reserved
           const { target } = entry;
           let success = false;
@@ -1467,7 +1490,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         for (const each of servers) each.close(() => { if (--open === 0) { clearTimeout(timer); resolve(); } });
       });
       removeState(options.stateDir, run);
-      rmSync(runDir, { recursive: true, force: true });
+      removeTree(runDir); // best effort: leftovers there must not change how the session ends
     } finally { restoreTerminal(tty); }
   }
 }
@@ -1491,7 +1514,7 @@ export async function runGuardian(): Promise<void> {
       removeState(config.stateDir, config.run);
       rmSync(config.socket, { force: true });
       for (const claim of claims) rmSync(claim, { force: true });
-      rmSync(join(config.stateDir, `auto-${config.run}`), { recursive: true, force: true });
+      removeTree(join(config.stateDir, `auto-${config.run}`));
     }
     if (disconnected) restoreTerminal(config?.tty);
     if (process.connected) { disconnecting = true; process.disconnect(); }

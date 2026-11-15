@@ -10,7 +10,7 @@ auto mode, `pair start` runs the author interactively and starts the reviewer fo
 |---|---|
 | Topology | Manual mode uses two live sessions. Opt-in `pair start <author-cli> [<reviewer-cli>]` owns an interactive author and starts a headless reviewer for each round. |
 | Roles | Symmetric. Either agent can author or review. |
-| Participants | A participant is a name (`^[a-z][a-z0-9_]{0,31}$`, no dashes, so lane names parse); the CLI that runs it is a property of the session, never stored in a message or lane. `claude` and `codex` are the default names and each other's default partner, so existing channels and commands are unchanged. Self comes from `--as`/`PAIR_AGENT`; a new request's partner from `--to`, `PAIR_PARTNER` or the default partner; a reply's from `--to`, as the `== next:` line names it, never guessed. Specified in [docs/specs/participants.md](docs/specs/participants.md). |
+| Participants | A participant is a name (`^[a-z][a-z0-9_]{0,31}$`, no dashes, so lane names parse); the CLI that runs it is a property of the session, never stored in a message or lane. `claude` and `codex` are the default names and each other's default partner, so existing channels and commands are unchanged. Self comes from `--as`/`PAIR_AGENT`; a new request's partner from `--to`, `PAIR_PARTNER` or the default partner; a reply's from `--to`, as the `== next:` line names it, never guessed. Specified in [docs/specs/participants.md](https://github.com/leonlee/cc-pair/blob/main/docs/specs/participants.md). |
 | Interface | One `pair` CLI (Node/TS). The agents learn it from a thin prompt: a Claude skill and an AGENTS.md section for Codex. |
 | Waiting | Manual mode. `pair wait` checks the files every second and returns as soon as a message arrives. By default it gives up after 540s, printing `no message … yet` and exiting 0 (agent UIs show any non-zero exit as a failure), which keeps a foreground run under Claude Code's 10-minute Bash cap. Interactive Claude Code sessions run `pair wait --timeout 3600` as a background command and spend no model turns until it exits. Codex can't do the same, because a finished background command doesn't resume it. Instead, pair's MCP server queues a fixed note into the Codex session when a message is pending (see Notifications), so an idle Codex makes no model calls. Codex never polls, because each check of a running command is a model call: without the MCP server it checks once and the user asks it to check again. Headless runs wait in the foreground. |
 | Pickup | Manual mode: the reviewer waits in a loop ("be my reviewer"), Claude on a background `pair wait`, Codex woken by `pair mcp`. Auto mode: the launcher starts a reviewer for each round. |
@@ -382,8 +382,10 @@ learned, and a restart command that starts with `cd` to the worktree and drops `
 survives `pair stop` and is presented as recovery data, never as proof that the conversation still
 exists. `pair start --resume` is the explicit way to use it: it adds the recorded ID as the author's
 selector only when the record is valid, is for the same CLI and has a known ID, and it refuses
-author arguments that already select a conversation. A plain `pair start`, or one with
-`--continue`, never resumes the record by itself.
+author arguments that already select a conversation. In a terminal without a CLI word, guided start
+also reuses the record's saved start arguments (typed options still win); with a CLI word or without
+a terminal, only the conversation is. A plain `pair start`, or one with `--continue`, never resumes
+the record by itself.
 
 An author's prompt lives in a file in the run directory, not on its command line: the prompt names
 pair commands, and there `pkill -f "pair wait …"` matched every auto-mode author. Claude takes it
@@ -429,7 +431,7 @@ is not supported.
 ### Served worktrees
 
 `pair start --serve-worktrees` lets one owner review its subagents' own git worktrees, as specified
-in [docs/specs/serve-worktrees.md](docs/specs/serve-worktrees.md). The author's environment carries
+in [docs/specs/serve-worktrees.md](https://github.com/leonlee/cc-pair/blob/main/docs/specs/serve-worktrees.md). The author's environment carries
 `PAIR_AUTO_OWNER`, the owner's state directory. A subagent inherits it, so its `pair send`, run in
 its own worktree and channel, reaches the owner's socket, the only one a Claude author's sandbox
 allows, with its worktree root and this run's ID. A request without a root, from an older CLI, is

@@ -753,14 +753,13 @@ test("a failed automatic cleanup warns but still delivers and still sends", { sk
     const lines = merged.stdout.split("\n");
     assert.match(lines[0], /^== pair: review from codex/, "the protocol header comes first, before any warning");
     assert.match(merged.stdout, /approved and closed[\s\S]*pair: warning: automatic cleanup failed/, "the warning follows the message");
-    assert.match(merged.stdout, /cannot access channel path .*\(EACCES\)/);
-    assert.match(merged.stdout, /sandbox_workspace_write/);
+    // Recursive removal reports EACCES on some Node versions and ENOTEMPTY on others; the sandbox advice has its own tests.
+    assert.match(merged.stdout, /automatic cleanup failed: [^\n]*(EACCES|ENOTEMPTY)/);
 
     must("all", ["send", "request", "--as", "claude", "-"], "## Summary\nthird");
     must("all", ["send", "review", "--as", "codex", "--verdict", "approve", "-"], "LGTM");
     const sent = must("1", ["send", "request", "--as", "claude", "-"], "## Summary\nfourth");
-    assert.match(sent.stderr, /pair: warning: automatic cleanup failed/);
-    assert.match(sent.stderr, /cannot access channel path .*\(EACCES\)/);
+    assert.match(sent.stderr, /pair: warning: automatic cleanup failed: [^\n]*(EACCES|ENOTEMPTY)/);
     assert.match(must("1", ["status"]).stdout, /claude-to-codex: awaiting-review/, "the new request was still written");
   } finally {
     chmodSync(join(channel, "archive", stuck), 0o700);
