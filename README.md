@@ -284,12 +284,14 @@ pair stop      # stop the author, its reviewers and their tools
   [Changing the reviewer](#35-changing-the-reviewer). When the reviewer's own message shows a retry
   won't help (its provider refused the content, it isn't signed in, or its account is used up), the
   error says so, and the author asks you instead of spending another launch.
-- `pair status` shows the round running and the last one finished, with its verdict or failure.
-  Set `PAIR_BELL=1` before `pair start` to ring the terminal bell when a round finishes. Both cover
-  the session's own worktree; served subagent worktrees appear in the serving list. In
-  `pair status --json`, `auto.mode` is `running`, `served`, `stopped` or `unavailable`; a running
-  session's `auto.round` (`thread`, `queuedAt`, `launchedAt`) and `auto.lastRound` (`thread`,
-  `verdict` or `failed`: `attention`, `retry` or `unknown`, and the times) use epoch milliseconds.
+- `pair status` shows the round running and the last one finished, with its verdict or failure
+  and, for a Codex reviewer, the tokens it used (from Codex's own session file; not yet for a
+  Claude reviewer). Set `PAIR_BELL=1` before `pair start` to ring the terminal bell when a round
+  finishes. Both cover the session's own worktree; served subagent worktrees appear in the serving
+  list. In `pair status --json`, `auto.mode` is `running`, `served`, `stopped` or `unavailable`; a
+  running session has `auto.round` (`thread`, `queuedAt`, `launchedAt`) and `auto.lastRound`
+  (`thread`, `verdict` or `failed`: `attention`, `retry` or `unknown`, the times, and `tokens` with
+  `input`, `cachedInput` and `output` when known). Times are epoch milliseconds.
 - With `--serve-worktrees`, `pair stop` in the session's worktree also stops reviews queued or
   running for subagent worktrees; their requests stay on disk ([Parallel work](#63-parallel-work)).
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
