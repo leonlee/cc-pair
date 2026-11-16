@@ -507,38 +507,78 @@ function tokenTotal(entry: unknown): RoundTokens | undefined {
 }
 
 /**
- * The tokens a Codex reviewer round used, from its session file. Codex reports a conversation's running
- * total, which a resumed round continues, so a round is the change since its task started. Undefined when
- * the last task started before `since` (this round never reached the model) or the file can't tell.
- * Like ranSettings, this reads Codex's internals: for display only.
+ * The tokens a reviewer round used since `since` (its launch), from its CLI's session file. Undefined when
+ * the round never reached the model or the file can't tell. Like ranSettings, this reads the CLIs'
+ * internals: for display only.
  */
-export function roundTokens(session: string, since: number, env: NodeJS.ProcessEnv = process.env): RoundTokens | undefined {
+export function roundTokens(cli: Agent, session: string, cwd: string, since: number, env: NodeJS.ProcessEnv = process.env): RoundTokens | undefined {
   try {
-    const file = codexSessionFile(session, env);
+    const file = cli === "codex" ? codexSessionFile(session, env) : claudeSessionFile(session, cwd, env);
     if (!file) return undefined;
-    const lines = readFileSync(file, "utf8").split("\n");
-    let end: RoundTokens | undefined;
-    let first: RoundTokens | undefined; // this round's first total: a restart shows there, before the round can outgrow the old total
-    let started = false;
-    for (let index = lines.length - 1; index >= 0; index--) {
-      const line = lines[index]!;
-      if (!line.includes('"token_count"') && !line.includes('"task_started"')) continue;
+    return cli === "codex" ? codexRoundTokens(file, since) : claudeRoundTokens(file, since);
+  } catch { return undefined; } // no session file, or one pair can't read
+}
+
+/**
+ * Codex reports a conversation's running total, which a resumed round continues, so a round is the change
+ * since its task started. Undefined when the last task started before `since`.
+ */
+function codexRoundTokens(file: string, since: number): RoundTokens | undefined {
+  const lines = readFileSync(file, "utf8").split("\n");
+  let end: RoundTokens | undefined;
+  let first: RoundTokens | undefined; // this round's first total: a restart shows there, before the round can outgrow the old total
+  let started = false;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index]!;
+    if (!line.includes('"token_count"') && !line.includes('"task_started"')) continue;
+    let entry: unknown;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const kind = stringAt(entry, "payload", "type");
+    if (kind === "task_started" && !started) {
+      if (!end || !(Date.parse(stringAt(entry, "timestamp") ?? "") >= since)) return undefined;
+      started = true;
+    } else if (kind === "token_count") {
+      const total = tokenTotal(entry);
+      if (!total) continue;
+      if (!started) { end ??= total; first = total; }
+      else if (total.input > first!.input) return end; // a total that restarted counts this round from zero
+      else return { input: end!.input - total.input, cachedInput: end!.cachedInput - total.cachedInput, output: end!.output - total.output };
+    }
+  }
+  return started ? end : undefined; // the conversation's first round counts from zero
+}
+
+/**
+ * Claude records each model call's own usage, once per content block of its message, so a round is the
+ * sum over its calls since `since`, each message once, subagents' (in the session's subagents directory)
+ * included. Claude's own messages, such as "<synthetic>", called no model. A compaction's summarizing call
+ * isn't recorded, only its boundary: a round that compacted is undefined rather than undercounted.
+ */
+function claudeRoundTokens(file: string, since: number): RoundTokens | undefined {
+  const subagents = join(file.replace(/\.jsonl$/, ""), "subagents");
+  const files = [file, ...(existsSync(subagents) ? readdirSync(subagents).filter((name) => name.endsWith(".jsonl")).map((name) => join(subagents, name)) : [])];
+  const seen = new Set<string>();
+  const sum: RoundTokens = { input: 0, cachedInput: 0, output: 0 };
+  for (const each of files) {
+    for (const line of readFileSync(each, "utf8").split("\n")) {
+      if (!line.includes('"assistant"') && !line.includes('"compact_boundary"')) continue;
       let entry: unknown;
       try { entry = JSON.parse(line); } catch { continue; }
-      const kind = stringAt(entry, "payload", "type");
-      if (kind === "task_started" && !started) {
-        if (!end || !(Date.parse(stringAt(entry, "timestamp") ?? "") >= since)) return undefined;
-        started = true;
-      } else if (kind === "token_count") {
-        const total = tokenTotal(entry);
-        if (!total) continue;
-        if (!started) { end ??= total; first = total; }
-        else if (total.input > first!.input) return end; // a total that restarted counts this round from zero
-        else return { input: end!.input - total.input, cachedInput: end!.cachedInput - total.cachedInput, output: end!.output - total.output };
+      const inRound = Date.parse(stringAt(entry, "timestamp") ?? "") >= since;
+      if (stringAt(entry, "subtype") === "compact_boundary") {
+        if (inRound) return undefined;
+        continue;
       }
+      const id = stringAt(entry, "message", "id");
+      if (!inRound || stringAt(entry, "type") !== "assistant" || !id || seen.has(id) || /^<.*>$/.test(stringAt(entry, "message", "model") ?? "")) continue;
+      const count = (key: string): number => { const value = valueAt(entry, "message", "usage", key); return typeof value === "number" ? value : 0; };
+      seen.add(id);
+      sum.input += count("input_tokens") + count("cache_creation_input_tokens") + count("cache_read_input_tokens");
+      sum.cachedInput += count("cache_read_input_tokens");
+      sum.output += count("output_tokens");
     }
-    return started ? end : undefined; // the conversation's first round counts from zero
-  } catch { return undefined; } // no session file, or one pair can't read
+  }
+  return seen.size ? sum : undefined;
 }
 
 /** A model guided pair start knows, with the efforts it supports when its CLI says. A hidden one isn't offered. */
@@ -1464,7 +1504,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             state.lastRan = { requested: entry.settings ?? {}, ran };
             log(`pair: reviewer for thread ${entry.thread} ran ${describeSettings(ran)}\n`);
           }
-          const tokens = session && reviewer === "codex" && entry.launchedAt !== undefined ? roundTokens(session, entry.launchedAt) : undefined;
+          const tokens = session && entry.launchedAt !== undefined ? roundTokens(reviewer, session, target.root, entry.launchedAt) : undefined;
           if (tokens) log(`pair: reviewer for thread ${entry.thread} used ${describeTokens(tokens)}\n`);
           // The verdict on disk decides: a reviewer may report an error it recovered from.
           const reason = success ? error : [

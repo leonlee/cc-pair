@@ -40,8 +40,8 @@ history and registrations work as they are.
   content, it isn't signed in, or its account is used up), the failed round says so and the author
   asks you instead of spending another launch. A rate limit or a timeout keeps the usual retry.
 - **`pair status` shows the running round and the last finished one**, with its verdict or failure,
-  when it finished and, for a Codex reviewer, the tokens it used (a resumed round shows only its own
-  part of Codex's running total). `pair status --json` gives the lanes, instruction states and the
+  when it finished and the tokens its reviewer used (a resumed round counts only its own model
+  calls). `pair status --json` gives the lanes, instruction states and the
   session's state to scripts. `PAIR_BELL=1` rings the terminal bell when a round finishes.
 - **Review requests carry their validation**: each command and its result in a line, and what wasn't
   checked; reviewers say which checks they ran themselves.
