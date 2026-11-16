@@ -21,6 +21,8 @@ interface Job {
 interface Result { code: number | null; signal?: string; error?: string }
 /** Reviewer settings; an absent value leaves it to the reviewer CLI's own default. */
 export interface ReviewerSettings { model?: string; effort?: string }
+/** What a reviewer round used: input tokens, the cached part of them, and output tokens. */
+export interface RoundTokens { input: number; cachedInput: number; output: number }
 /** A pair reviewer change: a value sets it, null returns it to the CLI default, absent keeps it. */
 export interface ReviewerChange { model?: string | null; effort?: string | null; thread?: string; timeoutSeconds?: number; maxLaunches?: number }
 /** Each review round's time limit, awake time only. */
@@ -57,7 +59,7 @@ interface RecordState {
   lastRan?: { requested: ReviewerSettings; ran: ReviewerSettings };
   /** This worktree's running round and its last finished one (epoch milliseconds; an older owner has neither). */
   round?: { thread: string; queuedAt: number; launchedAt: number };
-  lastRound?: { thread: string; verdict?: string; failed?: RetryAdvice["kind"]; queuedAt: number; launchedAt?: number; finishedAt: number };
+  lastRound?: { thread: string; verdict?: string; failed?: RetryAdvice["kind"]; queuedAt: number; launchedAt?: number; finishedAt: number; tokens?: RoundTokens };
   /** With --serve-worktrees: the capacity, the worktrees served, and the reviews running, queued or failed. */
   served?: ServedState;
 }
@@ -357,13 +359,18 @@ function duration(ms: number): string {
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m${seconds % 60}s` : `${Math.floor(seconds / 3600)}h${Math.floor(seconds / 60) % 60}m`;
 }
 
+const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+function describeTokens({ input, cachedInput, output }: RoundTokens): string {
+  return `tokens ${compact.format(input)} in (${input ? Math.round((100 * cachedInput) / input) : 0}% cached), ${compact.format(output)} out`;
+}
+
 /** The running round and the last finished one, in wall-clock time (a sleep counts here, unlike for the time limit). */
 function roundLines(state: RecordState, now = Date.now()): string[] {
   const { round, lastRound: last } = state;
   const outcome = last && (last.verdict ? `verdict ${last.verdict}` : last.failed === "attention" ? "failed; a retry is unlikely to help" : "failed");
   return [
     ...(round ? [`  round running: thread ${round.thread} · launched ${clock(round.launchedAt)}, ${duration(now - round.launchedAt)} ago${round.launchedAt - round.queuedAt >= 1000 ? ` after ${duration(round.launchedAt - round.queuedAt)} queued` : ""}`] : []),
-    ...(last ? [`  last round: thread ${last.thread} · ${outcome} · finished ${clock(last.finishedAt)}${last.launchedAt ? `, took ${duration(last.finishedAt - last.launchedAt)}` : ""}`] : []),
+    ...(last ? [`  last round: thread ${last.thread} · ${outcome} · finished ${clock(last.finishedAt)}${last.launchedAt ? `, took ${duration(last.finishedAt - last.launchedAt)}` : ""}${last.tokens ? ` · ${describeTokens(last.tokens)}` : ""}`] : []),
   ];
 }
 
@@ -426,13 +433,18 @@ function sameSettings(a: ReviewerSettings | undefined, b: ReviewerSettings): boo
   return a !== undefined && a.model === b.model && a.effort === b.effort;
 }
 
-/** A string at path in parsed JSON. */
-function stringAt(value: unknown, ...path: string[]): string | undefined {
+/** The value at path in parsed JSON. */
+function valueAt(value: unknown, ...path: string[]): unknown {
   let at = value;
   for (const key of path) {
     if (typeof at !== "object" || at === null) return undefined;
     at = (at as Record<string, unknown>)[key];
   }
+  return at;
+}
+
+function stringAt(value: unknown, ...path: string[]): string | undefined {
+  const at = valueAt(value, ...path);
   return typeof at === "string" && at ? at : undefined;
 }
 
@@ -485,6 +497,48 @@ export function ranSettings(cli: Agent, session: string, cwd: string, env: NodeJ
     }
   } catch { /* no session file, or one pair can't read: show only the requested settings */ }
   return undefined;
+}
+
+/** A Codex token_count entry's running total for its conversation. */
+function tokenTotal(entry: unknown): RoundTokens | undefined {
+  const total = valueAt(entry, "payload", "info", "total_token_usage");
+  const [input, cachedInput, output] = ["input_tokens", "cached_input_tokens", "output_tokens"].map((key) => valueAt(total, key));
+  return typeof input === "number" && typeof cachedInput === "number" && typeof output === "number" ? { input, cachedInput, output } : undefined;
+}
+
+/**
+ * The tokens a Codex reviewer round used, from its session file. Codex reports a conversation's running
+ * total, which a resumed round continues, so a round is the change since its task started. Undefined when
+ * the last task started before `since` (this round never reached the model) or the file can't tell.
+ * Like ranSettings, this reads Codex's internals: for display only.
+ */
+export function roundTokens(session: string, since: number, env: NodeJS.ProcessEnv = process.env): RoundTokens | undefined {
+  try {
+    const file = codexSessionFile(session, env);
+    if (!file) return undefined;
+    const lines = readFileSync(file, "utf8").split("\n");
+    let end: RoundTokens | undefined;
+    let first: RoundTokens | undefined; // this round's first total: a restart shows there, before the round can outgrow the old total
+    let started = false;
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index]!;
+      if (!line.includes('"token_count"') && !line.includes('"task_started"')) continue;
+      let entry: unknown;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const kind = stringAt(entry, "payload", "type");
+      if (kind === "task_started" && !started) {
+        if (!end || !(Date.parse(stringAt(entry, "timestamp") ?? "") >= since)) return undefined;
+        started = true;
+      } else if (kind === "token_count") {
+        const total = tokenTotal(entry);
+        if (!total) continue;
+        if (!started) { end ??= total; first = total; }
+        else if (total.input > first!.input) return end; // a total that restarted counts this round from zero
+        else return { input: end!.input - total.input, cachedInput: end!.cachedInput - total.cachedInput, output: end!.output - total.output };
+      }
+    }
+    return started ? end : undefined; // the conversation's first round counts from zero
+  } catch { return undefined; } // no session file, or one pair can't read
 }
 
 /** A model guided pair start knows, with the efforts it supports when its CLI says. A hidden one isn't offered. */
@@ -1408,6 +1462,8 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             state.lastRan = { requested: entry.settings ?? {}, ran };
             log(`pair: reviewer for thread ${entry.thread} ran ${describeSettings(ran)}\n`);
           }
+          const tokens = session && reviewer === "codex" && entry.launchedAt !== undefined ? roundTokens(session, entry.launchedAt) : undefined;
+          if (tokens) log(`pair: reviewer for thread ${entry.thread} used ${describeTokens(tokens)}\n`);
           // The verdict on disk decides: a reviewer may report an error it recovered from.
           const reason = success ? error : [
             error ?? "reviewer exited without sending a verdict",
@@ -1434,7 +1490,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
             if (success) {
               try { verdict = options.verdict?.(target.channel, entry.file) ?? verdict; } catch { /* keep "sent" */ }
             }
-            state.lastRound = { thread: entry.thread, ...(success ? { verdict } : { failed: advice!.kind }), queuedAt: entry.queuedAt, launchedAt: entry.launchedAt, finishedAt: Date.now() };
+            state.lastRound = { thread: entry.thread, ...(success ? { verdict } : { failed: advice!.kind }), queuedAt: entry.queuedAt, launchedAt: entry.launchedAt, finishedAt: Date.now(), ...(tokens ? { tokens } : {}) };
             delete state.round;
             if (process.env.PAIR_BELL) ringBell(); // opt-in: a round finished
           }

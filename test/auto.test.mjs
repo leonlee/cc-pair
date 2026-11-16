@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, retryAdvice, setReviewer, withRecordedSession } from "../dist/auto.js";
+import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, retryAdvice, roundTokens, setReviewer, withRecordedSession } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -94,7 +94,10 @@ if (reviewer) {
     const effort = (cli === 'codex' ? /^model_reasoning_effort="(.*)"$/.exec(flag('--config') ?? '')?.[1] : flag('--effort')) ?? 'default-effort';
     const dir = cli === 'codex' ? join(process.env.CODEX_HOME, 'sessions', '2026', '11', '10') : join(process.env.CLAUDE_CONFIG_DIR, 'projects', process.cwd().replace(/[^A-Za-z0-9]/g, '-'));
     mkdirSync(dir, {recursive:true});
-    appendFileSync(join(dir, cli === 'codex' ? 'rollout-2026-11-10T00-00-00-' + session + '.jsonl' : session + '.jsonl'), JSON.stringify(cli === 'codex' ? {type:'turn_context', payload:{model, effort}} : {type:'assistant', isSidechain:false, message:{model}, effort}) + '\\n');
+    const file = join(dir, cli === 'codex' ? 'rollout-2026-11-10T00-00-00-' + session + '.jsonl' : session + '.jsonl');
+    appendFileSync(file, JSON.stringify(cli === 'codex' ? {type:'turn_context', payload:{model, effort}} : {type:'assistant', isSidechain:false, message:{model}, effort}) + '\\n');
+    // Codex's running token total for the conversation.
+    if (cli === 'codex') appendFileSync(file, [{timestamp:new Date().toISOString(), type:'event_msg', payload:{type:'task_started'}}, {type:'event_msg', payload:{type:'token_count', info:{total_token_usage:{input_tokens:1500, cached_input_tokens:1000, output_tokens:200}}}}].map((entry) => JSON.stringify(entry) + '\\n').join(''));
   }
   const hangs = process.env.TEST_WORKER === 'hang' || (process.env.TEST_WORKER === 'hang-c1' && inC1) || (process.env.TEST_WORKER === 'hangfirst' && count === 1);
   if (hangs || process.env.TEST_WORKER === 'leaky') {
@@ -590,6 +593,36 @@ test("ranSettings reads the last model and effort a conversation ran with from e
     assert.equal(ranSettings("claude", id, "/any", { CLAUDE_CONFIG_DIR: join(homes, "missing") }), undefined);
   } finally {
     rmSync(homes, { recursive: true, force: true });
+  }
+});
+
+test("roundTokens gives a Codex round's own tokens: the running total's change since the round's task started", () => {
+  const home = mkdtempSync(join(tmpdir(), "pair-codex-home-"));
+  try {
+    const env = { CODEX_HOME: home };
+    const id = "11111111-1111-4111-8111-111111111111";
+    const dir = join(home, "sessions", "2026", "11", "09");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `rollout-2026-11-09T23-00-00-${id}.jsonl`);
+    const started = (timestamp) => ({ timestamp, type: "event_msg", payload: { type: "task_started" } });
+    const total = (input, cached, output) => ({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } } } });
+    const write = (...entries) => writeFileSync(file, entries.map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry)).join("\n") + "\n");
+    const first = Date.parse("2026-11-09T23:00:01Z");
+    const second = Date.parse("2026-11-09T23:10:01Z");
+    write(started("2026-11-09T23:00:01Z"), total(100, 50, 10), { type: "event_msg", payload: { type: "token_count", info: null } }, total(300, 200, 30));
+    assert.deepEqual(roundTokens(id, first, env), { input: 300, cachedInput: 200, output: 30 }, "a conversation's first round counts from zero");
+    write(started("2026-11-09T23:00:01Z"), total(100, 50, 10), total(300, 200, 30), started("2026-11-09T23:10:01Z"), "not json", total(500, 400, 45));
+    assert.deepEqual(roundTokens(id, second, env), { input: 200, cachedInput: 200, output: 15 }, "a resumed round is the change since its task started");
+    assert.equal(roundTokens(id, second + 1, env), undefined, "a round that never started a task isn't given the previous round's tokens");
+    write(started("2026-11-09T23:00:01Z"), total(300, 200, 30), started("2026-11-09T23:10:01Z"), total(90, 60, 9));
+    assert.deepEqual(roundTokens(id, second, env), { input: 90, cachedInput: 60, output: 9 }, "a total that restarted on resume counts from zero");
+    write(started("2026-11-09T23:00:01Z"), total(300, 200, 30), started("2026-11-09T23:10:01Z"), total(90, 60, 9), total(500, 300, 50));
+    assert.deepEqual(roundTokens(id, second, env), { input: 500, cachedInput: 300, output: 50 }, "even when the restarted total grows past the old one");
+    write(started("2026-11-09T23:00:01Z"));
+    assert.equal(roundTokens(id, first, env), undefined, "a task without a total");
+    assert.equal(roundTokens("22222222-2222-4222-8222-222222222222", first, env), undefined);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -1948,13 +1981,15 @@ test("a refused round tells the author not to retry, and status shows the last r
 });
 
 test("status shows a running round, then its verdict, and --json carries the same state", { timeout: 15_000 }, async (t) => {
-  const f = fixture(t, { scenario: "review", worker: "gated-release" });
+  const codexHome = mkdtempSync(join(tmpdir(), "pair-codex-home-"));
+  t.after(() => rmSync(codexHome, { recursive: true, force: true }));
+  const f = fixture(t, { scenario: "review", worker: "gated-release", extraEnv: { TEST_SESSION_FILES: "1", CODEX_HOME: codexHome } });
   await until(() => existsSync(f.file("worker.pid")), "round running");
   assert.match((await f.command(["status"])).stdout, /round running: thread \S+ · launched \d\d:\d\d:\d\d, \d+s ago/);
   writeFileSync(f.file("release"), "");
   await until(() => existsSync(f.file("first.out")), "verdict delivered");
   const text = (await f.command(["status"])).stdout;
-  assert.match(text, /last round: thread \S+ · verdict approve · finished /);
+  assert.match(text, /last round: thread \S+ · verdict approve · finished [^\n]* · tokens 1\.5K in \(67% cached\), 200 out/);
   const [{ startedIn }] = JSON.parse(f.read("calls.json"));
   assert.ok(!existsSync(startedIn), "a Codex round's start directory is removed when the round ends, while the session runs on");
   assert.doesNotMatch(text, /round running/);
@@ -1963,6 +1998,7 @@ test("status shows a running round, then its verdict, and --json carries the sam
   assert.equal(json.auto.mode, "running");
   assert.equal(json.auto.lastRound.verdict, "approve");
   assert.ok(json.auto.lastRound.finishedAt >= json.auto.lastRound.launchedAt);
+  assert.deepEqual(json.auto.lastRound.tokens, { input: 1500, cachedInput: 1000, output: 200 });
   assert.equal(json.lanes["claude-to-codex"], "idle");
   assert.equal(json.instructions.skill, "current");
   await assert.rejects(f.command(["history", "--json"]), /--json is only supported by pair status/);
