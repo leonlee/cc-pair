@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { basename, join } from "node:path";
@@ -2052,6 +2052,30 @@ test("--max-reviews stops launches past the limit, retries included, until pair 
   assert.equal(start.filter((arg) => arg === "--max-reviews").length, 1);
   assert.match((await f.command(["reviewer", "--max-reviews", "0"])).stdout, /review launch limit: no limit \(was 2\)/);
   assert.ok(!JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8")).start.includes("--max-reviews"), "no limit, no option");
+  await f.command(["stop"]);
+});
+
+test("a reviewer CLI upgraded in place during the session still launches: pair keeps its link, not the versioned target", { timeout: 20_000 }, async (t) => {
+  const cask = mkdtempSync(join(tmpdir(), "pair-cask-"));
+  t.after(() => rmSync(cask, { recursive: true, force: true }));
+  const link = join(cask, "codex");
+  const install = (version, root) => {
+    mkdirSync(join(cask, version));
+    copyFileSync(join(root, "fake-agent"), join(cask, version, "codex"));
+    chmodSync(join(cask, version, "codex"), 0o755);
+    rmSync(link, { force: true });
+    symlinkSync(join(cask, version, "codex"), link);
+  };
+  let root;
+  const f = fixture(t, { scenario: "gated", codexPath: link, setup: (context) => { root = context.root; install("0.1", root); } });
+  await until(() => existsSync(f.file("first.out")), "first verdict");
+  // Like brew upgrade: the new version is linked and the old version's directory removed.
+  install("0.2", root);
+  rmSync(join(cask, "0.1"), { recursive: true });
+  writeFileSync(f.file("go1"), "");
+  await until(() => existsSync(f.file("second.out")) || existsSync(f.file("first.error")), "second round");
+  assert.ok(!existsSync(f.file("first.error")), existsSync(f.file("first.error")) ? f.read("first.error") : "");
+  assert.match(f.read("second.out"), /verdict approve/);
   await f.command(["stop"]);
 });
 

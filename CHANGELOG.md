@@ -55,6 +55,10 @@ history and registrations work as they are.
 
 Fixes found while testing with the real CLIs:
 
+- Upgrading a CLI with Homebrew during a session made every later review fail with
+  `spawn …/Caskroom/codex/<old version>/bin/codex ENOENT`: pair kept the versioned path behind the
+  `codex` link, and the upgrade removes that directory. pair now keeps the path it found on `PATH`
+  (or the `--codex`/`--claude` path you gave), so each round launches the version installed then.
 - Security: a Claude reviewer loaded the worktree's own `.claude` settings, so a branch's hooks ran
   with your permissions when a review started. It now loads only your user settings and no MCP
   servers, and reads the worktree's `CLAUDE.md` as instructions. A Codex reviewer likewise loaded the

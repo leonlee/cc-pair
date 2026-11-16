@@ -667,7 +667,9 @@ export function executable(name: Agent, override?: string): string {
   const candidates = override ? [override] : (process.env.PATH ?? "").split(delimiter).filter(isAbsolute).map((dir) => join(dir, name));
   for (const path of candidates) {
     if (!isAbsolute(path)) throw new Error(`${name} executable must be an absolute path`);
-    try { accessSync(path, constants.X_OK); return realpathSync(path); } catch { /* try next PATH entry */ }
+    // The path as found, not its target: a package manager that upgrades in place (Homebrew links
+    // bin/codex to a versioned directory it removes) would otherwise strand a running session.
+    try { accessSync(path, constants.X_OK); return path; } catch { /* try next PATH entry */ }
   }
   throw new Error(`${name} executable not found; install it or pass --${name} /absolute/path`);
 }
