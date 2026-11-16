@@ -95,7 +95,7 @@ if (reviewer) {
     const dir = cli === 'codex' ? join(process.env.CODEX_HOME, 'sessions', '2026', '11', '10') : join(process.env.CLAUDE_CONFIG_DIR, 'projects', process.cwd().replace(/[^A-Za-z0-9]/g, '-'));
     mkdirSync(dir, {recursive:true});
     const file = join(dir, cli === 'codex' ? 'rollout-2026-11-10T00-00-00-' + session + '.jsonl' : session + '.jsonl');
-    appendFileSync(file, JSON.stringify(cli === 'codex' ? {type:'turn_context', payload:{model, effort}} : {type:'assistant', isSidechain:false, message:{model}, effort}) + '\\n');
+    appendFileSync(file, JSON.stringify(cli === 'codex' ? {type:'turn_context', payload:{model, effort}} : {type:'assistant', timestamp:new Date().toISOString(), isSidechain:false, message:{id:'msg-' + session, model, usage:{input_tokens:500, cache_creation_input_tokens:0, cache_read_input_tokens:1000, output_tokens:200}}, effort}) + '\\n');
     // Codex's running token total for the conversation.
     if (cli === 'codex') appendFileSync(file, [{timestamp:new Date().toISOString(), type:'event_msg', payload:{type:'task_started'}}, {type:'event_msg', payload:{type:'token_count', info:{total_token_usage:{input_tokens:1500, cached_input_tokens:1000, output_tokens:200}}}}].map((entry) => JSON.stringify(entry) + '\\n').join(''));
   }
@@ -504,6 +504,7 @@ for (const author of ["claude", "codex"]) test(`status shows what the ${author =
   const { log } = f.state(); // auto.json goes when the session ends
   let status = "";
   await until(async () => /\(ran default-model\)/.test(status = (await f.command(["status"])).stdout), "the round's settings are read");
+  assert.match(status, /last round: [^\n]* · tokens 1\.5K in \(67% cached\), 200 out\n/, "and what the round used");
   assert.match(status, /reviewer for thread \S+: model CLI default \(ran default-model\) · effort high\n/, "a requested value the reviewer used isn't repeated");
   assert.match(status, /reviewer for new threads: model CLI default \(last ran default-model\) · effort high\n/);
   await f.command(["reviewer", "--reviewer-model", "new-model"]);
@@ -610,17 +611,48 @@ test("roundTokens gives a Codex round's own tokens: the running total's change s
     const first = Date.parse("2026-11-09T23:00:01Z");
     const second = Date.parse("2026-11-09T23:10:01Z");
     write(started("2026-11-09T23:00:01Z"), total(100, 50, 10), { type: "event_msg", payload: { type: "token_count", info: null } }, total(300, 200, 30));
-    assert.deepEqual(roundTokens(id, first, env), { input: 300, cachedInput: 200, output: 30 }, "a conversation's first round counts from zero");
+    assert.deepEqual(roundTokens("codex", id, "/any", first, env), { input: 300, cachedInput: 200, output: 30 }, "a conversation's first round counts from zero");
     write(started("2026-11-09T23:00:01Z"), total(100, 50, 10), total(300, 200, 30), started("2026-11-09T23:10:01Z"), "not json", total(500, 400, 45));
-    assert.deepEqual(roundTokens(id, second, env), { input: 200, cachedInput: 200, output: 15 }, "a resumed round is the change since its task started");
-    assert.equal(roundTokens(id, second + 1, env), undefined, "a round that never started a task isn't given the previous round's tokens");
+    assert.deepEqual(roundTokens("codex", id, "/any", second, env), { input: 200, cachedInput: 200, output: 15 }, "a resumed round is the change since its task started");
+    assert.equal(roundTokens("codex", id, "/any", second + 1, env), undefined, "a round that never started a task isn't given the previous round's tokens");
     write(started("2026-11-09T23:00:01Z"), total(300, 200, 30), started("2026-11-09T23:10:01Z"), total(90, 60, 9));
-    assert.deepEqual(roundTokens(id, second, env), { input: 90, cachedInput: 60, output: 9 }, "a total that restarted on resume counts from zero");
+    assert.deepEqual(roundTokens("codex", id, "/any", second, env), { input: 90, cachedInput: 60, output: 9 }, "a total that restarted on resume counts from zero");
     write(started("2026-11-09T23:00:01Z"), total(300, 200, 30), started("2026-11-09T23:10:01Z"), total(90, 60, 9), total(500, 300, 50));
-    assert.deepEqual(roundTokens(id, second, env), { input: 500, cachedInput: 300, output: 50 }, "even when the restarted total grows past the old one");
+    assert.deepEqual(roundTokens("codex", id, "/any", second, env), { input: 500, cachedInput: 300, output: 50 }, "even when the restarted total grows past the old one");
     write(started("2026-11-09T23:00:01Z"));
-    assert.equal(roundTokens(id, first, env), undefined, "a task without a total");
-    assert.equal(roundTokens("22222222-2222-4222-8222-222222222222", first, env), undefined);
+    assert.equal(roundTokens("codex", id, "/any", first, env), undefined, "a task without a total");
+    assert.equal(roundTokens("codex", "22222222-2222-4222-8222-222222222222", "/any", first, env), undefined);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("roundTokens sums a Claude round's own model calls: each message once, subagents included, earlier rounds and Claude's own messages left out", () => {
+  const home = mkdtempSync(join(tmpdir(), "pair-claude-home-"));
+  try {
+    const env = { CLAUDE_CONFIG_DIR: home };
+    const id = "11111111-1111-4111-8111-111111111111";
+    const dir = join(home, "projects", "-work-repo");
+    mkdirSync(join(dir, id, "subagents"), { recursive: true });
+    const call = (timestamp, message, model, input, read, created, output) => ({ type: "assistant", timestamp, isSidechain: false, message: { id: message, model, usage: { input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: created, output_tokens: output } } });
+    const lines = (...entries) => entries.map((entry) => typeof entry === "string" ? entry : JSON.stringify(entry)).join("\n") + "\n";
+    writeFileSync(join(dir, `${id}.jsonl`), lines(
+      call("2026-11-09T23:00:01Z", "msg_old", "claude-opus-5-5", 9, 900, 90, 9), // the previous round
+      { type: "system", subtype: "compact_boundary", timestamp: "2026-11-09T23:05:00Z", content: "Conversation compacted" }, // and its compaction
+      { type: "user", timestamp: "2026-11-09T23:10:00Z", message: { role: "user", content: "review" } },
+      call("2026-11-09T23:10:01Z", "msg_a", "claude-opus-5-5", 2, 1000, 300, 50),
+      call("2026-11-09T23:10:01Z", "msg_a", "claude-opus-5-5", 2, 1000, 300, 50), // a second content block of the same message
+      "not json",
+      call("2026-11-09T23:10:05Z", "msg_b", "claude-opus-5-5", 3, 1300, 100, 70),
+      call("2026-11-09T23:10:06Z", "msg_c", "<synthetic>", 0, 0, 0, 0)));
+    writeFileSync(join(dir, id, "subagents", "agent-1.jsonl"), lines(call("2026-11-09T23:10:03Z", "msg_sub", "claude-haiku-5-5", 10, 200, 0, 5)));
+    const since = Date.parse("2026-11-09T23:10:00Z");
+    assert.deepEqual(roundTokens("claude", id, "/work/repo", since, env), { input: 2 + 1000 + 300 + 3 + 1300 + 100 + 10 + 200, cachedInput: 2500, output: 125 });
+    assert.equal(roundTokens("claude", id, "/work/repo", Date.parse("2026-11-09T23:11:00Z"), env), undefined, "a round that called no model");
+    // A compaction's own model call isn't recorded: a round that compacted, here in a subagent, can't be totalled.
+    writeFileSync(join(dir, id, "subagents", "agent-1.jsonl"), lines(call("2026-11-09T23:10:03Z", "msg_sub", "claude-haiku-5-5", 10, 200, 0, 5), { type: "system", subtype: "compact_boundary", timestamp: "2026-11-09T23:10:04Z" }));
+    assert.equal(roundTokens("claude", id, "/work/repo", since, env), undefined, "a round that compacted");
+    assert.equal(roundTokens("claude", "22222222-2222-4222-8222-222222222222", "/work/repo", since, env), undefined);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
