@@ -378,7 +378,7 @@ function needsInit(root: string): boolean {
 }
 
 /** Enter or y accepts; anything else, Ctrl-C or end of input cancels. Releases stdin before the author takes the terminal. */
-async function confirm(question: string): Promise<boolean> {
+async function confirm(question: string, emptyMeans = true): Promise<boolean> {
   const prompt = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   try {
     return await new Promise<boolean>((resolve) => {
@@ -388,7 +388,7 @@ async function confirm(question: string): Promise<boolean> {
       };
       prompt.once("SIGINT", cancel);
       prompt.once("close", cancel);
-      prompt.question(question, (answer) => resolve(/^(y|yes)?$/i.test(answer.trim())));
+      prompt.question(question, (answer) => resolve(answer.trim() === "" ? emptyMeans : /^(y|yes)$/i.test(answer.trim())));
     });
   } finally {
     prompt.removeAllListeners();
@@ -1804,6 +1804,16 @@ async function upgradeFirst(argv: string[]): Promise<number | undefined> {
       throw new PairError(`npm install exited ${status}`);
     }
     installed = installedEntry("start the new pair yourself");
+    // npm may install for another Node (Volta, a second npm on PATH): hand over only to what it put there.
+    let found: unknown;
+    try {
+      found = (JSON.parse(readFileSync(join(dirname(installed), "..", "package.json"), "utf8")) as { version?: unknown }).version;
+    } catch {
+      found = undefined;
+    }
+    if (typeof found !== "string" || !isNewer(found, PACKAGE.version)) {
+      throw new PairError(`npm reports its global packages in ${dirname(dirname(dirname(installed)))}, which has no newer ${PACKAGE.name}`);
+    }
   } catch (error) {
     console.error(`pair: couldn't upgrade (${errorMessage(error)}); starting with ${PACKAGE.version}`);
     return undefined;
@@ -1838,8 +1848,8 @@ function pairBuild(): string {
 }
 
 /**
- * Auto mode already running where a start would run is refused before the start asks anything, except a
- * session on other pair code (an older version, or the same version reinstalled): in a terminal, the user can
+ * Auto mode already running where a start would run is refused before the start asks to confirm, except a
+ * session on other pair code (an older version, or another build of this one): in a terminal, the user can
  * stop it to start with this pair. Its author then ends in its own terminal.
  */
 async function replaceOtherBuild(target: string, yes: boolean, build: string): Promise<boolean> {
@@ -1867,7 +1877,8 @@ async function replaceOtherBuild(target: string, yes: boolean, build: string): P
   if (yes || !process.stdin.isTTY || !process.stdout.isTTY) {
     throw new PairError(`${running} with ${its}. To move it to this pair ${PACKAGE.version}, run pair stop there, then pair start --resume`);
   }
-  if (!(await confirm(`pair: ${running} with ${its}. Stop it, ending its author in its terminal, to start with this pair ${PACKAGE.version}? [Y/n] `))) {
+  // No by default: Enter typed ahead, say during an upgrade's npm install, mustn't end an author.
+  if (!(await confirm(`pair: ${running} with ${its}. Stop it, ending its author in its terminal, to start with this pair ${PACKAGE.version}? [y/N] `, false))) {
     throw new PairError("pair start cancelled; nothing was stopped or started");
   }
   // Only the session the user was shown: another may have taken its place while the question waited. An
@@ -1875,6 +1886,7 @@ async function replaceOtherBuild(target: string, yes: boolean, build: string): P
   if ((await owner())?.run !== state.run) {
     throw new PairError(`the auto session in ${target} changed while pair start asked; nothing was stopped or started. Run pair start again`);
   }
+  console.error("pair: stopping it…");
   console.error((await stopAuto(dir, target, state.run)).split("\n").map((line) => `pair: ${line}`).join("\n"));
   return true;
 }
@@ -2544,7 +2556,7 @@ environment:
   PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
   PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
-  PAIR_AUTO_UPGRADE      any value: pair start installs a newer pair from npm first, then runs with it
+  PAIR_AUTO_UPGRADE      any value: pair start installs a newer pair from npm first, then runs with it (not with PAIR_NO_UPDATE_CHECK)
   PAIR_BELL              any value: pair start rings the terminal bell when a review round finishes
   PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
 
@@ -2954,7 +2966,8 @@ async function main(argv: string[]): Promise<number> {
             return { authorArgs: found.args, recorded: `${found.id} (resumed: the last author conversation here, recorded ${found.at})`, session: authorSession(me, found.args) };
           };
           let { authorArgs, recorded, session } = conversation();
-          if (target !== undefined && (await replaceOtherBuild(target, Boolean(values.yes), build))) {
+          const replaced = target !== undefined && (await replaceOtherBuild(target, Boolean(values.yes), build));
+          if (replaced) {
             ({ authorArgs, recorded, session } = conversation());
           }
           console.error([
@@ -2966,13 +2979,19 @@ async function main(argv: string[]): Promise<number> {
           ].join("\n"));
           // Before anything is created: a worktree, instruction files, the author record, the socket, any agent.
           if (!values.yes && process.stdin.isTTY && process.stdout.isTTY && !(await confirm("Start? [Y/n] "))) {
-            throw new PairError("pair start cancelled; nothing was started");
+            throw new PairError(replaced ? "pair start cancelled; the session that ran here is stopped, and pair start --resume continues its conversation" : "pair start cancelled; nothing was started");
           }
           const startRoot = plan ? openWorktree(root, plan) : root;
           // The agents follow these instructions (finding, severity and verdict rules), so auto mode can't do without them.
           if (needsInit(startRoot)) {
             const wrote = init(channelDir(startRoot), startRoot).split("\n").filter((line) => /^(?:wrote|refused): |^kept: .*not written by pair/.test(line));
             console.error(wrote.map((line) => `pair: ${line}`).join("\n"));
+          } else {
+            // After an upgrade, the agents about to start load these files: not the previous release's.
+            const refreshed = refreshInstructions(startRoot);
+            if (refreshed) {
+              console.error(refreshed);
+            }
           }
           process.chdir(startRoot); // so pair ps groups this launcher with the worktree it runs
           const startChannel = channelDir(startRoot);
