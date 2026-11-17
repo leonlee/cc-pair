@@ -58,9 +58,10 @@ call `pair_listen`, or run idle waits. Never append `&` to a pair command, and d
 separate `pair wait` after a managed send: the send already returns the review. Use `pair wait`
 only for the retry below.
 
-If you are that session's author, not a subagent, and `PAIR_AUTO_PROMPT_FILE` is set as well, read
-that file at session start and after a clear or compaction, and follow it: it holds this launch's
-author instructions.
+If you are that session's author, not a subagent, and run in Codex, pair sets `PAIR_AUTO_PROMPT_FILE`
+to a file that holds this launch's author instructions: read it at session start and after a clear
+or compaction, and follow it. A Claude author gets them in its system prompt instead, and the
+variable isn't set for it, so there is nothing to check.
 
 If a managed review fails, the request stays on disk. Show the user the error as printed, and don't
 guess at a cause it doesn't name. If the error says a retry is unlikely to help, don't retry: ask

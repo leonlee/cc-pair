@@ -646,7 +646,7 @@ instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
   .claude/skills/pair/SKILL.md: current
 codex notifications: no session registered
-auto mode: claude author, codex reviewer · reviewing · owner 41820
+auto mode: claude author, codex reviewer · reviewing · owner 41820 · pair 0.10.0
   author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
   reviewer for new threads: model gpt-6.1-sol · effort high
   reviewer for thread 2026-11-06T05-19-31-945Z-da0bac: model CLI default (ran gpt-6.1-sol) · effort CLI default (ran xhigh)
@@ -696,6 +696,21 @@ overwritten, except files a newer pair wrote. Restart Claude Code and Codex afte
 an auto session in the same conversation, run `pair stop`, then `pair start --resume`
 ([Author conversations](#33-author-conversations)).
 
+`pair start` helps with both:
+
+- It shows the update notice when a newer release is out. With `PAIR_AUTO_UPGRADE=1`, it installs
+  that release with npm first and runs the same command with it; if the install fails, or npm
+  installs it where this pair can't find it, it starts with the pair you have. The npm check runs
+  at most once a day, and not at all with `PAIR_NO_UPDATE_CHECK`.
+- It refreshes this worktree's instruction files that an older pair wrote before the agents start,
+  so they load the instructions of the pair that starts them.
+- Where auto mode already runs on other pair code (an older version, or another build of this
+  one), `pair start` in a terminal asks whether to stop that session and start with this pair; its
+  author then ends in its own terminal. Only `y` stops it. A bare `pair start` offers to resume that
+  conversation, as after `pair stop`. Without a terminal, or with `--yes`, it only says what to run.
+  A session on the same code is refused before the start asks to confirm. `pair status` and
+  `pair ps` show the pair version each session runs.
+
 <a id="73-uninstall"></a>
 <a id="83-uninstall"></a>
 ### 9.3. Uninstall
@@ -729,6 +744,7 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
 | `PAIR_MAX_ROUNDS` | `3` | Review rounds before escalation; a brainstorm's turns, fixed when it opens |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
 | `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
+| `PAIR_AUTO_UPGRADE` | unset | Any value: `pair start` installs a newer release first ([Upgrade](#92-upgrade)); needs the npm release check |
 | `PAIR_BELL` | unset | Any value: `pair start` rings the terminal bell when a review round finishes |
 | `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |
 
