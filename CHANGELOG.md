@@ -39,6 +39,11 @@ history and registrations work as they are.
 - **Retry advice.** When a reviewer's own error shows a retry won't help (its provider refused the
   content, it isn't signed in, or its account is used up), the failed round says so and the author
   asks you instead of spending another launch. A rate limit or a timeout keeps the usual retry.
+- **`pair start` after an upgrade.** With `PAIR_AUTO_UPGRADE=1`, `pair start` installs a newer
+  release from npm first and runs the same command with it; without it, `pair start` shows the update
+  notice. Where auto mode already runs on other pair code (an older version, or the same version
+  reinstalled), `pair start` in a terminal offers to stop that session first, so it can be resumed
+  with this pair; `pair status` and `pair ps` show each session's pair version.
 - **`pair status` shows the running round and the last finished one**, with its verdict or failure,
   when it finished and the tokens its reviewer used (a resumed round counts only its own model
   calls). `pair status --json` gives the lanes, instruction states and the

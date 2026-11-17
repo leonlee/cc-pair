@@ -46,6 +46,9 @@ interface RecordState {
   /** Reviewer launches this run, retries and served worktrees included, and their limit (0: none; an older owner has neither). */
   launches?: number;
   maxLaunches?: number;
+  /** The pair version and build (a hash of its code) that started this owner; an older owner has neither. */
+  version?: string;
+  build?: string;
   worktree: string;
   phase: string;
   log: string;
@@ -106,6 +109,9 @@ export interface AutoOptions {
   timeoutMs: number;
   /** --max-reviews: reviewer launches allowed this run, 0 for no limit. */
   maxLaunches: number;
+  /** This pair's version and build, so a later pair start can tell a session on other code. */
+  version: string;
+  build: string;
   graceMs: number;
   /** --serve-worktrees: also review other worktrees of this repository, up to `reviewers` rounds at once. */
   serveWorktrees: boolean;
@@ -393,7 +399,7 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
     const { state } = reply;
     const defaults = { model: state.reviewerModel, effort: state.reviewerEffort };
     return [
-      `auto mode: ${who(state.authorName, state.author)} author, ${who(state.reviewerName, state.reviewer)} reviewer · ${state.phase} · owner ${state.pid}`,
+      `auto mode: ${who(state.authorName, state.author)} author, ${who(state.reviewerName, state.reviewer)} reviewer · ${state.phase} · owner ${state.pid}${state.version ? ` · pair ${state.version}` : ""}`,
       ...(state.authorSession ? [`  author session: ${state.authorSession}`] : []), // an older owner has none
       `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
       ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
@@ -413,9 +419,10 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
   }
 }
 
-export async function stopAuto(stateDir: string, root: string): Promise<string> {
+/** Stops the owner; with `run`, only that run (an older owner, which doesn't know runs, stops anyway). */
+export async function stopAuto(stateDir: string, root: string, run?: string): Promise<string> {
   // author.json outlives the run, so reading it after the owner removed auto.json is safe.
-  try { await autoCall(stateDir, { action: "stop" }, 40_000); return ["auto mode stopped; managed agent cleanup completed", ...lastAuthor(stateDir, root)].join("\n"); }
+  try { await autoCall(stateDir, { action: "stop", ...(run === undefined ? {} : { run }) }, 40_000); return ["auto mode stopped; managed agent cleanup completed", ...lastAuthor(stateDir, root)].join("\n"); }
   catch (error) {
     if (hasCode(error, "ENOENT")) return ["auto mode is not running", ...lastAuthor(stateDir, root)].join("\n");
     if (hasCode(error, "ECONNREFUSED")) throw new Error(`auto owner is gone; no process was signaled. Inspect and remove stale socket ${autoSocketPath(stateDir)} before restarting.`);
@@ -970,7 +977,7 @@ export async function startAuto(options: AutoOptions): Promise<number> {
   const run = randomUUID();
   const path = autoSocketPath(options.stateDir, true);
   const tty = terminalState();
-  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, authorName, reviewerName, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, timeoutMs: options.timeoutMs, launches: 0, maxLaunches: options.maxLaunches, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
+  const state: RecordState = { run, pid: process.pid, author: options.author, reviewer, authorName, reviewerName, reviewerModel: options.reviewerModel, reviewerEffort: options.reviewerEffort, timeoutMs: options.timeoutMs, launches: 0, maxLaunches: options.maxLaunches, version: options.version, build: options.build, worktree: options.root, phase: "starting", log: join(options.stateDir, "auto.log"), authorSession: describeSession(options.session) };
   let guardian: ChildProcess | undefined;
   let stopping: Promise<void> | undefined;
   let guardianDone: Promise<void> = Promise.resolve();
@@ -1411,7 +1418,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     recordAuthor((problem) => console.error(`pair: warning: ${problem}`));
     server.on("connection", (socket) => answer(socket, async (request) => {
       if (request.action === "status") return { state };
-      if (request.action === "stop") { await shutdown(); return { ok: true }; }
+      if (request.action === "stop") {
+        if (request.run !== undefined && request.run !== run) throw new Error("another auto session runs here now; nothing was stopped");
+        await shutdown();
+        return { ok: true };
+      }
       if (request.action === "reviewer") return { message: configure(request) };
       if (request.action === "review") {
         // Only the root's author is the session's resume identity, whatever ID a subagent reports.

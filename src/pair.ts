@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { execFile, execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, chmodSync, closeSync, constants, type Dirent, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1769,6 +1769,116 @@ async function updateNotice(): Promise<string[]> {
     : [];
 }
 
+/** Runs npm install for the latest pair, its output on this terminal; npm's exit status. */
+function installLatest(): number {
+  const install = spawnSync("npm", ["install", "--global", `${PACKAGE.name}@latest`], { stdio: "inherit" });
+  if (install.error) {
+    throw new PairError(`couldn't run npm: ${install.error.message}`);
+  }
+  return install.status ?? 1;
+}
+
+/** The pair npm just installed, not whatever `pair` comes first on PATH, which may be an older copy. */
+function installedEntry(otherwise: string): string {
+  const globalRoot = spawnSync("npm", ["root", "--global"], { encoding: "utf8" });
+  if (globalRoot.error || globalRoot.status !== 0) {
+    throw new PairError(`installed, but \`npm root --global\` failed; ${otherwise}`);
+  }
+  return join(globalRoot.stdout.trim(), PACKAGE.name, "dist", "pair.js");
+}
+
+/**
+ * PAIR_AUTO_UPGRADE: a start first installs a newer pair from npm, then hands the same command to it and
+ * returns its exit status. Undefined when there is nothing newer, or the install failed and this pair starts.
+ */
+async function upgradeFirst(argv: string[]): Promise<number | undefined> {
+  const latest = await latestVersion();
+  if (!latest || !isNewer(latest, PACKAGE.version)) {
+    return undefined;
+  }
+  console.error(`pair: PAIR_AUTO_UPGRADE: installing ${PACKAGE.name} ${latest} (this is ${PACKAGE.version})`);
+  let installed: string;
+  try {
+    const status = installLatest();
+    if (status !== 0) {
+      throw new PairError(`npm install exited ${status}`);
+    }
+    installed = installedEntry("start the new pair yourself");
+  } catch (error) {
+    console.error(`pair: couldn't upgrade (${errorMessage(error)}); starting with ${PACKAGE.version}`);
+    return undefined;
+  }
+  const child = spawn(process.execPath, [installed, ...argv], { stdio: "inherit" });
+  // Passed on, as the launcher would get them: one the terminal also sent the new pair arrives twice, and
+  // its shutdown runs once.
+  for (const name of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(name, () => { child.kill(name); });
+  }
+  return await new Promise<number>((resolve) => {
+    child.once("error", (error) => {
+      console.error(`pair: couldn't run the new pair: ${error.message}`);
+      resolve(1);
+    });
+    child.once("exit", (code, signal) => resolve(code ?? 128 + (signal ? osConstants.signals[signal] : 0)));
+  });
+}
+
+/** This install's code, as a short hash: a reinstalled build of the same version still differs. */
+function pairBuild(): string {
+  const hash = createHash("sha256");
+  for (const dir of ["dist", "prompts"]) {
+    for (const name of readdirSync(join(PACKAGE_ROOT, dir)).sort()) {
+      const path = join(PACKAGE_ROOT, dir, name);
+      if (statSync(path).isFile()) {
+        hash.update(`${dir}/${name}\0`).update(readFileSync(path));
+      }
+    }
+  }
+  return hash.digest("hex").slice(0, 12);
+}
+
+/**
+ * Auto mode already running where a start would run is refused before the start asks anything, except a
+ * session on other pair code (an older version, or the same version reinstalled): in a terminal, the user can
+ * stop it to start with this pair. Its author then ends in its own terminal.
+ */
+async function replaceOtherBuild(target: string, yes: boolean, build: string): Promise<boolean> {
+  const dir = stateDir(channelDir(target));
+  const owner = async (): Promise<{ run?: string; pid?: number; version?: string; build?: string } | undefined> => {
+    try {
+      const reply = await autoCall(dir, { action: "status" });
+      return reply.served ? undefined : reply.state;
+    } catch {
+      return undefined; // nothing runs here; a stale or unreachable socket is the start's own error to report
+    }
+  };
+  const state = await owner();
+  if (!state) {
+    return false;
+  }
+  const running = `auto mode already runs in ${target} (owner ${state.pid})`;
+  if (state.build === build) {
+    throw new PairError(`${running}; run pair stop there first`);
+  }
+  const its = state.version ? `pair ${state.version}${state.version === PACKAGE.version ? ", another build" : ""}` : "an older pair";
+  if (state.version && isNewer(state.version, PACKAGE.version)) {
+    throw new PairError(`${running} with ${its}, newer than this pair ${PACKAGE.version}; run pair stop there first`);
+  }
+  if (yes || !process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new PairError(`${running} with ${its}. To move it to this pair ${PACKAGE.version}, run pair stop there, then pair start --resume`);
+  }
+  if (!(await confirm(`pair: ${running} with ${its}. Stop it, ending its author in its terminal, to start with this pair ${PACKAGE.version}? [Y/n] `))) {
+    throw new PairError("pair start cancelled; nothing was stopped or started");
+  }
+  // Only the session the user was shown: another may have taken its place while the question waited. An
+  // owner that knows the run refuses a stop meant for another; an older one is checked here just before.
+  if ((await owner())?.run !== state.run) {
+    throw new PairError(`the auto session in ${target} changed while pair start asked; nothing was stopped or started. Run pair start again`);
+  }
+  console.error((await stopAuto(dir, target, state.run)).split("\n").map((line) => `pair: ${line}`).join("\n"));
+  return true;
+}
+
 /** Installs the latest pair, then lets the new version refresh this worktree's instructions. */
 function upgrade(root: string): number {
   // npm's own answer, from the registry it installs from; if it fails, the install reports why.
@@ -1785,25 +1895,16 @@ function upgrade(root: string): number {
     console.log(`already up to date: ${PACKAGE.name} ${PACKAGE.version}${note ? `\n${note}` : ""}`);
     return 0;
   }
-  const install = spawnSync("npm", ["install", "--global", `${PACKAGE.name}@latest`], { stdio: "inherit" });
-  if (install.error) {
-    throw new PairError(`couldn't run npm: ${install.error.message}`);
-  }
-  if (install.status !== 0) {
-    return install.status ?? 1;
+  const status = installLatest();
+  if (status !== 0) {
+    return status;
   }
   const states = [
     instructionState(root, join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()),
     instructionState(root, join(root, "AGENTS.md"), codexSection(), true),
   ];
   if (states.some((state) => state !== "missing")) {
-    // The package just installed, not whatever `pair` comes first on PATH, which may be an older copy.
-    const globalRoot = spawnSync("npm", ["root", "--global"], { encoding: "utf8" });
-    if (globalRoot.error || globalRoot.status !== 0) {
-      throw new PairError("installed, but `npm root --global` failed; run `pair init` yourself");
-    }
-    const installed = join(globalRoot.stdout.trim(), PACKAGE.name, "dist", "pair.js");
-    const init = spawnSync(process.execPath, [installed, "init"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+    const init = spawnSync(process.execPath, [installedEntry("run `pair init` yourself"), "init"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
     if (init.error || init.status !== 0) {
       throw new PairError(`installed, but the new \`pair init\` failed${init.error ? `: ${init.error.message}` : ""}; run it yourself`);
     }
@@ -2443,6 +2544,7 @@ environment:
   PAIR_MAX_ROUNDS        review rounds before a thread is escalated, or a new brainstorm's turns (default 3)
   PAIR_KEEP              finished threads to keep: a number, or all (default 100)
   PAIR_NO_UPDATE_CHECK   any value turns off the daily npm version check
+  PAIR_AUTO_UPGRADE      any value: pair start installs a newer pair from npm first, then runs with it
   PAIR_BELL              any value: pair start rings the terminal bell when a review round finishes
   PAIR_AUTO_SOCKET_DIR   private absolute directory for auto-mode sockets (default /tmp/pair-auto-<uid>)`;
 
@@ -2742,6 +2844,14 @@ async function main(argv: string[]): Promise<number> {
         await runGuardian();
         return 0;
       case "start": {
+        if (process.env.PAIR_AUTO_UPGRADE) {
+          try { checkOwnTerminal(); } catch (error) { throw new PairError(errorMessage(error)); } // never npm install from inside an agent
+          delete process.env.PAIR_AUTO_UPGRADE; // once: not again in the guided start's own run, nor in the new pair
+          const status = await upgradeFirst(argv);
+          if (status !== undefined) {
+            return status;
+          }
+        }
         // pair start [AUTHOR_CLI [REVIEWER_CLI]] [--as NAME] [--reviewer NAME]: the words choose CLIs,
         // the flags names. The 0.9 form, --as claude|codex without CLIs, still names the author's CLI.
         const clis = rest.slice(0, rest.length - passthrough.length);
@@ -2829,23 +2939,30 @@ async function main(argv: string[]): Promise<number> {
           };
           checkStart(choices);
           const plan = values.worktree === undefined ? undefined : planWorktree(root, values.worktree);
-          let authorArgs = passthrough;
-          let recorded: string | undefined;
-          if (values.resume) {
-            if (plan?.add) {
-              throw new PairError(`--resume needs an existing worktree; ${plan.path} doesn't exist yet`);
-            }
-            const target = plan ? realpathSync(plan.path) : root;
-            const found = withRecordedSession(me, passthrough, stateDir(channelDir(target)), target);
-            authorArgs = found.args;
-            recorded = `${found.id} (resumed: the last author conversation here, recorded ${found.at})`;
+          const build = pairBuild();
+          const target = plan?.add ? undefined : plan ? realpathSync(plan.path) : root;
+          if (values.resume && target === undefined) {
+            throw new PairError(`--resume needs an existing worktree; ${plan?.path} doesn't exist yet`);
           }
-          const session = authorSession(me, authorArgs);
+          // The author's conversation, checked before a running session is stopped for it, and read again after:
+          // --resume takes the record that session keeps.
+          const conversation = () => {
+            if (!values.resume) {
+              return { authorArgs: passthrough, recorded: undefined, session: authorSession(me, passthrough) };
+            }
+            const found = withRecordedSession(me, passthrough, stateDir(channelDir(target!)), target!);
+            return { authorArgs: found.args, recorded: `${found.id} (resumed: the last author conversation here, recorded ${found.at})`, session: authorSession(me, found.args) };
+          };
+          let { authorArgs, recorded, session } = conversation();
+          if (target !== undefined && (await replaceOtherBuild(target, Boolean(values.yes), build))) {
+            ({ authorArgs, recorded, session } = conversation());
+          }
           console.error([
             `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
             `pair:   author ${who(authorName, me)} · session ${session.kind === "resume" && recorded ? recorded : describeSession(session)}`,
             `pair:   reviewer ${who(reviewerName, reviewer)} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
             ...(serveWorktrees ? [`pair:   serves subagent worktrees · ${reviewers} reviewer${reviewers === 1 ? "" : "s"} at a time`] : []),
+            ...(await updateNotice()).map((line) => `pair: ${line}`),
           ].join("\n"));
           // Before anything is created: a worktree, instruction files, the author record, the socket, any agent.
           if (!values.yes && process.stdin.isTTY && process.stdout.isTTY && !(await confirm("Start? [Y/n] "))) {
@@ -2872,6 +2989,8 @@ async function main(argv: string[]): Promise<number> {
               .concat(serveWorktrees ? ["--serve-worktrees", ...(values.reviewers === undefined ? [] : ["--reviewers", values.reviewers])] : []),
             timeoutMs: timeout * 1000,
             maxLaunches,
+            version: PACKAGE.version,
+            build,
             graceMs: grace * 1000,
             serveWorktrees, reviewers, reviewerRules: reviewerRules(reviewer),
             target: (laneChannel) => {

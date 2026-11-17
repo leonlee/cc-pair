@@ -696,6 +696,18 @@ overwritten, except files a newer pair wrote. Restart Claude Code and Codex afte
 an auto session in the same conversation, run `pair stop`, then `pair start --resume`
 ([Author conversations](#33-author-conversations)).
 
+`pair start` helps with both:
+
+- It shows the update notice when a newer release is out. With `PAIR_AUTO_UPGRADE=1`, it installs
+  that release with npm first and runs the same command with it; if the install fails, it starts
+  with the pair you have. The npm check runs at most once a day.
+- Where auto mode already runs on other pair code (an older version, or the same version
+  reinstalled), `pair start` in a terminal asks whether to stop that session and start with this
+  pair; its author then ends in its own terminal. A bare `pair start` offers to resume that
+  conversation, as after `pair stop`. Without a terminal, or with `--yes`, it only says so. A session on the same code is
+  refused before anything is asked. `pair status` and `pair ps` show the pair version each session
+  runs.
+
 <a id="73-uninstall"></a>
 <a id="83-uninstall"></a>
 ### 9.3. Uninstall
@@ -729,6 +741,7 @@ terminal ([Participants](#4-participants)); `pair start` does this for the agent
 | `PAIR_MAX_ROUNDS` | `3` | Review rounds before escalation; a brainstorm's turns, fixed when it opens |
 | `PAIR_KEEP` | `100` | Finished threads kept; `all` keeps every thread, `0` none |
 | `PAIR_NO_UPDATE_CHECK` | unset | Any value disables the npm release check |
+| `PAIR_AUTO_UPGRADE` | unset | Any value: `pair start` installs a newer release first ([Upgrade](#92-upgrade)) |
 | `PAIR_BELL` | unset | Any value: `pair start` rings the terminal bell when a review round finishes |
 | `PAIR_AUTO_SOCKET_DIR` | `/tmp/pair-auto-<uid>` | Private absolute directory for auto-mode sockets; keep it short |
 

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, retryAdvice, roundTokens, setReviewer, withRecordedSession } from "../dist/auto.js";
@@ -33,7 +33,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false, codexPath } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false, codexPath, cli = CLI } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -211,7 +211,7 @@ if (reviewer) {
     if (initRoot) assert.equal(spawnSync(process.execPath, [CLI, "init"], { cwd: root, env }).status, 0);
   }
   setup?.({ root, env });
-  const launcher = spawn(process.execPath, [CLI, "start", "--as", author, "--claude", fake, "--codex", codexPath ?? fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+  const launcher = spawn(process.execPath, [cli, "start", "--as", author, "--claude", fake, "--codex", codexPath ?? fake, "--timeout", String(timeout), "--grace", "0.15", ...overrides], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   launcher.stdout.on("data", (data) => { output += data; });
   launcher.stderr.on("data", (data) => { output += data; });
@@ -919,7 +919,8 @@ test("successful reviewer cleanup also terminates leftover tool processes", { ti
 test("a second launcher cannot take over a live worktree", { timeout: 15_000 }, async (t) => {
   const f = fixture(t, { scenario: "hold" });
   await until(() => existsSync(f.file("author.pid")), "author started");
-  await assert.rejects(f.command(["start", "--as", "codex", "--claude", f.fake, "--codex", f.fake]), /cannot own auto mode socket/);
+  // Refused before it asks anything; the socket it can't own still refuses a start that races past this check.
+  await assert.rejects(f.command(["start", "--as", "codex", "--claude", f.fake, "--codex", f.fake]), /auto mode already runs in \S+ \(owner \d+\); run pair stop there first/);
   assert.ok(alive(Number(f.read("author.pid"))));
   await f.command(["stop"]);
 });
@@ -2109,6 +2110,120 @@ test("a reviewer CLI upgraded in place during the session still launches: pair k
   assert.ok(!existsSync(f.file("first.error")), existsSync(f.file("first.error")) ? f.read("first.error") : "");
   assert.match(f.read("second.out"), /verdict approve/);
   await f.command(["stop"]);
+});
+
+/** A copy of this pair with its code changed by a comment: the same version, another build, as a reinstall gives. */
+function anotherBuild(t) {
+  const dir = mkdtempSync(join(tmpdir(), "pair-other-build-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const name of ["dist", "prompts", "package.json"]) cpSync(join(dirname(CLI), "..", name), join(dir, name), { recursive: true });
+  appendFileSync(join(dir, "dist", "pair.js"), "\n// another build\n");
+  return join(dir, "dist", "pair.js");
+}
+
+const running = async (f) => until(async () => /· owner \d+ · pair \d/.test((await f.command(["status"])).stdout), "auto mode running");
+
+test("pair start where auto mode runs is refused before it asks anything, and names a session on other pair code", { timeout: 20_000 }, async (t) => {
+  const other = anotherBuild(t);
+  const f = fixture(t, { scenario: "hold", cli: other });
+  await running(f);
+  const again = (cli) => spawnSync(process.execPath, [cli, "start", "claude", "--claude", f.fake, "--codex", f.fake, "--yes"], { cwd: f.root, env: f.env, encoding: "utf8" });
+  const fromNew = again(CLI);
+  assert.equal(fromNew.status, 1);
+  assert.match(fromNew.stderr, /auto mode already runs in \S+ \(owner \d+\) with pair [\d.]+, another build\. To move it to this pair [\d.]+, run pair stop there, then pair start --resume/);
+  const fromSame = again(other);
+  assert.equal(fromSame.status, 1);
+  assert.match(fromSame.stderr, /auto mode already runs in \S+ \(owner \d+\); run pair stop there first/);
+  assert.doesNotMatch(fromNew.stderr + fromSame.stderr, /pair:   author|cannot own auto mode socket/, "refused before the start summary and the socket");
+  // A start that couldn't run anyway fails on its own terms first, so it never stops a session for nothing.
+  const wrongResume = spawnSync(process.execPath, [CLI, "start", "codex", "--resume", "--claude", f.fake, "--codex", f.fake, "--yes"], { cwd: f.root, env: f.env, encoding: "utf8" });
+  assert.equal(wrongResume.status, 1);
+  assert.match(wrongResume.stderr, /the last author in \S+ was claude, not codex; start without --resume/);
+  // The owner stops only the run it was asked to stop.
+  await assert.rejects(f.call({ action: "stop", run: "another-run" }), /another auto session runs here now; nothing was stopped/);
+  await running(f);
+  await f.command(["stop"]);
+});
+
+test("PAIR_AUTO_UPGRADE: pair start installs a newer pair with npm and hands it the same command", { timeout: 20_000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pair-upgrade-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, "bin");
+  const global = join(dir, "global");
+  mkdirSync(bin);
+  mkdirSync(join(global, "claude-codex-pair", "dist"), { recursive: true });
+  writeFileSync(join(bin, "npm"), `#!/bin/sh\necho "$@" >> '${dir}/npm.calls'\nif [ "$1" = root ]; then echo '${global}'; exit 0; fi\nexit "\${NPM_INSTALL_STATUS:-0}"\n`);
+  chmodSync(join(bin, "npm"), 0o755);
+  // The newly installed pair: it records how it was run, then the signal that ends it.
+  writeFileSync(join(global, "claude-codex-pair", "dist", "pair.js"), [
+    `const { writeFileSync } = require("fs");`,
+    `for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(name, () => { writeFileSync(${JSON.stringify(join(dir, "signal"))}, name); process.exit(7); });`,
+    `writeFileSync(${JSON.stringify(join(dir, "new.json"))}, JSON.stringify({ argv: process.argv.slice(2), upgrade: process.env.PAIR_AUTO_UPGRADE ?? null }));`,
+    `setInterval(() => {}, 1000);`,
+  ].join("\n"));
+  const state = join(dir, "state");
+  mkdirSync(join(state, "pair"), { recursive: true });
+  writeFileSync(join(state, "pair", "latest.json"), JSON.stringify({ checkedAt: Date.now(), version: "999.0.0" })); // today's npm check
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: state, PAIR_HOME: join(dir, "home"), PAIR_NO_UPDATE_CHECK: "", PAIR_AUTO_UPGRADE: "1", CODEX_THREAD_ID: "", CLAUDECODE: "" };
+  const start = (extra = {}) => spawnSync(process.execPath, [CLI, "start", "claude", "--timeout", "0"], { cwd: dir, env: { ...env, ...extra }, encoding: "utf8" });
+  // Each signal sent to this pair alone reaches the new one, as it would have reached the launcher.
+  for (const name of ["SIGINT", "SIGHUP", "SIGTERM"]) {
+    rmSync(join(dir, "new.json"), { force: true });
+    rmSync(join(dir, "npm.calls"), { force: true });
+    const wrapper = spawn(process.execPath, [CLI, "start", "claude", "--timeout", "0"], { cwd: dir, env, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    wrapper.stderr.on("data", (data) => { stderr += data; });
+    const exited = new Promise((resolve) => wrapper.once("close", (code) => resolve(code)));
+    await until(() => existsSync(join(dir, "new.json")), "the new pair runs");
+    wrapper.kill(name);
+    assert.equal(await exited, 7, stderr);
+    assert.equal(readFileSync(join(dir, "signal"), "utf8"), name);
+    assert.match(stderr, /PAIR_AUTO_UPGRADE: installing claude-codex-pair 999\.0\.0 \(this is [\d.]+\)/);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "new.json"), "utf8")), { argv: ["start", "claude", "--timeout", "0"], upgrade: null }, "the same command, and the new pair doesn't upgrade again");
+    assert.equal(readFileSync(join(dir, "npm.calls"), "utf8"), "install --global claude-codex-pair@latest\nroot --global\n");
+  }
+  const failed = start({ NPM_INSTALL_STATUS: "1" });
+  assert.match(failed.stderr, /couldn't upgrade \(npm install exited 1\); starting with [\d.]+[^]*--timeout must be a positive number/, "a failed install starts this pair");
+  assert.equal(start({ CLAUDECODE: "1" }).stderr.trim(), "pair: run pair start in your own terminal, outside Claude or Codex", "never from inside an agent");
+});
+
+test("in a terminal, pair start offers to stop a session on other pair code, and stops it", {
+  timeout: 25_000,
+  skip: spawnSync("python3", ["--version"]).status !== 0 && "Python is needed for the PTY harness",
+}, async (t) => {
+  const f = fixture(t, { scenario: "hold", cli: anotherBuild(t) });
+  await running(f);
+  const python = `
+import os, pty, select, subprocess, sys, time
+master, slave = pty.openpty()
+child = subprocess.Popen(sys.argv[1:], cwd=os.environ['TEST_ROOT'], stdin=slave, stdout=slave, stderr=slave)
+output = b''
+def expect(text):
+    global output
+    deadline = time.monotonic() + 12
+    while text not in output and time.monotonic() < deadline:
+        if select.select([master], [], [], 0.1)[0]: output += os.read(master, 65536)
+    assert text in output, output
+try:
+    expect(b'to start with this pair')
+    os.write(master, b'\\n')
+    expect(b'Start? [Y/n]')
+    os.write(master, b'n\\n')
+    expect(b'nothing was started')
+    child.wait(timeout=5)
+    sys.stdout.write(output.decode(errors='replace'))
+finally:
+    if child.poll() is None:
+        child.kill()
+        child.wait()
+    os.close(master)
+    os.close(slave)
+`;
+  const { stdout } = await exec("python3", ["-c", python, process.execPath, CLI, "start", "claude", "--claude", f.fake, "--codex", f.fake, "--grace", "0.15"], { env: f.env, timeout: 20_000 });
+  assert.match(stdout, /another build\. Stop it, ending its author in its terminal, to start with this pair/);
+  assert.match(stdout, /pair: auto mode stopped; managed agent cleanup completed/);
+  assert.equal((await f.completed).code, 0, "the running session stopped");
+  assert.match((await f.command(["status"])).stdout, /auto mode: stopped/);
 });
 
 test("a Codex reviewer isn't launched where a .codex on its start directory's path would configure it", { timeout: 20_000 }, async (t) => {
