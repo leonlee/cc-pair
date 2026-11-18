@@ -61,6 +61,9 @@ history and registrations work as they are.
 
 Fixes found while testing with the real CLIs:
 
+- `pair reviewer` with the values already set says `unchanged`. `--thread` on a thread that ended
+  (approved, completed or escalated) says so and names the new-thread settings, and `pair status`
+  marks that thread finished. In a served worktree the advice points at the serving session.
 - Upgrading a CLI with Homebrew during a session made every later review fail with
   `spawn …/Caskroom/codex/<old version>/bin/codex ENOENT`: pair kept the versioned path behind the
   `codex` link, and the upgrade removes that directory. pair now keeps the path it found on `PATH`
