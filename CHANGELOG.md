@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `send` and `wait` refresh each stale instruction file on its own: a `SKILL.md` they can't write,
+  for example from a sandboxed Claude Code command, which may not write `.claude/skills`, no longer
+  keeps `AGENTS.md` stale. The note names each file and its error.
+
 ## 0.10.0 (2026-11-18)
 
 Any two participants can pair, whatever CLI runs them: Claude can review Claude, Codex can review
