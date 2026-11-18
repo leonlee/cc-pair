@@ -1,5 +1,7 @@
 # cc-pair
 
+English | [中文](README.zh-CN.md)
+
 **Abstract.** `pair` lets Claude Code and Codex review each other's work, or their own: Claude can
 review Claude, and Codex can review Codex. One agent authors a change, the other reviews it, and they
 exchange messages through files in a shared directory. Roles are symmetric. In auto mode,
