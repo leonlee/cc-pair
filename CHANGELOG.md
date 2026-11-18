@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.0 (2026-11-09)
+## 0.10.0 (2026-11-18)
 
 Any two participants can pair, whatever CLI runs them: Claude can review Claude, Codex can review
 Codex, or you can name participants such as `alice` and `bob`, in manual and auto mode. A
