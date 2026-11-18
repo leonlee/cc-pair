@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 (2026-11-18)
 
 - `send` and `wait` refresh each stale instruction file on its own: a `SKILL.md` they can't write,
   for example from a sandboxed Claude Code command, which may not write `.claude/skills`, no longer
