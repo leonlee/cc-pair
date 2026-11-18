@@ -33,7 +33,7 @@ function alive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
-function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false, codexPath, cli = CLI } = {}) {
+function fixture(t, { author = "claude", scenario = "roundtrip", worker = "normal", timeout = 5, clockJumps = false, denySocket = false, killOnClaim = false, guardianIgnoresClaims = false, extraEnv = {}, reviewerModel, reviewerEffort, authorArgs = [], reviewerArgs, worktree, remoteBranch = false, initRoot = true, pairArgs = [], setup, git: gitRepo = false, codexPath, cli = CLI } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pair-auto-test-"));
   const socketDir = mkdtempSync("/tmp/pair-at-");
   const fake = join(root, "fake-agent");
@@ -44,11 +44,15 @@ function fixture(t, { author = "claude", scenario = "roundtrip", worker = "norma
     PAIR_AUTO_SOCKET_DIR: socketDir,
     ...extraEnv,
   };
-  if (clockJumps || denySocket) {
+  if (clockJumps || denySocket || killOnClaim || guardianIgnoresClaims) {
     const hook = join(root, "faults.cjs");
     writeFileSync(hook, [
       clockJumps ? `if (process.argv.includes('_auto-guardian')) { const now = Date.now; let jumps = 0; Date.now = () => now() + (++jumps * 60000); }` : "",
       denySocket ? `if (process.env.PAIR_AUTO_ROLE === 'author' && process.argv.includes('send')) { const net = require('node:net'); net.Socket.prototype.connect = function () { queueMicrotask(() => this.destroy(Object.assign(new Error('connect EPERM'), {code:'EPERM'}))); return this; }; }` : "",
+      // A guardian that never records a claim, as one whose message is lost.
+      guardianIgnoresClaims ? `if (process.argv.includes('_auto-guardian')) { const on = process.on.bind(process); process.on = (event, listener) => on(event, event === 'message' ? (message, ...rest) => { if (message?.type !== 'claim') listener(message, ...rest); } : listener); }` : "",
+      // The owner dies the moment its first claim's bind succeeds or fails, before any of its own code runs after it.
+      killOnClaim ? `if (process.argv.includes('start')) { const net = require('node:net'); const listen = net.Server.prototype.listen; let sockets = 0; net.Server.prototype.listen = function (...args) { if (typeof args[0] === 'string' && ++sockets === 2) for (const event of ['listening', 'error']) this.prependOnceListener(event, () => process.kill(process.pid, 'SIGKILL')); return listen.apply(this, args); }; }` : "",
     ].join("\n"));
     env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --require=${hook}`;
   }
@@ -1867,9 +1871,51 @@ test("--serve-worktrees: stop settles running and queued rounds; claimed sockets
   const killed = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"] });
   const c3 = addChild(killed.f, "c3");
   void asSubagent(killed.f, killed.owner, c3, ["send", "request", "-"], "c3 work");
-  await until(() => readdirSync(killed.f.socketDir).length === 2, "c3 claimed");
+  // Killed once the owner has enrolled c3 (published after it told the guardian of the claim), not merely
+  // once the claim's socket file exists.
+  const enrolled = () => { try { return JSON.parse(readFileSync(join(killed.owner, "auto.json"), "utf8")).served?.targets.includes(c3); } catch { return false; } };
+  await until(() => readdirSync(killed.f.socketDir).length === 2 && enrolled(), "c3 claimed and enrolled");
   killed.f.launcher.kill("SIGKILL");
   await until(() => readdirSync(killed.f.socketDir).length === 0, "the guardian removes the owner's and the claimed socket");
+});
+
+test("--serve-worktrees: an owner killed the moment it binds a claim leaves no socket behind", { timeout: 30_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"], killOnClaim: true });
+  const c3 = addChild(f, "c3");
+  void asSubagent(f, owner, c3, ["send", "request", "-"], "c3 work");
+  assert.equal((await f.completed).signal, "SIGKILL", "the owner died at the claim's bind");
+  await until(() => readdirSync(f.socketDir).length === 0, "the guardian removes the owner's socket and the claim it was told of before the bind");
+});
+
+test("--serve-worktrees: a claim is bound only after the guardian confirms it recorded it", { timeout: 30_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"], guardianIgnoresClaims: true });
+  const c3 = addChild(f, "c3");
+  const refused = await asSubagent(f, owner, c3, ["send", "request", "-"], "c3 work");
+  assert.equal(refused.code, 1, refused.out);
+  assert.match(refused.out, /the session's guardian didn't confirm the claim/);
+  assert.equal(readdirSync(f.socketDir).length, 1, "only the owner's own socket: the claim was never bound");
+  await f.command(["stop"]);
+});
+
+test("--serve-worktrees: an owner killed as a claim fails never removes the session listening there", { timeout: 30_000 }, async (t) => {
+  const { f, owner } = await served(t, { worker: "gated-release", pairArgs: ["--serve-worktrees"], killOnClaim: true });
+  const c3 = addChild(f, "c3");
+  // Another session's live socket at c3's claim path: the owner's bind fails, and it dies before it can say so.
+  const childState = join(f.env.XDG_STATE_HOME, "pair", `${basename(c3)}-${createHash("sha1").update(c3).digest("hex").slice(0, 8)}`);
+  const previous = process.env.PAIR_AUTO_SOCKET_DIR;
+  process.env.PAIR_AUTO_SOCKET_DIR = f.socketDir;
+  const path = autoSocketPath(childState);
+  if (previous === undefined) delete process.env.PAIR_AUTO_SOCKET_DIR; else process.env.PAIR_AUTO_SOCKET_DIR = previous;
+  const other = createServer();
+  await new Promise((resolve) => other.listen(path, resolve));
+  try {
+    void asSubagent(f, owner, c3, ["send", "request", "-"], "c3 work");
+    assert.equal((await f.completed).signal, "SIGKILL", "the owner died at the failed bind");
+    await until(() => readdirSync(f.socketDir).length === 1, "the guardian removes the owner's own socket");
+    assert.deepEqual(readdirSync(f.socketDir), [basename(path)], "the other session's socket stays");
+  } finally {
+    await new Promise((resolve) => other.close(resolve)); // before the fixture's cleanup, which waits for an empty socket directory
+  }
 });
 
 test("--serve-worktrees: enrollment refuses what it can't validate", { timeout: 40_000 }, async (t) => {
