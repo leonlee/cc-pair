@@ -1267,22 +1267,25 @@ test("send and wait refresh instructions an older pair wrote, never ones a newer
   writeFileSync(skillPath, old(current.skill));
   assert.match(ok(["status"]), /SKILL\.md: stale/, "status stays read-only");
   // Agents read stdout and stderr merged, and decide by wait's first line.
-  const merged = (args) => {
+  const merged = (args, extra = {}) => {
     const path = join(root, "merged.out");
     const fd = openSync(path, "w");
-    spawnSync("node", [CLI, ...args], { cwd: root, env, stdio: ["ignore", fd, fd] });
+    spawnSync("node", [CLI, ...args], { cwd: root, env: { ...env, ...extra }, stdio: ["ignore", fd, fd] });
     closeSync(fd);
     return readFileSync(path, "utf8");
   };
+  let left = /^pair: no message for codex yet\.\npair: refreshed .*SKILL\.md, .*AGENTS\.md \(pair section\) to pair /;
   if (process.getuid?.() !== 0) {
+    // Each file on its own: an unwritable skill, as in Claude Code's sandbox, doesn't keep AGENTS.md stale.
     chmodSync(skillPath, 0o444);
-    const unwritable = merged(["wait", "--as", "codex", "--timeout", "1"]);
+    const unwritable = merged(["wait", "--as", "codex", "--timeout", "1"], { CLAUDECODE: "1" });
     chmodSync(skillPath, 0o644);
-    assert.match(unwritable, /^pair: no message for codex yet\.\npair: couldn't refresh instructions \(EACCES/);
-    assert.equal(readFileSync(agentsPath, "utf8"), `Mine\n${old(current.agents)}`, "nothing written after the failure");
+    assert.match(unwritable, /^pair: no message for codex yet\.\npair: refreshed [^\n]*AGENTS\.md \(pair section\) to pair [^\n]*\npair: couldn't refresh [^\n]*SKILL\.md: EACCES[^\n]* \(in Claude Code, its sandbox may not let agents write \.claude\/skills\)\. Run `pair init` in your own terminal, or restart the session with pair start, which refreshes them\n/);
+    assert.equal(readFileSync(agentsPath, "utf8"), `Mine\n${current.agents}`, "AGENTS.md is refreshed although the skill can't be");
+    left = /^pair: no message for codex yet\.\npair: refreshed [^\n]*SKILL\.md to pair /;
   }
   const refreshed = merged(["wait", "--as", "codex", "--timeout", "1"]);
-  assert.match(refreshed, /^pair: no message for codex yet\.\npair: refreshed .*SKILL\.md, .*AGENTS\.md \(pair section\) to pair /);
+  assert.match(refreshed, left);
   assert.equal(readFileSync(agentsPath, "utf8"), `Mine\n${current.agents}`);
   assert.equal(readFileSync(skillPath, "utf8"), current.skill);
   assert.doesNotMatch(run(["wait", "--as", "codex", "--timeout", "1"]).out, /refreshed/, "nothing left to refresh");
@@ -1370,7 +1373,7 @@ test("upgrade installs only a newer version, then reports just the new init's fi
     const unwritable = upgrade({ NPM_LATEST: version });
     chmodSync(skillPath, 0o644);
     assert.equal(unwritable.code, 1, unwritable.out);
-    assert.match(unwritable.out, /^pair: already up to date, but couldn't refresh instructions \(EACCES/);
+    assert.match(unwritable.out, /^pair: already up to date, but couldn't refresh instructions \([^\n]*SKILL\.md: EACCES/);
   }
   assert.match(upgrade({ NPM_LATEST: version }).out, /^already up to date: .*\npair: refreshed .*SKILL\.md/, "but still refreshes this worktree");
 

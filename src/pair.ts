@@ -1690,7 +1690,12 @@ function status(channel: string, root: string, served = false): string {
  */
 function refreshInstructions(root: string): string | undefined {
   try {
-    return refreshedNote(refreshStale(root));
+    const { refreshed, failed } = refreshStale(root);
+    const notes = [
+      refreshedNote(refreshed),
+      failed.length ? `pair: couldn't refresh ${failed.join("; ")}. Run \`pair init\` in your own terminal, or restart the session with pair start, which refreshes them` : undefined,
+    ].filter((note): note is string => note !== undefined);
+    return notes.length ? notes.join("\n") : undefined;
   } catch (error) {
     // A read-only sandbox: message delivery must still work, so report and go on.
     const reason = errorMessage(error);
@@ -1698,20 +1703,29 @@ function refreshInstructions(root: string): string | undefined {
   }
 }
 
-/** The stale instruction files it rewrote. A write failure throws. */
-function refreshStale(root: string): string[] {
+/** The stale instruction files it rewrote, and the ones it couldn't with why: each file is tried on its own. */
+function refreshStale(root: string): { refreshed: string[]; failed: string[] } {
   const skillPath = join(root, ".claude", "skills", "pair", "SKILL.md");
   const agentsPath = join(root, "AGENTS.md");
   const refreshed: string[] = [];
+  const failed: string[] = [];
+  const attempt = (label: string, write: () => void, hint = "") => {
+    try {
+      write();
+      refreshed.push(label);
+    } catch (error) {
+      failed.push(`${label}: ${errorMessage(error)}${hasCode(error, "EPERM", "EACCES", "EROFS") ? hint : ""}`);
+    }
+  };
   if (instructionState(root, skillPath, claudeSkill()) === "stale") {
-    writeInstruction(root, skillPath, claudeSkill());
-    refreshed.push(skillPath);
+    // A likely cause, not a certainty: Claude Code's sandbox can keep its agents' commands from writing .claude/skills.
+    const hint = process.env.CLAUDECODE ? " (in Claude Code, its sandbox may not let agents write .claude/skills)" : "";
+    attempt(skillPath, () => writeInstruction(root, skillPath, claudeSkill()), hint);
   }
   if (instructionState(root, agentsPath, codexSection(), true) === "stale") {
-    writeInstruction(root, agentsPath, readInstruction(root, agentsPath).replace(PAIR_SECTION, () => codexSection()));
-    refreshed.push(`${agentsPath} (pair section)`);
+    attempt(`${agentsPath} (pair section)`, () => writeInstruction(root, agentsPath, readInstruction(root, agentsPath).replace(PAIR_SECTION, () => codexSection())));
   }
-  return refreshed;
+  return { refreshed, failed };
 }
 
 function refreshedNote(refreshed: string[]): string | undefined {
@@ -1899,7 +1913,11 @@ function upgrade(root: string): number {
   if (latest && !isNewer(latest, PACKAGE.version)) {
     let note: string | undefined;
     try {
-      note = refreshedNote(refreshStale(root)); // refreshing is all that is left to do, so a failure fails upgrade
+      const { refreshed, failed } = refreshStale(root); // refreshing is all that is left to do, so a failure fails upgrade
+      if (failed.length) {
+        throw new Error(failed.join("; "));
+      }
+      note = refreshedNote(refreshed);
     } catch (error) {
       const reason = errorMessage(error);
       throw new PairError(`already up to date, but couldn't refresh instructions (${reason})`);
