@@ -2,6 +2,11 @@
 
 ## 0.10.1 (2026-11-18)
 
+- With `--serve-worktrees`, an owner killed just as it claimed a subagent worktree's socket could
+  leave that socket behind, blocking later starts there: its guardian learned of the claim only
+  after the claim's checks. The owner now binds a claim only once its guardian confirms it recorded
+  it, and after the owner dies, the guardian removes a claimed socket only if nothing listens there,
+  so it never removes another session's.
 - `send` and `wait` refresh each stale instruction file on its own: a `SKILL.md` they can't write,
   for example from a sandboxed Claude Code command, which may not write `.claude/skills`, no longer
   keeps `AGENTS.md` stale. The note names each file and its error.

@@ -1088,6 +1088,19 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       if (error && !stopping) { state.error = error.message; authorCode = 1; }
     });
   };
+  // A claim is bound only once the guardian confirms it recorded it: a message still queued in this process
+  // is lost if the owner is killed, and the guardian would then leave the claim's socket behind.
+  const confirming = new Map<string, () => void>();
+  const announceClaim = (socket: string): Promise<void> => new Promise((resolve, reject) => {
+    if (!guardian?.connected) { reject(new Error("the session's guardian is gone")); return; }
+    const timer = setTimeout(() => {
+      confirming.delete(socket);
+      sendGuardian({ type: "unclaim", socket }); // a late confirmation mustn't leave the path in the guardian's cleanup
+      reject(new Error("the session's guardian didn't confirm the claim"));
+    }, 5000);
+    confirming.set(socket, () => { clearTimeout(timer); confirming.delete(socket); resolve(); });
+    sendGuardian({ type: "claim", socket });
+  });
   const forceJobs = () => {
     // Only live handles reported by this guardian, never records loaded from disk.
     for (const { pid, group } of jobs.values()) {
@@ -1202,7 +1215,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const stateDir = options.stateDirOf(channel);
     const socketPath = autoSocketPath(stateDir, true);
     const claim = createServer({ allowHalfOpen: true });
+    // Recorded by the guardian before the path exists, so an owner killed at any point after leaves no stale
+    // socket. The guardian removes a claim only if nothing listens there, so a path that isn't ours is safe.
+    await announceClaim(socketPath).catch((error) => { throw refuse(errorMessage(error)); });
     await listenOn(claim, socketPath).catch((error) => {
+      sendGuardian({ type: "unclaim", socket: socketPath });
       throw refuse(hasCode(error, "EADDRINUSE") ? "another auto session or a reset owns it" : `can't claim its auto socket ${socketPath}: ${errorMessage(error)}`);
     });
     const target: Target = { root, channel, stateDir, child: { gitDir, dev, ino, claim } };
@@ -1211,11 +1228,11 @@ export async function startAuto(options: AutoOptions): Promise<number> {
       if (options.target(channel)?.file !== file) throw refuse("the requested message isn't the one waiting there");
     } catch (error) {
       await new Promise<void>((done) => claim.close(() => done()));
+      sendGuardian({ type: "unclaim", socket: socketPath }); // closed: the path may be another session's next
       throw error;
     }
     claim.on("connection", (socket) => answer(socket, (request) => claimRequest(target, request)));
     targets.set(root, target);
-    sendGuardian({ type: "claim", socket: socketPath }); // removed with the owner's socket if the owner dies
     log(`pair: serving ${root}\n`);
     publish();
     return target;
@@ -1516,7 +1533,9 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     });
     const output = new Map<string, string>();
     guardian.on("message", (event: any) => {
-      if (event.type === "spawned") {
+      if (event.type === "claimed") {
+        confirming.get(event.socket)?.();
+      } else if (event.type === "spawned") {
         jobs.set(event.id, { pid: event.pid, group: true });
         const entry = running.get(event.id);
         if (entry) { entry.pid = event.pid; publish(); }
@@ -1675,6 +1694,23 @@ export async function startAuto(options: AutoOptions): Promise<number> {
 }
 
 /** Private IPC child. Owns reviewer groups and cleans up even if the launcher is SIGKILLed. */
+/**
+ * A dead owner's claim, removed unless something listens there: with the owner gone, a listener is another
+ * session's, one that bound the path after this owner released or never got it.
+ */
+function removeDeadSocket(path: string): Promise<void> {
+  return new Promise((resolve) => {
+    const probe = createConnection(path);
+    const settle = () => { clearTimeout(timer); probe.destroy(); resolve(); };
+    const timer = setTimeout(settle, 1000); // no answer: leave it, as for a live one
+    probe.once("connect", settle);
+    probe.once("error", (error) => {
+      if (hasCode(error, "ECONNREFUSED")) rmSync(path, { force: true }); // ENOENT: nothing there
+      settle();
+    });
+  });
+}
+
 export async function runGuardian(): Promise<void> {
   if (!process.send) throw new Error("the auto guardian is an internal IPC command");
   const send = (message: object) => { if (process.connected) process.send!(message, () => {}); };
@@ -1686,17 +1722,21 @@ export async function runGuardian(): Promise<void> {
   let disconnecting = false;
   const jobs = new Map<string, { stop(reason?: string): void; deadline?: number }>();
   let interactive: ChildProcess | undefined;
+  let finishing = false;
   const done = () => {
-    if (!stopping || jobs.size) return;
+    if (!stopping || jobs.size || finishing) return;
+    finishing = true;
     clearInterval(watchdog);
-    if (disconnected && config && readState(config.stateDir)?.run === config.run) {
-      removeState(config.stateDir, config.run);
-      rmSync(config.socket, { force: true });
-      for (const claim of claims) rmSync(claim, { force: true });
-      removeTree(join(config.stateDir, `auto-${config.run}`));
-    }
-    if (disconnected) restoreTerminal(config?.tty);
-    if (process.connected) { disconnecting = true; process.disconnect(); }
+    void (async () => {
+      if (disconnected && config && readState(config.stateDir)?.run === config.run) {
+        removeState(config.stateDir, config.run);
+        rmSync(config.socket, { force: true });
+        await Promise.all(claims.map(removeDeadSocket));
+        removeTree(join(config.stateDir, `auto-${config.run}`));
+      }
+      if (disconnected) restoreTerminal(config?.tty);
+      if (process.connected) { disconnecting = true; process.disconnect(); }
+    })();
   };
   const shutdown = () => {
     stopping = true;
@@ -1729,7 +1769,8 @@ export async function runGuardian(): Promise<void> {
     if (message.type === "configure" && !config) { config = message; return; }
     if (message.type === "heartbeat") { heartbeat = performance.now(); return; }
     if (message.type === "shutdown") { shutdown(); return; }
-    if (message.type === "claim" && typeof message.socket === "string") { claims.push(message.socket); return; }
+    if (message.type === "claim" && typeof message.socket === "string") { claims.push(message.socket); send({ type: "claimed", socket: message.socket }); return; }
+    if (message.type === "unclaim" && claims.includes(message.socket)) { claims.splice(claims.indexOf(message.socket), 1); return; }
     if (message.type === "stop") { jobs.get(message.id)?.stop("worktree removed or replaced"); return; }
     if (message.type !== "launch" || !config || stopping) return;
     check(); // a launch handled on waking, before the late tick, must not get credit for the sleep before it
