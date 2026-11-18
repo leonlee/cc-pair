@@ -561,12 +561,16 @@ test("pair reviewer --thread fixes a failed thread's settings, and its retry sta
   writeFileSync(f.file("go1"), "");
   await until(() => existsSync(f.file("retry.out")), "retried round");
   assert.match(f.read("retry.out"), /verdict approve/);
-  assert.match((await f.command(["status"])).stdout, /reviewer for thread \S+: model good · effort CLI default\n/, "not the old conversation's model BAD");
+  const finished = (await f.command(["status"])).stdout;
+  assert.match(finished, /reviewer for thread \S+: model good · effort CLI default · finished \(verdict approve\)\n/, "not the old conversation's model BAD, and the thread is done");
+  const thread = /reviewer for thread (\S+):/.exec(finished)[1];
   const calls = JSON.parse(f.read("calls.json"));
   assert.equal(calls.length, 2);
   assert.equal(calls[1].args[calls[1].args.indexOf("--model") + 1], "good");
   assert.ok(!calls[1].args.includes("resume"), "a changed thread doesn't resume its old reviewer conversation");
-  await assert.rejects(f.command(["reviewer", "--thread", "current", "--reviewer-model", "x"]), /no pending thread's last review round failed/);
+  await assert.rejects(f.command(["reviewer", "--thread", "current", "--reviewer-model", "x"]), /--thread current: it changes only a thread whose last review round failed, and no thread here is waiting on a failed round; new threads use model BAD · effort CLI default; to change that, leave out --thread/);
+  await assert.rejects(f.command(["reviewer", "--thread", thread.slice(-6), "--reviewer-model", "x"]), new RegExp(`thread ${thread} is finished \\(verdict approve\\), so its reviewer doesn't run again; new threads use model BAD`));
+  assert.equal((await f.command(["reviewer", "--reviewer-model", "BAD", "--timeout", "5"])).stdout.trim(), "reviewer for new threads: model BAD · effort CLI default, unchanged.\nreview time limit: 5s, unchanged.");
   writeFileSync(f.file("go2"), "");
   assert.equal((await f.completed).code, 0, f.output());
 });
@@ -681,6 +685,19 @@ test("knownModels reads every Codex model from its cache, marking the hidden one
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("an escalated thread is finished in status and in pair reviewer --thread; a repeated fractional timeout is unchanged", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t, { scenario: "gated", timeout: 60.00003, extraEnv: { PAIR_MAX_ROUNDS: "1" } });
+  await until(() => existsSync(f.file("first.out")), "first round");
+  assert.match(f.read("first.out"), /ESCALATED/);
+  const status = (await f.command(["status"])).stdout;
+  assert.match(status, /last round: thread \S+ · escalated · finished /);
+  const thread = /last round: thread (\S+) /.exec(status)[1];
+  await assert.rejects(f.command(["reviewer", "--thread", thread, "--reviewer-model", "x"]), new RegExp(`thread ${thread} is finished \\(escalated\\), so its reviewer doesn't run again`));
+  assert.equal(JSON.parse((await f.command(["status", "--json"])).stdout).auto.lastRound.verdict, "escalated");
+  assert.equal((await f.command(["reviewer", "--timeout", "60.00003"])).stdout.trim(), "review time limit: 60.00003s, unchanged.");
+  await f.command(["stop"]);
 });
 
 test("pair reviewer --thread is refused while a round runs", { timeout: 15_000 }, async (t) => {
@@ -1637,6 +1654,9 @@ test("--serve-worktrees: a subagent's loop runs through the root's owner, writes
   assert.match(status, /serves subagent worktrees · reviewers 1 · running 0 · queued 0/);
   await assert.rejects(inDir(f, c1, ["stop"]), /served by the auto session in .*run pair stop there, which stops the whole session/s);
   await assert.rejects(inDir(f, c1, ["reviewer", "--reviewer-model", "x"]), /run pair reviewer there to change the settings for new threads/);
+  // Its --thread refusal points where new-thread settings can change, not at a command refused here.
+  const refusal = await inDir(f, c1, ["reviewer", "--thread", "current", "--reviewer-model", "x"]).then(() => assert.fail("refused"), (error) => String(error.stderr ?? error.message));
+  assert.ok(refusal.includes(`no thread here is waiting on a failed round; new threads use model CLI default · effort CLI default; to change that, run pair reviewer in ${realpathSync(f.root)}`), refusal);
   await assert.rejects(inDir(f, c1, ["reset", "--as", "claude"]), /cannot reset while auto mode or another reset owns this worktree/);
   // A purge would delete a live channel, the served worktree's or the session's own: refused, and nothing is removed.
   await assert.rejects(inDir(f, c1, ["uninit", "--purge"]), /cannot uninit --purge while auto mode/);

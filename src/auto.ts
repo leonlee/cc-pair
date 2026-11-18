@@ -373,7 +373,7 @@ function describeTokens({ input, cachedInput, output }: RoundTokens): string {
 /** The running round and the last finished one, in wall-clock time (a sleep counts here, unlike for the time limit). */
 function roundLines(state: RecordState, now = Date.now()): string[] {
   const { round, lastRound: last } = state;
-  const outcome = last && (last.verdict ? `verdict ${last.verdict}` : last.failed === "attention" ? "failed; a retry is unlikely to help" : "failed");
+  const outcome = last && (last.verdict === "escalated" ? "escalated" : last.verdict ? `verdict ${last.verdict}` : last.failed === "attention" ? "failed; a retry is unlikely to help" : "failed");
   return [
     ...(round ? [`  round running: thread ${round.thread} · launched ${clock(round.launchedAt)}, ${duration(now - round.launchedAt)} ago${round.launchedAt - round.queuedAt >= 1000 ? ` after ${duration(round.launchedAt - round.queuedAt)} queued` : ""}`] : []),
     ...(last ? [`  last round: thread ${last.thread} · ${outcome} · finished ${clock(last.finishedAt)}${last.launchedAt ? `, took ${duration(last.finishedAt - last.launchedAt)}` : ""}${last.tokens ? ` · ${describeTokens(last.tokens)}` : ""}`] : []),
@@ -402,7 +402,7 @@ export async function autoStatus(stateDir: string, root: string): Promise<string
       `auto mode: ${who(state.authorName, state.author)} author, ${who(state.reviewerName, state.reviewer)} reviewer · ${state.phase} · owner ${state.pid}${state.version ? ` · pair ${state.version}` : ""}`,
       ...(state.authorSession ? [`  author session: ${state.authorSession}`] : []), // an older owner has none
       `  reviewer for new threads: ${describeSettings(defaults, sameSettings(state.lastRan?.requested, defaults) ? state.lastRan?.ran : undefined, "last ran")}`,
-      ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}`] : []),
+      ...(state.thread ? [`  reviewer for thread ${state.thread.id}: ${describeSettings(state.thread, state.thread.ran, "ran")}${threadEnd(state, state.thread.id) ? ` · finished (${threadEnd(state, state.thread.id)})` : ""}`] : []),
       ...(state.timeoutMs ? [`  review time limit: ${state.timeoutMs / 1000}s per round, not counting sleep`] : []),
       ...(state.launches === undefined ? [] : [`  reviewer launches this run: ${state.launches}${state.maxLaunches ? ` of ${state.maxLaunches}` : ", no limit"}`]),
       ...roundLines(state),
@@ -438,6 +438,15 @@ function describeSettings(settings: ReviewerSettings, ran?: ReviewerSettings, la
 
 function sameSettings(a: ReviewerSettings | undefined, b: ReviewerSettings): boolean {
   return a !== undefined && a.model === b.model && a.effort === b.effort;
+}
+
+/**
+ * How a thread ended when its last round was this worktree's last one (approved, completed or escalated):
+ * its reviewer doesn't run again. Undefined for an open thread, or one whose last round was earlier.
+ */
+function threadEnd(state: RecordState, thread: string): string | undefined {
+  const verdict = state.lastRound?.thread === thread ? state.lastRound.verdict : undefined;
+  return verdict === "escalated" ? "escalated" : verdict === "approve" || verdict === "complete" ? `verdict ${verdict}` : undefined;
 }
 
 /** The value at path in parsed JSON. */
@@ -1304,21 +1313,31 @@ export async function startAuto(options: AutoOptions): Promise<number> {
         defaults = change(defaults);
         state.reviewerModel = defaults.model;
         state.reviewerEffort = defaults.effort;
-        log(`pair: reviewer for new threads: ${describeSettings(before)} -> ${describeSettings(defaults)}\n`);
-        replies.push(`reviewer for new threads: ${describeSettings(defaults)} (was ${describeSettings(before)}). A thread already under review keeps its settings; after one of its rounds fails, pair reviewer --thread current changes them.`);
+        if (sameSettings(before, defaults)) replies.push(`reviewer for new threads: ${describeSettings(defaults)}, unchanged.`);
+        else {
+          log(`pair: reviewer for new threads: ${describeSettings(before)} -> ${describeSettings(defaults)}\n`);
+          replies.push(`reviewer for new threads: ${describeSettings(defaults)} (was ${describeSettings(before)}). A thread already under review keeps its settings; after one of its rounds fails, pair reviewer --thread current changes them.`);
+        }
       }
       if (seconds !== undefined) {
         const was = state.timeoutMs! / 1000;
+        const unchanged = state.timeoutMs === seconds * 1000; // compared as stored: seconds converted back can round
         state.timeoutMs = seconds * 1000;
-        log(`pair: review time limit: ${was}s -> ${seconds}s\n`);
-        replies.push(`review time limit: ${seconds}s (was ${was}s), from the next round, a retry included; a running round keeps its limit.`);
+        if (unchanged) replies.push(`review time limit: ${seconds}s, unchanged.`);
+        else {
+          log(`pair: review time limit: ${was}s -> ${seconds}s\n`);
+          replies.push(`review time limit: ${seconds}s (was ${was}s), from the next round, a retry included; a running round keeps its limit.`);
+        }
       }
       if (limit !== undefined) {
         const was = state.maxLaunches!;
         state.maxLaunches = limit;
         const describe = (value: number): string => value === 0 ? "no limit" : `${value}`;
-        log(`pair: review launch limit: ${describe(was)} -> ${describe(limit)}\n`);
-        replies.push(`review launch limit: ${describe(limit)} (was ${describe(was)}), ${state.launches} used this run; pair wait retries a review the limit stopped.`);
+        if (was === limit) replies.push(`review launch limit: ${describe(limit)}, unchanged; ${state.launches} used this run.`);
+        else {
+          log(`pair: review launch limit: ${describe(was)} -> ${describe(limit)}\n`);
+          replies.push(`review launch limit: ${describe(limit)} (was ${describe(was)}), ${state.launches} used this run; pair wait retries a review the limit stopped.`);
+        }
       }
       update();
       recordAuthor((problem) => log(`pair: ${problem}\n`)); // its restart command names the reviewer settings
@@ -1336,8 +1355,14 @@ export async function startAuto(options: AutoOptions): Promise<number> {
     const pending = target && options.target(target.channel);
     if (!target || !failure || !pending || pending.file !== failure.file || (wanted !== "current" && !failure.thread.includes(wanted)) || options.reviewed(target.channel, failure.file)) {
       const known = [...failures.values()].map((each) => each.thread);
-      const which = known.length === 1 ? `the failed thread is ${known[0]}` : known.length ? `the failed threads are ${known.join(", ")}` : "no pending thread's last review round failed";
-      throw new Error(`--thread ${wanted}: ${which}; to change the settings for new threads, leave out --thread`);
+      // A served worktree changes new-thread settings in the serving session's worktree, and its rounds aren't the last round here.
+      const newThreads = `new threads use ${describeSettings(defaults)}; to change that, ${scope ? `run pair reviewer in ${options.root}` : "leave out --thread"}`;
+      const last = scope ? undefined : state.lastRound?.thread;
+      const ended = last !== undefined && wanted !== "current" && last.includes(wanted) ? threadEnd(state, last) : undefined;
+      if (ended) throw new Error(`--thread ${wanted}: thread ${last} is finished (${ended}), so its reviewer doesn't run again; ${newThreads}`);
+      const which = known.length === 1 ? `the failed thread is ${known[0]}` : known.length ? `the failed threads are ${known.join(", ")}`
+        : "it changes only a thread whose last review round failed, and no thread here is waiting on a failed round";
+      throw new Error(`--thread ${wanted}: ${which}; ${newThreads}`);
     }
     const key = keyOf(target, failure.thread);
     const before = threadSettings.get(key) ?? defaults;

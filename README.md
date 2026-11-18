@@ -290,9 +290,9 @@ pair stop      # stop the author, its reviewers and their tools
   start` to ring the terminal bell when a round finishes. Both cover the session's own worktree;
   served subagent worktrees appear in the serving list. In `pair status --json`, `auto.mode` is
   `running`, `served`, `stopped` or `unavailable`; a running session has `auto.round` (`thread`,
-  `queuedAt`, `launchedAt`) and `auto.lastRound` (`thread`, `verdict` or `failed`: `attention`,
-  `retry` or `unknown`, the times, and `tokens` with `input`, `cachedInput` and `output` when
-  known). Times are epoch milliseconds.
+  `queuedAt`, `launchedAt`) and `auto.lastRound` (`thread`, `verdict`, `escalated` for a thread that
+  reached its round limit, or `failed`: `attention`, `retry` or `unknown`, the times, and `tokens`
+  with `input`, `cachedInput` and `output` when known). Times are epoch milliseconds.
 - With `--serve-worktrees`, `pair stop` in the session's worktree also stops reviews queued or
   running for subagent worktrees; their requests stay on disk ([Parallel work](#63-parallel-work)).
 - Exiting the author stops its managed processes. If every supervising process is force-killed, a
@@ -322,7 +322,10 @@ A thread keeps the settings of its first round for its follow-up rounds and retr
 change applies to new threads and to the restart command that `pair stop` prints.
 `--thread current` (or the thread's ID) changes only a pending thread whose last round failed, for
 example after a mistyped model. Its next round starts a new reviewer conversation that reads the
-thread so far. Then tell the author to retry.
+thread so far. Then tell the author to retry. A thread that ended (approved, completed or escalated) has no next
+round; when it was the worktree's last round, `pair status` marks it finished. The next request
+opens a new thread with the new-thread settings. A change to the values already set says
+`unchanged`.
 `--timeout` applies to every round from the next one, a failed thread's retry included; a running
 round keeps its limit.
 `--max-reviews` caps the reviewer launches of this `pair start` run, every retry and served

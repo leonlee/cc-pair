@@ -3026,7 +3026,8 @@ async function main(argv: string[]): Promise<number> {
             verdict: (laneChannel, file) => {
               const messages = listMessages(threadFor(laneChannel, authorName, reviewerName));
               const index = messages.findIndex((message) => message.file === file);
-              return index >= 0 ? messages[index + 1]?.verdict : undefined;
+              const review = index >= 0 ? messages[index + 1] : undefined;
+              return review?.status === "escalated" ? "escalated" : review?.verdict; // an escalation ends the thread on a changes verdict
             },
             // A served worktree's channel sits next to this one, under the same PAIR_HOME, whatever the caller's says.
             channelOf: (childRoot) => join(dirname(startChannel), basename(channelDir(childRoot))),
