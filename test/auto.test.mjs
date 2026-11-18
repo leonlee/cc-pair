@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { autoCall, autoSocketPath, FAILED_REVIEW_RULE, knownModels, ranSettings, retryAdvice, roundTokens, setReviewer, withRecordedSession } from "../dist/auto.js";
+import { autoCall, autoSocketPath, checkSettings, FAILED_REVIEW_RULE, knownModels, ranSettings, retryAdvice, roundTokens, setReviewer, shellWord, withRecordedSession } from "../dist/auto.js";
 // The tests set every pair variable they need; one inherited from a pair session (PAIR_PARTNER, PAIR_AUTO_*) would leak in.
 for (const name of Object.keys(process.env)) {
   if (name.startsWith("PAIR_")) {
@@ -539,7 +539,15 @@ test("pair reviewer changes the reviewer for new threads; an open thread keeps i
   assert.match(record.restart, /--reviewer-model new-model --reviewer-effort high -- /, "pair stop's restart command has the current settings");
   assert.deepEqual(record.start.slice(-4), ["--reviewer-model", "new-model", "--reviewer-effort", "high"], "and so do the arguments a guided resume reuses");
   assert.ok(record.restart.includes(` pair start ${record.start.join(" ")} -- `));
-  await assert.rejects(f.command(["reviewer", "--reviewer-model", "x"]), /auto mode is not running here/);
+  // Stopped: a change goes to the record a resume starts from.
+  const saved = (await f.command(["reviewer", "--reviewer-model", "next-model", "--timeout", "900"])).stdout;
+  assert.match(saved, /auto mode isn't running here; saved for resuming its last conversation[^]*reviewer model next-model · effort high \(was model new-model · effort high\) · review time limit 900s/);
+  const after = JSON.parse(readFileSync(join(f.stateDir(), "author.json"), "utf8"));
+  assert.deepEqual(after.start.slice(-6), ["--reviewer-model", "next-model", "--reviewer-effort", "high", "--timeout", "900"]);
+  assert.ok(!after.start.includes("5"), "the old time limit is replaced");
+  assert.match(after.restart, / --reviewer-model next-model --reviewer-effort high --timeout 900 -- /);
+  assert.equal(after.session, record.session, "the conversation stays the same");
+  await assert.rejects(f.command(["reviewer", "--thread", "current", "--reviewer-model", "x"]), /auto mode is not running here; pair reviewer --thread changes a thread of a running pair start session/);
 });
 
 test("pair reviewer --thread fixes a failed thread's settings, and its retry starts a new reviewer conversation", { timeout: 20_000 }, async (t) => {
@@ -1186,7 +1194,7 @@ test("a new Claude author gets an ID that pair start, status and stop report, wi
   assert.match(id, NEW_ID);
   assert.match(f.output(), /pair: start auto mode in .*; pair init runs there first\n/, "the fixture's directory has no instructions");
   assert.ok(existsSync(join(f.root, "AGENTS.md")) && existsSync(join(f.root, ".claude", "skills", "pair", "SKILL.md")));
-  assert.match(f.output(), new RegExp(`pair: start auto mode in .*\npair:   author claude · session ${id} \\(new\\)\npair:   reviewer codex · model m1 · effort CLI default\n`));
+  assert.match(f.output(), new RegExp(`pair: start auto mode in .*\npair:   author claude · session ${id} \\(new\\)\npair:   reviewer codex · model m1 · effort CLI default\npair:   review time limit 5s per round · reviewer launches no limit\n`), "every setting pair reviewer can save is shown before the start is confirmed");
   assert.match((await f.command(["status"])).stdout, new RegExp(`author session: ${id} \\(new\\)`));
   const stopped = (await f.command(["stop"])).stdout;
   assert.match(stopped, new RegExp(`last author session: ${id} \\(picked by pair, .*; pair doesn't check that it still exists\\)`));
@@ -1288,6 +1296,35 @@ function recordAuthor(root, stateHome, record) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "author.json"), JSON.stringify({ worktree: real, learned: "author-env", note: null, at: "2026-10-30T00:00:00.000Z", restart: "cd x && pair start", ...record }));
 }
+
+test("pair reviewer without a session saves only for a conversation pair can resume, and keeps the restart command's words literal", () => {
+  const root = mkdtempSync(join(tmpdir(), "pair-save-"));
+  const socketDir = mkdtempSync("/tmp/pair-at-");
+  try {
+    const env = { ...process.env, CODEX_THREAD_ID: "", CLAUDECODE: "", PAIR_AUTO_ROLE: "", PAIR_HOME: join(root, "home"), XDG_STATE_HOME: join(root, "state"), PAIR_AUTO_SOCKET_DIR: socketDir };
+    const reviewer = (...args) => spawnSync(process.execPath, [CLI, "reviewer", ...args], { cwd: root, env, encoding: "utf8" });
+    // A new author that never reported its conversation: nothing could resume with saved settings.
+    recordAuthor(root, env.XDG_STATE_HOME, { backend: "codex", session: null, restart: null, start: ["codex"] });
+    assert.match(reviewer("--reviewer-model", "m").stderr, /pair doesn't know its last conversation's ID, so nothing here can resume with saved settings; give them to pair start/);
+    const id = "0c8b6a3e-ff15-49a6-915b-b3884cabde5f";
+    const start = ["claude", "--codex", "/opt/a$&b/codex", "--reviewer-model", "old"];
+    const restart = `cd x && pair start ${start.map(shellWord).join(" ")} -- --resume ${id}`;
+    recordAuthor(root, env.XDG_STATE_HOME, { backend: "claude", session: id, restart, start });
+    const saved = reviewer("--reviewer-model", "new");
+    assert.equal(saved.status, 0, saved.stderr);
+    const record = JSON.parse(readFileSync(join(env.XDG_STATE_HOME, "pair", readdirSync(join(env.XDG_STATE_HOME, "pair"))[0], "author.json"), "utf8"));
+    assert.deepEqual(record.start, ["claude", "--codex", "/opt/a$&b/codex", "--reviewer-model", "new"]);
+    assert.equal(record.restart, `cd x && pair start claude --codex '/opt/a$&b/codex' --reviewer-model new -- --resume ${id}`, "$& copied, not expanded");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(socketDir, { recursive: true, force: true });
+  }
+});
+
+test("a reviewer model can't start with -: saved arguments would read it as an option", () => {
+  assert.throws(() => checkSettings("codex", { model: "--reviewer-effort" }), /not starting with -/);
+  assert.doesNotThrow(() => checkSettings("codex", { model: "gpt-6.2-sol" }));
+});
 
 test("withRecordedSession gives a guided resume its session's pair start arguments, when the record has them", () => {
   const root = mkdtempSync(join(tmpdir(), "pair-record-"));

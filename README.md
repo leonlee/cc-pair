@@ -127,9 +127,10 @@ as before 0.10.
 In a terminal, `pair start` without a CLI asks instead. The questions are:
 
 1. whether to resume the conversation pair recorded for this checkout, asked first and only when
-   there is one; Enter resumes it. Resuming reuses that session's settings, such as its CLIs, names and reviewer model
-   and effort, and asks nothing else. Options you type with `pair start` still win, and
-   in a terminal, `pair start --resume` reuses them without asking;
+   there is one; Enter resumes it. Resuming reuses that session's settings, such as its CLIs and
+   names, and shows its reviewer model and effort: Enter keeps them, `n` asks for new ones. Options
+   you type with `pair start` still win, and a reviewer setting typed there skips that question; in
+   a terminal, `pair start --resume` reuses the settings without the resume question;
 2. the CLIs;
 3. where to run: this checkout, or a `--worktree` branch name, with a resume question, also
    answered yes by Enter, for that worktree's own recorded conversation;
@@ -256,7 +257,7 @@ CLI and have a known ID, the worktree MUST already exist, and the author argumen
 a conversation themselves. With a CLI word (`pair start claude --resume`) or without a terminal,
 only the conversation is reused: every other option comes from the command line. In a terminal
 without a CLI word, guided start also reuses that session's recorded options, such as its CLIs,
-names and reviewer settings; options you type still win. The record is recovery data; pair does
+names and reviewer settings, and asks whether to keep the reviewer; options you type still win. The record is recovery data; pair does
 not check that the conversation still exists.
 
 A conversation started with pair 0.6.1 or earlier may still name an old run's pair command in its
@@ -308,7 +309,9 @@ Process supervision is specified in DESIGN.md.
 
 `pair reviewer` changes a running session's reviewer settings without a restart. Run it in your own
 terminal, in the session's worktree: the author and its reviewer can't, so neither picks the model
-that judges its work. `pair status` shows the current settings.
+that judges its work. `pair status` shows the current settings. When no session runs there,
+`pair reviewer` saves the change (all but `--thread`) in the record of its last conversation, so
+resuming it, with a bare `pair start` or the restart command `pair status` prints, starts with it.
 
 ```sh
 pair reviewer --reviewer-model gpt-6.1-sol --reviewer-effort high   # threads opened from now on
