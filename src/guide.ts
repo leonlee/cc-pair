@@ -65,13 +65,16 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
   })[0];
   let resumed = given.resume;
   if (found && given.resume) {
-    if (found.record.start) return found.record.start;
+    if (found.record.start) return await keepReviewer(prompter, facts, given, found.record.start);
     author = found.cli;
   } else if (found) {
     const resume = await yesNo(prompter, `Resume the ${found.cli} conversation ${found.record.id} (recorded ${found.record.at})? [Y/n] `, true);
     if (resume === undefined) return undefined;
     if (resume) {
-      if (found.record.start) return [...found.record.start, "--resume"];
+      if (found.record.start) {
+        const start = await keepReviewer(prompter, facts, given, found.record.start);
+        return start && [...start, "--resume"];
+      }
       author = found.cli;
       resumed = true;
       flags.push("--resume");
@@ -98,6 +101,13 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
       if (resume) flags.push("--resume");
     }
   }
+  const settings = await askReviewer(prompter, facts, reviewer, given);
+  return settings && [author, ...(reviewer === other ? [] : [reviewer]), ...flags, ...settings];
+}
+
+/** The reviewer's model and effort questions, as pair start options; the command line's own are skipped. */
+async function askReviewer(prompter: Prompter, facts: StartFacts, reviewer: Cli, given: StartGiven): Promise<string[] | undefined> {
+  const flags: string[] = [];
   const fallback = `${reviewer}'s default`;
   const known = facts.models(reviewer);
   const offered = known.models.filter((each) => !each.hidden);
@@ -128,7 +138,26 @@ export async function guideStart(prompter: Prompter, facts: StartFacts, given: S
     if (effort === undefined) return undefined;
     if (effort !== fallback) flags.push("--reviewer-effort", effort);
   }
-  return [author, ...(reviewer === other ? [] : [reviewer]), ...flags];
+  return flags;
+}
+
+const REVIEWER_OPTIONS = ["--reviewer-model", "--reviewer-effort"];
+
+/**
+ * A resumed session's arguments, after showing the reviewer they name: kept on Enter, or asked again. A command line
+ * that sets the reviewer itself decides it, so nothing is asked.
+ */
+async function keepReviewer(prompter: Prompter, facts: StartFacts, given: StartGiven, start: string[]): Promise<string[] | undefined> {
+  const author = start[0];
+  if ((author !== "claude" && author !== "codex") || given.model !== undefined || given.effort) return start;
+  const reviewer: Cli = start[1] === "claude" || start[1] === "codex" ? start[1] : author === "claude" ? "codex" : "claude";
+  const value = (name: string): string => { const at = start.indexOf(name); return at >= 0 ? start[at + 1]! : `${reviewer}'s default`; };
+  const keep = await yesNo(prompter, `Reviewer ${reviewer}: model ${value("--reviewer-model")} · effort ${value("--reviewer-effort")}. Keep it? [Y/n] `, true);
+  if (keep === undefined) return undefined;
+  if (keep) return start;
+  const settings = await askReviewer(prompter, facts, reviewer, given);
+  const rest = start.filter((token, index) => !REVIEWER_OPTIONS.includes(token) && !(index > 0 && REVIEWER_OPTIONS.includes(start[index - 1]!)));
+  return settings && [...rest, ...settings];
 }
 
 /** A numbered menu answered by number or name; Enter takes the fallback, if there is one. With other, any other text it accepts. */

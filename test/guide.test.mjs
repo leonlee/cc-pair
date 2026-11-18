@@ -114,15 +114,24 @@ test("guided start: the reviewer's CLI offers its models, any other is typed, an
   assert.equal(typed.asked(), 5);
 });
 
-test("guided start: resuming a session that recorded its arguments asks nothing else, and the command line's still win", async () => {
+test("guided start: resuming a session that recorded its arguments asks only whether to keep its reviewer, and the command line's still win", async () => {
   const start = ["claude", "--as", "alice", "--reviewer-model", "gpt-x", "--reviewer-effort", "high"];
   const recorded = (cli) => cli === "claude" ? { id: "11111111-1111-4111-8111-111111111111", at: "x", start } : undefined;
-  const yes = scripted(["y"]);
+  const yes = scripted(["y", ""]);
   assert.deepEqual(await guideStart(yes.prompter, facts({ recorded }), { ...none, envName: "bob" }), [...start, "--resume"]);
-  assert.equal(yes.asked(), 1);
-  const given = scripted([]);
+  assert.equal(yes.asked(), 2);
+  assert.match(yes.log[1], /^\? Reviewer codex: model gpt-x · effort high\. Keep it\? \[Y\/n\] $/);
+  const given = scripted([""]);
   assert.deepEqual(await guideStart(given.prompter, facts({ recorded }), { ...none, resume: true }), start, "--resume is already given");
-  assert.equal(given.asked(), 0);
+  assert.equal(given.asked(), 1);
+  // Changed: the reviewer's questions, and the rest of the session's arguments as recorded.
+  const changed = scripted(["y", "n", "gpt-new", "low"]);
+  assert.deepEqual(await guideStart(changed.prompter, facts({ recorded }), none), ["claude", "--as", "alice", "--reviewer-model", "gpt-new", "--reviewer-effort", "low", "--resume"]);
+  // A command line that sets the reviewer decides it: nothing to keep or change.
+  const set = scripted(["y"]);
+  assert.deepEqual(await guideStart(set.prompter, facts({ recorded }), { ...none, model: "gpt-cli" }), [...start, "--resume"]);
+  assert.equal(set.asked(), 1);
+  assert.equal(await guideStart(scripted(["y"]).prompter, facts({ recorded }), none), undefined, "Ctrl-C at the reviewer question cancels");
   // Declined: the usual questions.
   const no = scripted(["n", "2", "", "", "", ""]);
   assert.deepEqual(await guideStart(no.prompter, facts({ recorded }), none), ["codex"]);
@@ -131,9 +140,9 @@ test("guided start: resuming a session that recorded its arguments asks nothing 
 test("guided start: a recorded session whose CLI is off PATH can still be resumed through its saved path", async () => {
   const start = ["claude", "--claude", "/opt/claude/bin/claude"];
   const recorded = (cli) => cli === "claude" ? { id: "11111111-1111-4111-8111-111111111111", at: "x", start } : undefined;
-  const yes = scripted(["y"]);
+  const yes = scripted(["y", ""]);
   assert.deepEqual(await guideStart(yes.prompter, facts({ installed: [], recorded }), none), [...start, "--resume"]);
-  assert.deepEqual(await guideStart(scripted([]).prompter, facts({ installed: [], recorded }), { ...none, resume: true }), start);
+  assert.deepEqual(await guideStart(scripted([""]).prompter, facts({ installed: [], recorded }), { ...none, resume: true }), start);
   await assert.rejects(guideStart(scripted(["n"]).prompter, facts({ installed: [], recorded }), none), /neither claude nor codex was found/);
   // A record without its arguments can't name a path: its CLI must be installed to be offered.
   const old = scripted(["2", "2", "", "", ""]);

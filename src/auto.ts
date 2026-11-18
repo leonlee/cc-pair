@@ -634,7 +634,7 @@ export function knownModels(cli: Agent, env: NodeJS.ProcessEnv = process.env): M
 }
 
 /** Changes a running session's reviewer settings: for new threads, or for one failed pending thread. */
-export async function setReviewer(stateDir: string, change: ReviewerChange): Promise<string> {
+export async function setReviewer(stateDir: string, change: ReviewerChange, root?: string): Promise<string> {
   try {
     if (change.timeoutSeconds !== undefined || change.maxLaunches !== undefined) {
       // An older owner would ignore the field and apply the rest; check first, so nothing changes.
@@ -652,11 +652,55 @@ export async function setReviewer(stateDir: string, change: ReviewerChange): Pro
     return (await autoCall(stateDir, { action: "reviewer", ...change })).message;
   }
   catch (error) {
-    if (hasCode(error, "ENOENT")) throw new Error("auto mode is not running here; pair reviewer changes the reviewer of a running pair start session");
+    if (hasCode(error, "ENOENT")) {
+      if (root !== undefined && change.thread === undefined) return await saveForResume(stateDir, root, change);
+      throw new Error("auto mode is not running here; pair reviewer --thread changes a thread of a running pair start session");
+    }
     if (hasCode(error, "ECONNREFUSED")) throw new Error(`auto owner is gone; stale socket ${autoSocketPath(stateDir)}`);
     if (errorMessage(error) === "unknown auto action") throw new Error("this auto session runs an older pair without pair reviewer; stop it and start it again");
     throw error;
   }
+}
+
+/**
+ * Without a running session, a change goes to the record of this worktree's last author conversation: resuming
+ * it (a bare pair start, or the restart command) starts with these settings. The auto socket keeps a start out.
+ */
+async function saveForResume(stateDir: string, root: string, change: ReviewerChange): Promise<string> {
+  return await withAutoStopped(stateDir, () => {
+    const record = readAuthorRecord(stateDir, root);
+    const start = record?.start;
+    if (!record || !start || (start[0] !== "claude" && start[0] !== "codex")) {
+      throw new Error("auto mode is not running here, and no pair start here recorded its settings to resume with; give them to pair start");
+    }
+    if (!record.session) {
+      throw new Error("auto mode is not running here, and pair doesn't know its last conversation's ID, so nothing here can resume with saved settings; give them to pair start");
+    }
+    const reviewer: Agent = start[1] === "claude" || start[1] === "codex" ? start[1] : start[0] === "claude" ? "codex" : "claude";
+    const value = (name: string): string | undefined => { const at = start.indexOf(name); return at >= 0 ? start[at + 1] : undefined; };
+    const before: ReviewerSettings = { model: value("--reviewer-model"), effort: value("--reviewer-effort") };
+    const after: ReviewerSettings = {
+      model: change.model === undefined ? before.model : change.model ?? undefined,
+      effort: change.effort === undefined ? before.effort : change.effort ?? undefined,
+    };
+    checkSettings(reviewer, after);
+    const set = new Map<string, string | undefined>([["--reviewer-model", after.model], ["--reviewer-effort", after.effort]]);
+    if (change.timeoutSeconds !== undefined) set.set("--timeout", change.timeoutSeconds === DEFAULT_REVIEW_SECONDS ? undefined : String(change.timeoutSeconds));
+    if (change.maxLaunches !== undefined) set.set("--max-reviews", change.maxLaunches ? String(change.maxLaunches) : undefined);
+    const next = start.filter((token, index) => !set.has(token) && !(index > 0 && set.has(start[index - 1]!)));
+    for (const [name, given] of set) if (given !== undefined) next.push(name, given);
+    // The restart command is these arguments, then the conversation's own after --.
+    const restart = record.restart?.replace(`pair start ${start.map(shellWord).join(" ")} -- `, () => `pair start ${next.map(shellWord).join(" ")} -- `) ?? null; // a function: $ in a word is literal
+    writeAuthorRecord(stateDir, { ...record, start: next, restart });
+    const limits = [
+      ...(change.timeoutSeconds === undefined ? [] : [`review time limit ${change.timeoutSeconds}s`]),
+      ...(change.maxLaunches === undefined ? [] : [`review launch limit ${change.maxLaunches || "none"}`]),
+    ];
+    return [
+      `auto mode isn't running here; saved for resuming its last conversation (a bare pair start, or the restart command pair status prints):`,
+      `  reviewer ${describeSettings(after)}${sameSettings(before, after) ? ", unchanged" : ` (was ${describeSettings(before)})`}${limits.length ? ` · ${limits.join(" · ")}` : ""}`,
+    ].join("\n");
+  }, "pair reviewer");
 }
 
 /** Serialize a manual channel reset with auto startup using the same exclusive socket. */
@@ -941,8 +985,9 @@ export const EFFORTS: Record<Agent, readonly string[]> = {
 
 export function checkSettings(reviewer: Agent, settings: ReviewerSettings): void {
   const { model, effort } = settings;
-  if (model !== undefined && (!model.trim() || model !== model.trim() || /[\x00-\x1f\x7f]/.test(model))) {
-    throw new Error("--reviewer-model must be a nonempty model ID or alias without surrounding whitespace or control characters");
+  // A leading "-" would read as an option in the arguments a resume reuses.
+  if (model !== undefined && (!model.trim() || model !== model.trim() || /[\x00-\x1f\x7f]/.test(model) || model.startsWith("-"))) {
+    throw new Error("--reviewer-model must be a nonempty model ID or alias without surrounding whitespace or control characters, not starting with -");
   }
   const efforts = EFFORTS[reviewer];
   if (effort !== undefined && !efforts.includes(effort)) {

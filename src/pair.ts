@@ -2974,6 +2974,8 @@ async function main(argv: string[]): Promise<number> {
             `pair: start auto mode in ${plan?.path ?? root}${plan ? ` (${plan.add ? `new worktree, branch ${plan.name}` : `existing worktree, ${describeHead(plan.head ?? "")}`})` : ""}${plan?.add ? "; pair init runs there if its branch lacks the instructions" : needsInit(plan?.path ?? root) ? "; pair init runs there first" : ""}`,
             `pair:   author ${who(authorName, me)} · session ${session.kind === "resume" && recorded ? recorded : describeSession(session)}`,
             `pair:   reviewer ${who(reviewerName, reviewer)} · model ${choices.reviewerModel ?? "CLI default"} · effort ${choices.reviewerEffort ?? "CLI default"}${choices.reviewerArgs.length ? ` · args ${choices.reviewerArgs.join(" ")}` : ""}`,
+            // Every setting pair reviewer can save is shown: confirming this start confirms them.
+            `pair:   review time limit ${timeout}s per round · reviewer launches ${maxLaunches ? `at most ${maxLaunches}` : "no limit"}`,
             ...(serveWorktrees ? [`pair:   serves subagent worktrees · ${reviewers} reviewer${reviewers === 1 ? "" : "s"} at a time`] : []),
             ...(await updateNotice()).map((line) => `pair: ${line}`),
           ].join("\n"));
@@ -3054,7 +3056,7 @@ async function main(argv: string[]): Promise<number> {
         if (change.model === undefined && change.effort === undefined && timeoutSeconds === undefined && maxLaunches === undefined) {
           throw new PairError("pass --reviewer-model or --reviewer-effort (a value, or default), --timeout or --max-reviews; pair status shows the current settings");
         }
-        try { console.log(await setReviewer(stateDir(channel), change)); }
+        try { console.log(await setReviewer(stateDir(channel), change, root)); }
         catch (error) { throw new PairError(errorMessage(error)); }
         return 0;
       }

@@ -17,7 +17,7 @@ history and registrations work as they are.
   details in the README.
 - **Guided `pair start`.** In a terminal, `pair start` without a CLI asks whether to resume the
   recorded conversation (first, and only when there is one; Enter resumes it, and resuming reuses
-  that session's settings and asks nothing else), then
+  that session's settings, asking only whether to keep its reviewer model and effort), then
   for the CLIs, where to run, and the reviewer's model and effort. The model menu lists Claude's
   aliases or the models in Codex's own picker, and any other model ID can be typed; one that Codex
   doesn't list for your account asks for confirmation. For a Codex model, the effort menu lists
@@ -45,6 +45,8 @@ history and registrations work as they are.
   already runs on other pair code (an older version, or another build of this one), `pair start` in
   a terminal offers to stop that session first, so it can be resumed with this pair; `pair status`
   and `pair ps` show each session's pair version.
+- **`pair reviewer` without a running session** saves the change in the record of the worktree's
+  last conversation, so resuming it with a bare `pair start` or the restart command starts with it.
 - **`pair status` shows the running round and the last finished one**, with its verdict or failure,
   when it finished and the tokens its reviewer used (a resumed round counts only its own model
   calls). `pair status --json` gives the lanes, instruction states and the
