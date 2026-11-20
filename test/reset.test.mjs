@@ -480,3 +480,31 @@ test("prune finds worktrees whose names end in a space or hold a newline", (t) =
   assert.ok(dry.includes(`  check\\x0aout-${broken.name.slice(-8)} (was ${broken.dir.replace("\n", "\\x0a")})`), dry);
   assert.match(f.ok(["prune", "--yes"]), /^removed: .*\nremoved: /);
 });
+
+test("prune with patterns covers only the channels whose names match", (t) => {
+  const f = fixture(t);
+  const { home, worktree, exists } = pruning(f);
+  const dashed = worktree("old-a");
+  const dotted = worktree("old.b");
+  const other = worktree("oldxb");
+  for (const { dir } of [dashed, dotted, other]) rmSync(dir, { recursive: true });
+  mkdirSync(join(home, "older-0123abcd")); // can't be placed
+  const dry = f.ok(["prune", "old-*", "old.b-*", "--dry-run"]);
+  assert.match(dry, /^2 belong/);
+  assert.ok(dry.includes(dashed.name) && dry.includes(dotted.name), dry);
+  assert.ok(!dry.includes(other.name) && !dry.includes("older-"), "a dot is literal, and what doesn't match isn't listed");
+  assert.match(f.ok(["prune", "old-*", "old.b-*", "--yes"]), /^removed: [^\n]*\nremoved: [^\n]*\n$/);
+  assert.ok(!exists(dashed.name) && !exists(dotted.name) && exists(other.name));
+  assert.match(f.ok(["prune", "old?b-*", "older-*", "--dry-run"]), new RegExp(`^1 belong[^\\n]*\\n  ${other.name} [^\\n]*\\nkept 1 [^\\n]*\\n  older-0123abcd\\n$`));
+  assert.equal(f.ok(["prune", "nothing-*"]), "no channel matches 'nothing-*'\n");
+
+  // ? takes a whole character, an emoji too, and many stars can't stall the match.
+  const emoji = worktree("topic-\u{1F600}");
+  const long = worktree("a".repeat(40));
+  for (const { dir } of [emoji, long]) rmSync(dir, { recursive: true });
+  assert.ok(f.ok(["prune", "topic-?-*", "--dry-run"]).includes(`  ${emoji.name} `));
+  assert.equal(f.ok(["prune", "topic-??-*", "--dry-run"]), "no channel matches 'topic-??-*'\n");
+  assert.equal(f.ok(["prune", "a*a*a*a*a*a*a*a*a*a*a*a*z", "**********************z", "--dry-run"]),
+    "no channel matches 'a*a*a*a*a*a*a*a*a*a*a*a*z' '**********************z'\n");
+  assert.ok(f.ok(["prune", "a*a*a*a*a*a*a*a*a*a*a*a*-*", "--dry-run"]).includes(`  ${long.name} `));
+});
