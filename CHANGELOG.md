@@ -4,7 +4,8 @@
 
 - `pair prune` deletes the channel and auto state of each worktree that no longer exists, for
   worktrees removed without `pair uninit --purge`. It asks first (`--yes` skips the question,
-  `--dry-run` only lists them) and keeps any an auto session still holds. Pair now records a
+  `--dry-run` only lists them), takes name patterns to delete only some (`pair prune 'old-*'`),
+  and keeps any an auto session still holds. Pair now records a
   channel's worktree when `init` or `send` runs there; prune also reads auto mode's state, Codex
   registrations and resets, and lists the channels it can't place.
 

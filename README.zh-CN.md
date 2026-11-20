@@ -307,7 +307,7 @@ pair history [thread-id]
 pair clean --keep N
 pair reset [--as NAME] [--dry-run]
 pair init | uninit | upgrade
-pair prune [--dry-run] [--yes]
+pair prune [PATTERN...] [--dry-run] [--yes]
 pair register | unregister [--as NAME]
 pair mcp
 pair ps [-v]
@@ -370,7 +370,7 @@ npm uninstall -g claude-codex-pair
 
 并从沙箱设置里删除 `~/.pair`。
 
-没有用 `pair uninit --purge` 就直接删掉的 worktree，会留下它的通道和自动模式状态。在任意目录运行 `pair prune`，就会删除所有已不存在的 worktree 留下的这些数据（`--dry-run` 只列出不删）。删除前会先确认；自动会话还占用着的会保留。pair 在 worktree 里运行 `init` 或 `send` 时才会记下通道对应的 worktree，所以较早的通道可能没有记录，这些会列出名字，由你自己判断。未挂载的卷上的 worktree 看起来也像已删除，删除前请看一下列表。
+没有用 `pair uninit --purge` 就直接删掉的 worktree，会留下它的通道和自动模式状态。在任意目录运行 `pair prune`，就会删除所有已不存在的 worktree 留下的这些数据（`--dry-run` 只列出不删；可以用名字模式缩小范围，例如 `pair prune 'old-*'`）。删除前会先确认；自动会话还占用着的会保留。pair 在 worktree 里运行 `init` 或 `send` 时才会记下通道对应的 worktree，所以较早的通道可能没有记录，这些会列出名字，由你自己判断。未挂载的卷上的 worktree 看起来也像已删除，删除前请看一下列表。
 
 ## 10. 环境变量
 

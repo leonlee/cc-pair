@@ -2415,16 +2415,51 @@ function isGone(path: string): boolean {
   try { return lstatSync(path, { throwIfNoEntry: false }) === undefined; } catch { return false; }
 }
 
-/** pair prune: delete the channels and auto state of worktrees that no longer exist, under this PAIR_HOME. */
-async function pruneRemoved(home: string, dryRun: boolean, yes: boolean): Promise<string> {
+/**
+ * Whether a shell-style pattern matches a whole name: * any run of characters, ? any one, everything else literal.
+ * By code point, so ? takes a whole emoji; the last-star backtrack keeps it O(pattern × name), whatever the stars.
+ */
+function globMatches(glob: string, name: string): boolean {
+  const pattern = Array.from(glob);
+  const text = Array.from(name);
+  let at = 0;
+  let star = -1;
+  let resume = 0;
+  for (let index = 0; index < text.length;) {
+    if (at < pattern.length && pattern[at] === "*") {
+      star = at++;
+      resume = index;
+    } else if (at < pattern.length && (pattern[at] === "?" || pattern[at] === text[index])) {
+      at++;
+      index++;
+    } else if (star >= 0) {
+      at = star + 1;
+      index = ++resume;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[at] === "*") {
+    at++;
+  }
+  return at === pattern.length;
+}
+
+/**
+ * pair prune: delete the channels and auto state of worktrees that no longer exist, under this PAIR_HOME; with
+ * patterns, only those whose name matches one.
+ */
+async function pruneRemoved(home: string, patterns: string[], dryRun: boolean, yes: boolean): Promise<string> {
   const named = (dir: string, isEntry: (entry: Dirent) => boolean): string[] => readdirOrEmpty(dir)
     .filter((entry) => isEntry(entry) && CHANNEL_NAME.test(entry.name)).map((entry) => entry.name);
   const markers = dirname(pruneMarker(join(stateHome(), "x")));
   const names = new Set([...named(home, (entry) => entry.isDirectory()), ...named(stateHome(), (entry) => entry.isDirectory()),
     ...(isRealDirectory(markers) ? named(markers, (entry) => entry.isFile()) : [])]);
+  const selected = [...names].filter((name) => patterns.length === 0 || patterns.some((pattern) => globMatches(pattern, name)));
+  if (selected.length === 0 && patterns.length > 0) return `no channel matches ${patterns.map((pattern) => oneLine(shellQuote(pattern))).join(" ")}`;
   const gone: RecordedChannel[] = [];
   const unknown: string[] = [];
-  for (const name of [...names].sort()) {
+  for (const name of selected.sort()) {
     const worktree = recordedWorktree(name, join(home, name), join(stateHome(), name));
     if (worktree === undefined) unknown.push(name);
     else if (isGone(worktree)) gone.push({ name, worktree });
@@ -2680,7 +2715,7 @@ const USAGE = `usage:
   pair init
   pair upgrade                                        (install the latest pair from npm, then refresh this worktree)
   pair uninit [--purge]                               (undo pair init here; --purge also deletes history)
-  pair prune [--dry-run] [--yes]                      (delete the channels of worktrees that no longer exist)
+  pair prune [PATTERN...] [--dry-run] [--yes]         (delete the channels of worktrees that no longer exist)
   pair register | unregister [--as NAME]              (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
   pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)
@@ -2859,7 +2894,7 @@ changed it), and the Codex session registration. Message history is kept.
   --purge   also delete this worktree's channel (message history) and auto mode's state (the
             resume record and log). Refused while an auto session runs here or serves this
             worktree; stop any agents waiting on the channel first.`,
-  prune: `usage: pair prune [--dry-run] [--yes]
+  prune: `usage: pair prune [PATTERN...] [--dry-run] [--yes]
 
 Delete the channel (message history) and auto mode's state of each worktree that no longer exists,
 for worktrees removed without pair uninit --purge. Run it anywhere; it covers this shell's PAIR_HOME.
@@ -2867,6 +2902,10 @@ Pair records a channel's worktree when init or send runs there; it lists older c
 place, for you to check by name. A worktree on an unmounted volume also looks removed, so read the
 list first. It asks before deleting, and keeps a channel while an auto session runs in or serves
 its worktree.
+
+With PATTERNs, it covers only the channels whose name matches one: * matches any run of
+characters and ? any one, as in the shell. Quote them so the shell doesn't expand them, e.g.
+pair prune 'acq-mono-at-18*'. A pattern never selects a channel prune can't place.
 
 options:
   --dry-run                    list them without deleting anything
@@ -3265,8 +3304,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(channelAccess(channel, () => clean(channel, values.keep)));
         return 0;
       case "prune":
-        if (rest.length) throw new PairError("prune accepts no positional arguments");
-        console.log(forTerminal(await pruneRemoved(pairHome(root), values["dry-run"] ?? false, values.yes ?? false)));
+        console.log(forTerminal(await pruneRemoved(pairHome(root), rest, values["dry-run"] ?? false, values.yes ?? false)));
         return 0;
       case "reset": {
         if (rest.length) throw new PairError("reset accepts no positional arguments; use --as NAME to select the lanes NAME authored");
