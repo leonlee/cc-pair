@@ -634,6 +634,7 @@ pair history [thread-id]     # finished threads in this repository's worktrees, 
 pair clean --keep N          # delete all but the N newest finished threads
 pair reset [--as NAME] [--dry-run]
 pair init | uninit | upgrade
+pair prune [--dry-run] [--yes]   # delete the channels of worktrees that no longer exist
 pair register | unregister [--as NAME]   # run by Codex: let pair_listen notify this session
 pair mcp                     # MCP server for Codex (manual mode)
 pair ps [-v]
@@ -736,6 +737,12 @@ npm uninstall -g claude-codex-pair
 ```
 
 and remove `~/.pair` from the sandbox settings.
+
+A worktree deleted without `pair uninit --purge` leaves its channel and auto state behind. Run
+`pair prune` anywhere to delete those of every worktree that no longer exists (`--dry-run` lists
+them). It asks first, keeps any an auto session still holds, and lists channels it can't place:
+pair records a channel's worktree when `init` or `send` runs there, so older channels may have no
+record. A worktree on an unmounted volume also looks deleted, so read the list.
 
 <a id="8-environment"></a>
 <a id="9-environment"></a>

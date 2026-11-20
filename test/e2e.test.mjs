@@ -1090,7 +1090,7 @@ test("pair mcp writes nothing in the channel, so a channel swapped for a symlink
   try {
     assert.equal((await server.listen(thread)).isError, undefined);
     await until(() => calls().length === 1, "the message is delivered");
-    assert.deepEqual(readdirSync(channel).sort(), ["claude-to-codex", "codex.session"], "the listener left nothing in the channel");
+    assert.deepEqual(readdirSync(channel).sort(), ["claude-to-codex", "codex.session", "worktree"], "the listener left nothing in the channel");
 
     // An agent swaps its channel for a link to a directory it shouldn't be able to write.
     const elsewhere = join(root, "elsewhere");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -266,4 +266,217 @@ test("denied reset socket access gives terminal guidance without changing reques
   assert.match(result.out, /run pair reset in your own terminal, outside agent sandboxes/);
   assert.ok(existsSync(request));
   assert.ok(!existsSync(join(f.channel, "resets")));
+});
+
+const nameOf = (path) => `${basename(path)}-${createHash("sha1").update(path).digest("hex").slice(0, 8)}`;
+
+/** pair prune's view of a fixture: worktrees that sent a request (so their channel records them), and where things live. */
+function pruning(f) {
+  const home = f.env.PAIR_HOME;
+  const states = join(f.env.XDG_STATE_HOME, "pair");
+  const at = (cwd, args, input) => spawnSync(process.execPath, [CLI, ...args], { cwd, env: f.env, input, encoding: "utf8", timeout: 5000 });
+  const worktree = (name) => {
+    const dir = join(f.root, name);
+    mkdirSync(dir);
+    const sent = at(dir, ["send", "request", "--as", "claude", "-"], "req");
+    assert.equal(sent.status, 0, sent.stderr);
+    return { dir, name: nameOf(dir) };
+  };
+  const exists = (name) => existsSync(join(home, name)) || existsSync(join(states, name));
+  return { home, states, worktree, exists };
+}
+
+test("prune deletes only the channels and auto state of removed worktrees, after asking, and never one an auto session holds", async (t) => {
+  const f = fixture(t);
+  const { home, states, worktree, exists } = pruning(f);
+  const gone = worktree("gone");
+  const held = worktree("held");
+  const live = worktree("live");
+  mkdirSync(join(states, gone.name), { recursive: true });
+  writeFileSync(join(states, gone.name, "author.json"), "{}");
+  // Known only from auto mode's state, as before pair recorded it in the channel.
+  const stateOnly = join(f.root, "state-only");
+  mkdirSync(join(states, nameOf(stateOnly)), { recursive: true });
+  writeFileSync(join(states, nameOf(stateOnly), "auto.json"), JSON.stringify({ worktree: stateOnly }));
+  // No record, and a record that doesn't hash to its channel: both kept, listed by name.
+  mkdirSync(join(home, "legacy-0123abcd", "claude-to-codex"), { recursive: true });
+  mkdirSync(join(home, "liar-89abcdef"));
+  writeFileSync(join(home, "liar-89abcdef", "worktree"), `${gone.dir}\n`);
+  rmSync(gone.dir, { recursive: true });
+  rmSync(held.dir, { recursive: true });
+
+  const dry = f.ok(["prune", "--dry-run"]);
+  for (const [name, dir] of [[gone.name, gone.dir], [held.name, held.dir], [nameOf(stateOnly), stateOnly]]) assert.ok(dry.includes(`  ${name} (was ${dir})`), dry);
+  assert.match(dry, /kept 2 whose worktree pair doesn't know .*\n  legacy-0123abcd\n  liar-89abcdef\n$/);
+  assert.doesNotMatch(dry, new RegExp(live.name));
+  const unasked = f.run(["prune"]);
+  assert.equal(unasked.code, 1);
+  assert.match(unasked.out, /Pass --yes to delete them without asking/);
+  assert.ok([gone.name, held.name, nameOf(stateOnly)].every(exists), "nothing deleted without --yes or a terminal");
+
+  const previous = process.env.PAIR_AUTO_SOCKET_DIR;
+  process.env.PAIR_AUTO_SOCKET_DIR = f.socketDir;
+  try {
+    await withAutoStopped(join(states, held.name), async () => {
+      const { stdout } = await exec(process.execPath, [CLI, "prune", "--yes"], { cwd: f.root, env: f.env });
+      assert.ok(stdout.includes(`removed: ${gone.name} (was ${gone.dir})`), stdout);
+      assert.ok(stdout.includes(`removed: ${nameOf(stateOnly)} (was ${stateOnly})`), stdout);
+      assert.match(stdout, new RegExp(`kept: ${held.name}: cannot prune while auto mode`));
+    });
+  } finally {
+    if (previous === undefined) delete process.env.PAIR_AUTO_SOCKET_DIR;
+    else process.env.PAIR_AUTO_SOCKET_DIR = previous;
+  }
+  assert.ok(!exists(gone.name) && !exists(nameOf(stateOnly)));
+  assert.ok([held.name, live.name, "legacy-0123abcd", "liar-89abcdef"].every(exists));
+  assert.match(f.ok(["prune", "-y"]), new RegExp(`^removed: ${held.name} `));
+  assert.match(f.ok(["prune"]), /^no channel belongs to a removed worktree\nkept 2 /);
+  assert.ok(exists(live.name));
+  assert.match(f.run(["status", "--yes"]).out, /--yes is only supported by pair start and pair prune/);
+});
+
+test("prune asks on a terminal, shows names escaped, and keeps a worktree that came back while it asked", (t) => {
+  const f = fixture(t);
+  const { home, worktree } = pruning(f);
+  const back = worktree("back");
+  const bell = worktree("be\x07ll");
+  rmSync(back.dir, { recursive: true });
+  rmSync(bell.dir, { recursive: true });
+  // On a pty, answer y once the question shows, after putting the first worktree back.
+  const python = `
+import os, pty, subprocess, sys
+master, slave = pty.openpty()
+child = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, cwd=os.environ['TEST_CWD'])
+os.close(slave)
+output = b''
+answered = False
+while True:
+    try: chunk = os.read(master, 65536)
+    except OSError: break
+    if not chunk: break
+    output += chunk
+    if not answered and b'[y/N] ' in output:
+        os.mkdir(os.environ['RECREATE'])
+        os.write(master, b'y\\n')
+        answered = True
+child.wait()
+sys.stdout.buffer.write(output)
+`;
+  const shown = spawnSync("python3", ["-c", python, process.execPath, CLI, "prune"], { env: { ...f.env, TEST_CWD: f.root, RECREATE: back.dir }, encoding: "utf8", timeout: 10000 });
+  if (shown.error) return t.skip("python3 is unavailable");
+  assert.ok(!shown.stdout.includes("\x07"), "no raw control byte reaches the terminal, in the question's list either");
+  assert.match(shown.stdout, /\n  be\\x07ll-[0-9a-f]{8} \(was .*be\\x07ll\)/);
+  assert.match(shown.stdout, new RegExp(`kept: ${back.name}: its worktree is back`));
+  assert.match(shown.stdout, /removed: be\\x07ll-/);
+  assert.ok(existsSync(join(home, back.name)) && !existsSync(join(home, bell.name)));
+});
+
+test("prune trusts no record behind a symlink", (t) => {
+  const f = fixture(t);
+  const { home, states } = pruning(f);
+  const missing = join(f.root, "linked");
+  const name = nameOf(missing);
+  mkdirSync(join(states, name), { recursive: true });
+  const elsewhere = join(f.root, "elsewhere");
+  mkdirSync(join(elsewhere, "sessions"), { recursive: true });
+  writeFileSync(join(elsewhere, "worktree"), `${missing}\n`);
+  mkdirSync(home, { recursive: true });
+  symlinkSync(elsewhere, join(home, name));
+  // A real channel whose sessions directory is a link to the same records.
+  const other = join(f.root, "other");
+  mkdirSync(join(home, nameOf(other)));
+  writeFileSync(join(elsewhere, "sessions", "x.json"), JSON.stringify({ worktree: other }));
+  symlinkSync(join(elsewhere, "sessions"), join(home, nameOf(other), "sessions"));
+  const out = f.ok(["prune", "--yes"]);
+  assert.match(out, /^no channel belongs to a removed worktree\nkept 2 /);
+  assert.ok(existsSync(join(states, name)) && existsSync(join(elsewhere, "worktree")) && existsSync(join(home, nameOf(other))));
+});
+
+test("a failed prune leaves a record outside both directories, so the next one finds what remains", (t) => {
+  const f = fixture(t);
+  const { home, states, worktree } = pruning(f);
+  const marker = (name) => join(states, ".pruning", name);
+  // Known only from auto mode's state, and the channel can't be removed yet.
+  const stuck = join(f.root, "stuck");
+  const name = nameOf(stuck);
+  mkdirSync(join(states, name), { recursive: true });
+  writeFileSync(join(states, name, "auto.json"), JSON.stringify({ worktree: stuck }));
+  mkdirSync(join(home, name, "claude-to-codex"), { recursive: true });
+  chmodSync(join(home, name), 0o555);
+  t.after(() => { try { chmodSync(join(home, name), 0o755); } catch { /* removed */ } });
+  assert.match(f.ok(["prune", "--yes"]), new RegExp(`^kept: ${name} \\(its auto state was removed\\): `));
+  assert.ok(!existsSync(join(states, name)) && existsSync(marker(name)));
+  chmodSync(join(home, name), 0o755);
+  assert.match(f.ok(["prune", "--yes"]), new RegExp(`^removed: ${name} \\(was ${stuck}\\)`));
+  assert.ok(!existsSync(join(home, name)) && !existsSync(marker(name)));
+
+  // Known only from the channel's own record, and PAIR_HOME can't lose the emptied channel yet.
+  const emptied = worktree("emptied");
+  rmSync(emptied.dir, { recursive: true });
+  chmodSync(home, 0o555);
+  t.after(() => { try { chmodSync(home, 0o755); } catch { /* removed */ } });
+  const out = f.ok(["prune", "--yes"]);
+  assert.match(out, new RegExp(`^kept: ${emptied.name}: `));
+  assert.doesNotMatch(out, /its auto state was removed/, "it had none");
+  chmodSync(home, 0o755);
+  assert.match(f.ok(["prune", "--yes"]), new RegExp(`^removed: ${emptied.name} `));
+  assert.ok(!existsSync(join(home, emptied.name)) && !existsSync(marker(emptied.name)));
+
+  // State that can't be removed leaves the channel and its record alone.
+  const kept = worktree("kept");
+  rmSync(kept.dir, { recursive: true });
+  const state = join(states, kept.name);
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "auto.log"), "");
+  chmodSync(state, 0o555);
+  t.after(() => { try { chmodSync(state, 0o755); } catch { /* removed */ } });
+  assert.match(f.ok(["prune", "--yes"]), new RegExp(`^kept: ${kept.name}: `));
+  assert.equal(readFileSync(join(home, kept.name, "worktree"), "utf8"), `${kept.dir}\n`);
+  chmodSync(state, 0o755);
+  assert.match(f.ok(["prune", "--yes"]), new RegExp(`^removed: ${kept.name} `));
+});
+
+test("a channel swapped for a link while prune removes its state costs only the link", (t) => {
+  const f = fixture(t);
+  const { home, states, worktree } = pruning(f);
+  const swapped = worktree("swapped");
+  rmSync(swapped.dir, { recursive: true });
+  const state = join(states, swapped.name);
+  mkdirSync(state, { recursive: true });
+  const outside = join(f.root, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "keep"), "mine");
+  // Swap the channel for a link to someone else's directory right after prune removes the state.
+  const hook = join(f.root, "swap.cjs");
+  writeFileSync(hook, `
+const fs = require("node:fs");
+const rm = fs.rmSync;
+fs.rmSync = (path, options) => {
+  rm(path, options);
+  if (path === ${JSON.stringify(state)}) {
+    rm(${JSON.stringify(join(home, swapped.name))}, { recursive: true, force: true });
+    fs.symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(join(home, swapped.name))});
+  }
+};
+require("node:module").syncBuiltinESMExports();
+`);
+  const result = spawnSync(process.execPath, ["--require", hook, CLI, "prune", "--yes"], { cwd: f.root, env: f.env, encoding: "utf8", timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(`^removed: ${swapped.name} `));
+  assert.equal(readFileSync(join(outside, "keep"), "utf8"), "mine");
+  assert.throws(() => lstatSync(join(home, swapped.name)));
+});
+
+test("prune finds worktrees whose names end in a space or hold a newline", (t) => {
+  const f = fixture(t);
+  const { worktree } = pruning(f);
+  const spaced = worktree("checkout ");
+  const broken = worktree("check\nout");
+  rmSync(spaced.dir, { recursive: true });
+  rmSync(broken.dir, { recursive: true });
+  const dry = f.ok(["prune", "--dry-run"]);
+  assert.match(dry, /^2 belong/);
+  assert.ok(dry.includes(`  ${spaced.name} (was ${spaced.dir})`), dry);
+  assert.ok(dry.includes(`  check\\x0aout-${broken.name.slice(-8)} (was ${broken.dir.replace("\n", "\\x0a")})`), dry);
+  assert.match(f.ok(["prune", "--yes"]), /^removed: .*\nremoved: /);
 });

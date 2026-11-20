@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `pair prune` deletes the channel and auto state of each worktree that no longer exists, for
+  worktrees removed without `pair uninit --purge`. It asks first (`--yes` skips the question,
+  `--dry-run` only lists them) and keeps any an auto session still holds. Pair now records a
+  channel's worktree when `init` or `send` runs there; prune also reads auto mode's state, Codex
+  registrations and resets, and lists the channels it can't place.
+
 ## 0.10.1 (2026-11-18)
 
 - With `--serve-worktrees`, an owner killed just as it claimed a subagent worktree's socket could
