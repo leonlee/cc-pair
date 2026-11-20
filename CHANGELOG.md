@@ -1,21 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 (2026-11-20)
 
 - `pair prune` deletes the channel and auto state of each worktree that no longer exists, for
   worktrees removed without `pair uninit --purge`. It asks first (`--yes` skips the question,
   `--dry-run` only lists them), takes name patterns to delete only some (`pair prune 'old-*'`),
-  and keeps any an auto session still holds. Pair now records a
-  channel's worktree when `init` or `send` runs there; prune also reads auto mode's state, Codex
-  registrations and resets, and lists the channels it can't place.
-
-## 0.10.1 (2026-11-18)
-
+  and keeps any an auto session still holds. Pair now records a channel's worktree when `init` or
+  `send` runs there; prune also reads auto mode's state, Codex registrations and resets, and lists
+  the channels it can't place.
 - With `--serve-worktrees`, an owner killed just as it claimed a subagent worktree's socket could
   leave that socket behind, blocking later starts there: its guardian learned of the claim only
   after the claim's checks. The owner now binds a claim only once its guardian confirms it recorded
-  it, and after the owner dies, the guardian removes a claimed socket only if nothing listens there,
-  so it never removes another session's.
+  it, and after the owner dies, the guardian probes the claimed sockets and removes only those that
+  refuse connections.
 - `send` and `wait` refresh each stale instruction file on its own: a `SKILL.md` they can't write,
   for example from a sandboxed Claude Code command, which may not write `.claude/skills`, no longer
   keeps `AGENTS.md` stale. The note names each file and its error.
