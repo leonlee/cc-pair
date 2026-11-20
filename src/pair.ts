@@ -62,6 +62,7 @@ const REVIEWER_COMMANDS = ["wait", "send", "status", "history"];
 const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
+const WORKTREE_FILE = "worktree"; // the worktree a channel serves, so pair prune can tell when it's gone
 const LISTEN_LOG = "codex.listen.log";
 const LISTEN_LOG_MAX_BYTES = 256 * 1024; // then it becomes codex.listen.log.1, replacing the previous one
 const CLAIM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -400,8 +401,16 @@ async function confirm(question: string, emptyMeans = true): Promise<boolean> {
 function channelDir(root: string): string {
   // One channel per worktree: a reviewer reads the author's files, so both must share a checkout.
   // realpath so /tmp/x and /private/tmp/x (or any symlinked checkout) share one channel.
-  const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
-  return join(pairHome(root), `${basename(root)}-${hash}`);
+  return join(pairHome(root), channelName(root));
+}
+
+function channelName(root: string): string {
+  return `${basename(root)}-${createHash("sha1").update(root).digest("hex").slice(0, 8)}`;
+}
+
+/** Best effort: without the record, pair prune only can't tell when this worktree is gone. An existing one stays. */
+function recordWorktree(channel: string, root: string): void {
+  try { writeChannelFile(join(channel, WORKTREE_FILE), `${root}\n`, constants.O_EXCL); } catch { /* exists, or not writable */ }
 }
 
 function parseFrontmatter(text: string): { fields: Record<string, string>; body: string } {
@@ -2185,6 +2194,7 @@ function codexSection(): string {
 
 function init(channel: string, root: string): string {
   channelAccess(channel, () => mkdirSync(channel, { recursive: true }));
+  recordWorktree(channel, root);
 
   // Current files keep their stamp too: a newer pair may have written the same text.
   const kept = (state: string): string | undefined =>
@@ -2348,6 +2358,116 @@ function uninit(channel: string, root: string, purge: boolean): string {
   );
   const summary = removed.length > 0 ? removed.map((item) => `removed: ${item}`) : [`nothing from pair init found in ${root}`];
   return [...summary, ...notes].join("\n");
+}
+
+/** A channel, or auto mode's state for one, whose worktree pair knows from a record. */
+interface RecordedChannel {
+  name: string;
+  worktree: string;
+}
+
+const CHANNEL_NAME = /^[\s\S]+-[0-9a-f]{8}$/;
+
+/** Where prune records a worktree it's deleting, until both its directories are gone: in the state home, beside them. */
+function pruneMarker(state: string): string {
+  return join(dirname(state), ".pruning", basename(state));
+}
+
+/** A directory itself, not a link to one: a record behind a link doesn't count. */
+function isRealDirectory(path: string): boolean {
+  try { return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false; } catch { return false; }
+}
+
+/** Every control byte escaped, newlines too: a crafted name or path can't fake another entry or drive the terminal. */
+function oneLine(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f-\x9f]/g, (char) => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+/**
+ * The worktree a channel served, from any record of it: an unfinished prune's, the channel's own, auto mode's state,
+ * a Codex registration or a reset. Agents can write the channel, so a path counts only if it still hashes to the channel's name.
+ */
+function recordedWorktree(name: string, channel: string, state: string): string | undefined {
+  const read = (path: string): string | undefined => { try { return readRegularFile(path, { max: 64 * 1024 }); } catch { return undefined; } };
+  const files = (dir: string): string[] => {
+    if (!isRealDirectory(dir)) return [];
+    try { return readdirSync(dir).map((entry) => join(dir, entry)); } catch { return []; }
+  };
+  const field = (text: string | undefined): string | undefined => {
+    try {
+      const value = text === undefined ? undefined : (JSON.parse(text) as { worktree?: unknown } | null)?.worktree;
+      return typeof value === "string" ? value : undefined;
+    } catch { return undefined; }
+  };
+  const own = isRealDirectory(channel);
+  const records = [
+    ...(isRealDirectory(dirname(pruneMarker(state))) ? [pruneMarker(state)] : []),
+    ...(isRealDirectory(state) ? [join(state, "auto.json"), join(state, "author.json")] : []),
+    ...(own ? [join(channel, SESSION_FILE), ...files(join(channel, "sessions")), ...files(join(channel, "resets")).filter(isRealDirectory).map((dir) => join(dir, "reset.json"))] : []),
+  ];
+  const recorded = own ? read(join(channel, WORKTREE_FILE)) : undefined;
+  return [recorded?.endsWith("\n") ? recorded.slice(0, -1) : recorded, ...records.map((path) => field(read(path)))]
+    .find((path) => path !== undefined && isAbsolute(path) && channelName(path) === name);
+}
+
+/** Only a missing path is gone: one pair can't stat (permissions, say) may still be there. */
+function isGone(path: string): boolean {
+  try { return lstatSync(path, { throwIfNoEntry: false }) === undefined; } catch { return false; }
+}
+
+/** pair prune: delete the channels and auto state of worktrees that no longer exist, under this PAIR_HOME. */
+async function pruneRemoved(home: string, dryRun: boolean, yes: boolean): Promise<string> {
+  const named = (dir: string, isEntry: (entry: Dirent) => boolean): string[] => readdirOrEmpty(dir)
+    .filter((entry) => isEntry(entry) && CHANNEL_NAME.test(entry.name)).map((entry) => entry.name);
+  const markers = dirname(pruneMarker(join(stateHome(), "x")));
+  const names = new Set([...named(home, (entry) => entry.isDirectory()), ...named(stateHome(), (entry) => entry.isDirectory()),
+    ...(isRealDirectory(markers) ? named(markers, (entry) => entry.isFile()) : [])]);
+  const gone: RecordedChannel[] = [];
+  const unknown: string[] = [];
+  for (const name of [...names].sort()) {
+    const worktree = recordedWorktree(name, join(home, name), join(stateHome(), name));
+    if (worktree === undefined) unknown.push(name);
+    else if (isGone(worktree)) gone.push({ name, worktree });
+  }
+  const unknownNote = unknown.length === 0 ? [] : [
+    `kept ${unknown.length} whose worktree pair doesn't know (they predate its record); check them by name:`,
+    ...unknown.map((name) => `  ${oneLine(name)}`),
+  ];
+  if (gone.length === 0) return ["no channel belongs to a removed worktree", ...unknownNote].join("\n");
+  const list = [`${gone.length} belong to worktrees that no longer exist:`, ...gone.map(({ name, worktree }) => `  ${oneLine(name)} (was ${oneLine(worktree)})`)];
+  if (dryRun) return [...list, ...unknownNote].join("\n");
+  if (!yes) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new PairError([...list, "Pass --yes to delete them without asking."].join("\n"));
+    console.log(list.join("\n"));
+    if (!(await confirm("Delete their message history and auto mode state? [y/N] ", false))) return "nothing deleted";
+  }
+  const results: string[] = [];
+  for (const { name, worktree } of gone) {
+    const channel = join(home, name);
+    const state = stateDir(channel);
+    let stateRemoved = false;
+    try {
+      // The lock refuses while an auto session still runs there or serves it.
+      await withAutoStopped(state, () => {
+        // Checked again under the lock: the worktree may be back since the list, say while the question was open.
+        if (recordedWorktree(name, channel, state) !== worktree || !isGone(worktree)) throw new PairError("its worktree is back, or its record changed");
+        // A record outside both targets, where agents can't write, until both are gone: whatever a failure leaves,
+        // the next prune finds. Each target goes whole, so a link swapped in for one is unlinked, never followed.
+        const marker = pruneMarker(state);
+        mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
+        writeChannelFile(marker, JSON.stringify({ worktree }), constants.O_TRUNC);
+        const hadState = !isGone(state);
+        rmSync(state, { recursive: true, force: true });
+        stateRemoved = hadState;
+        rmSync(channel, { recursive: true, force: true });
+        rmSync(marker, { force: true });
+      }, "prune");
+      results.push(`removed: ${oneLine(name)} (was ${oneLine(worktree)})`);
+    } catch (error) {
+      results.push(`kept: ${oneLine(name)}${stateRemoved ? " (its auto state was removed)" : ""}: ${oneLine(errorMessage(error))}`);
+    }
+  }
+  return [...results, ...unknownNote].join("\n");
 }
 
 interface OsProcess {
@@ -2560,6 +2680,7 @@ const USAGE = `usage:
   pair init
   pair upgrade                                        (install the latest pair from npm, then refresh this worktree)
   pair uninit [--purge]                               (undo pair init here; --purge also deletes history)
+  pair prune [--dry-run] [--yes]                      (delete the channels of worktrees that no longer exist)
   pair register | unregister [--as NAME]              (in Codex's shell: let pair_listen notify this session)
   pair mcp                                            (stdio MCP server for Codex, providing pair_listen)
   pair ps [-v]                                        (running pair processes, including auto owners, by worktree; -v: full commands)
@@ -2738,6 +2859,18 @@ changed it), and the Codex session registration. Message history is kept.
   --purge   also delete this worktree's channel (message history) and auto mode's state (the
             resume record and log). Refused while an auto session runs here or serves this
             worktree; stop any agents waiting on the channel first.`,
+  prune: `usage: pair prune [--dry-run] [--yes]
+
+Delete the channel (message history) and auto mode's state of each worktree that no longer exists,
+for worktrees removed without pair uninit --purge. Run it anywhere; it covers this shell's PAIR_HOME.
+Pair records a channel's worktree when init or send runs there; it lists older channels it can't
+place, for you to check by name. A worktree on an unmounted volume also looks removed, so read the
+list first. It asks before deleting, and keeps a channel while an auto session runs in or serves
+its worktree.
+
+options:
+  --dry-run                    list them without deleting anything
+  -y, --yes                    delete without asking (needed when stdin isn't a terminal)`,
   help: HELP,
   register: REGISTER_HELP,
   unregister: REGISTER_HELP,
@@ -2773,11 +2906,10 @@ async function main(argv: string[]): Promise<number> {
     console.log(topic ? COMMAND_HELP[topic] : HELP);
     return 0;
   }
-  if (values["dry-run"] && command !== "reset") throw new PairError("--dry-run is only supported by pair reset");
+  if (values["dry-run"] && command !== "reset" && command !== "prune") throw new PairError("--dry-run is only supported by pair reset and pair prune");
   if (values.purge && command !== "uninit") throw new PairError("--purge is only supported by pair uninit");
-  if ((values.yes || values.resume) && command !== "start") {
-    throw new PairError(`${values.yes ? "--yes" : "--resume"} is only supported by pair start`);
-  }
+  if (values.yes && command !== "start" && command !== "prune") throw new PairError("--yes is only supported by pair start and pair prune");
+  if (values.resume && command !== "start") throw new PairError("--resume is only supported by pair start");
   if (values.worktree !== undefined && command !== "start") {
     throw new PairError("--worktree is only supported by pair start");
   }
@@ -3090,6 +3222,7 @@ async function main(argv: string[]): Promise<number> {
         const body = readBody(rest[1]);
         const partner = partnerFor(me, type);
         console.log(`sent: ${channelAccess(channel, () => send(channel, me, partner, type, body, verdict, values.brainstorm))}`);
+        recordWorktree(channel, root);
         if (type !== "review" && await managedReview(me) && !(await wait(channel, me, 1, sessionLane(me)))) {
           throw new PairError("the managed review finished, but another pair wait already took it; run pair history to read it");
         }
@@ -3130,6 +3263,10 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       case "clean":
         console.log(channelAccess(channel, () => clean(channel, values.keep)));
+        return 0;
+      case "prune":
+        if (rest.length) throw new PairError("prune accepts no positional arguments");
+        console.log(forTerminal(await pruneRemoved(pairHome(root), values["dry-run"] ?? false, values.yes ?? false)));
         return 0;
       case "reset": {
         if (rest.length) throw new PairError("reset accepts no positional arguments; use --as NAME to select the lanes NAME authored");
