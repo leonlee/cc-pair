@@ -584,6 +584,11 @@ Each worktree has its own channel, so pairs in different worktrees run in parall
 each other's messages. The author and reviewer MUST run in the same worktree, since the reviewer
 reads the author's files.
 
+In manual mode, a request sent from a worktree where its reviewer neither waits nor is registered,
+while it does in another worktree of the repository, prints a warning naming that worktree: an
+author working in a separate worktree probably sent from there by mistake. `pair wait` marks its
+channel while it runs, which is how pair can tell, and `pair status` shows who is waiting.
+
 In auto mode, `--worktree NAME` runs the session in the git worktree `../<repo>-NAME` (slashes
 become dashes):
 
@@ -642,8 +647,8 @@ pair help [command]          # same as pair <command> --help
 ```
 
 `pair status` reports the channel, the worktree, the version, each lane's state (the two default
-lanes, and any other lane in the channel), the instruction files on disk, the Codex registrations and
-the auto session:
+lanes, and any other lane in the channel), the instruction files on disk, the Codex registrations,
+who runs a manual `pair wait` there, and the auto session:
 
 ```
 channel: /Users/you/.pair/your-repo-12345678
@@ -655,6 +660,7 @@ instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
   .claude/skills/pair/SKILL.md: current
 codex notifications: no session registered
+waiting: nobody
 auto mode: claude author, codex reviewer · reviewing · owner 41820 · pair 0.10.0
   author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
   reviewer for new threads: model gpt-6.1-sol · effort high
