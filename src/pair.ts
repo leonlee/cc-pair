@@ -63,6 +63,9 @@ const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; // any UUID version; Codex uses v7
 const SESSION_FILE = "codex.session"; // the Codex session that pair_listen may notify, per channel
 const WORKTREE_FILE = "worktree"; // the worktree a channel serves, so pair prune can tell when it's gone
+const WAITING_DIR = "waiting"; // a mark per manual pair wait in progress, so send and status can tell who listens
+const WAITER_HEARTBEAT_MS = 30_000;
+const WAITER_STALE_MS = 90_000; // a mark not rewritten for this long is a wait that was killed, or a machine asleep
 const LISTEN_LOG = "codex.listen.log";
 const LISTEN_LOG_MAX_BYTES = 256 * 1024; // then it becomes codex.listen.log.1, replacing the previous one
 const CLAIM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -769,6 +772,98 @@ async function wait(channel: string, me: Agent, timeoutSeconds: number, scope?: 
     }
     await sleep(POLL_MS);
   }
+}
+
+/** A manual pair wait in progress, from its mark in the channel. */
+interface Waiter {
+  name: Agent;
+  pid: number;
+  since: string;
+}
+
+/**
+ * Marks this channel while a manual pair wait runs, rewriting the mark so it stays fresh; returns its removal.
+ * Best effort: only send's hint and status read it, so any failure just lets the mark expire. A wait never creates
+ * the channel. The mark's path is predictable in a directory agents can write, so pair never opens what is there
+ * (a FIFO would block, a hard link would truncate another file): each write is a new file renamed into place.
+ */
+function markWaiting(channel: string, name: Agent): () => void {
+  const dir = join(channel, WAITING_DIR);
+  const mark = join(dir, `${name}.${process.pid}`);
+  const since = new Date().toISOString();
+  const write = (): void => {
+    if (!isRealDirectory(channel) || !isRealDirectory(dir)) throw new PairError(`${dir} isn't a real directory`);
+    const temp = join(dir, `.${name}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+    writeChannelFile(temp, `${JSON.stringify({ since })}\n`, constants.O_EXCL);
+    try {
+      renameSync(temp, mark);
+    } catch (error) {
+      rmSync(temp, { force: true });
+      throw error;
+    }
+  };
+  try {
+    if (!isRealDirectory(channel)) return () => {};
+    try { mkdirSync(dir); } catch (error) { if (!hasCode(error, "EEXIST")) throw error; }
+    write();
+  } catch {
+    return () => {};
+  }
+  const beat = setInterval(() => {
+    try { write(); } catch { /* gone, swapped or unwritable: the mark expires */ }
+  }, WAITER_HEARTBEAT_MS);
+  beat.unref();
+  return () => {
+    clearInterval(beat);
+    try {
+      if (isRealDirectory(channel) && isRealDirectory(dir)) rmSync(mark, { force: true });
+    } catch { /* the mark expires */ }
+  };
+}
+
+/** The manual waits in progress on a channel: a mark counts while its waiter keeps rewriting it. */
+function liveWaiters(channel: string): Waiter[] {
+  const dir = join(channel, WAITING_DIR);
+  if (!isRealDirectory(dir)) return [];
+  return readdirSync(dir).flatMap((entry): Waiter[] => {
+    const dot = entry.lastIndexOf(".");
+    const name = entry.slice(0, dot);
+    const pid = entry.slice(dot + 1);
+    if (dot < 0 || !NAME.test(name) || !/^\d{1,10}$/.test(pid)) return [];
+    try {
+      const stats = lstatSync(join(dir, entry));
+      if (!stats.isFile() || Date.now() - stats.mtimeMs > WAITER_STALE_MS) return [];
+      const since = (JSON.parse(readRegularFile(join(dir, entry), { max: 4096, single: true })) as { since?: unknown } | null)?.since;
+      return [{ name, pid: Number(pid), since: typeof since === "string" ? since : new Date(stats.birthtimeMs).toISOString() }];
+    } catch {
+      return [];
+    }
+  }).sort((a, b) => a.name.localeCompare(b.name) || a.pid - b.pid);
+}
+
+/**
+ * Whether a participant listens on a channel: a manual wait in progress, or a valid Codex registration that pair_listen
+ * notifies. Anything unreadable or corrupt counts as not listening.
+ */
+function listensOn(channel: string, name: Agent): boolean {
+  if (!isRealDirectory(channel)) return false;
+  try {
+    return liveWaiters(channel).some((waiter) => waiter.name === name) || readRegistration(channel, name) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A request sent where its reviewer doesn't listen, while it listens in another worktree of this repository, most
+ * likely went to the wrong checkout: an agent working in its own worktree sent from there.
+ */
+function elsewhereWarning(root: string, channel: string, partner: Agent): string | undefined {
+  if (listensOn(channel, partner)) return undefined;
+  const elsewhere = otherWorktrees(root).filter((worktree) => listensOn(channelDir(worktree), partner));
+  if (elsewhere.length === 0) return undefined;
+  return `pair: warning: ${partner} doesn't wait or get notified on this worktree's channel, but does on the one for ${elsewhere.join(", ")}. `
+    + `If a ${partner} session there is to review this, the request won't reach it: send it from that worktree instead, naming this one in the request.`;
 }
 
 interface Registration {
@@ -1644,6 +1739,12 @@ function notificationStatus(channel: string): string[] {
   return [...registrations.map((line) => `codex notifications: ${line}`), ...(lastEvent ? [`  last listener event: ${lastEvent}`] : [])];
 }
 
+/** Who runs a manual pair wait on this channel right now. */
+function waitingStatus(channel: string): string[] {
+  const waiters = liveWaiters(channel);
+  return waiters.length === 0 ? ["waiting: nobody"] : waiters.map((waiter) => `waiting: ${waiter.name} since ${waiter.since} (pid ${waiter.pid})`);
+}
+
 /** `served`: another worktree's auto session serves this one, so its agents don't need pair's files here. */
 /** pair status --json: the same facts as the text, for scripts; `auto.mode` is running, served, stopped or unavailable. */
 async function statusJson(channel: string, root: string): Promise<string> {
@@ -1658,6 +1759,7 @@ async function statusJson(channel: string, root: string): Promise<string> {
       agents: instructionState(root, join(root, "AGENTS.md"), codexSection(), true),
       skill: instructionState(root, join(root, ".claude", "skills", "pair", "SKILL.md"), claudeSkill()),
     },
+    waiting: channelAccess(channel, () => liveWaiters(channel)),
     auto: await autoState(stateDir(channel)),
   }, null, 2);
 }
@@ -1680,6 +1782,7 @@ function status(channel: string, root: string, served = false): string {
     `  AGENTS.md (pair section): ${agents}`,
     `  .claude/skills/pair/SKILL.md: ${skill}`,
     ...channelAccess(channel, () => notificationStatus(channel)),
+    ...channelAccess(channel, () => waitingStatus(channel)),
     ...(served
       ? ["This worktree is served by another worktree's auto session, which gives its agents pair's rules: don't run pair init here."]
       : agents === "missing" || agents === "stale" || skill === "missing" || skill === "stale"
@@ -3260,8 +3363,11 @@ async function main(argv: string[]): Promise<number> {
         }
         const body = readBody(rest[1]);
         const partner = partnerFor(me, type);
+        // Judged before sending: a waiter here may take the request and leave at once.
+        const misdirected = type === "request" && !process.env.PAIR_AUTO_ROLE ? elsewhereWarning(root, channel, partner) : undefined;
         console.log(`sent: ${channelAccess(channel, () => send(channel, me, partner, type, body, verdict, values.brainstorm))}`);
         recordWorktree(channel, root);
+        if (misdirected) console.error(forTerminal(misdirected, process.stderr));
         if (type !== "review" && await managedReview(me) && !(await wait(channel, me, 1, sessionLane(me)))) {
           throw new PairError("the managed review finished, but another pair wait already took it; run pair history to read it");
         }
@@ -3276,7 +3382,15 @@ async function main(argv: string[]): Promise<number> {
         // An auto author's replies come back with its pair send. An extra wait doesn't idle, and it leaves a final
         // verdict in the lane for that send (or the next request) to archive, so it can't take the send's reply.
         const autoAuthor = process.env.PAIR_AUTO_ROLE === "author" && Boolean(process.env.PAIR_AUTO_RUN);
-        if (!(await wait(channel, me, autoAuthor ? 0 : timeout, sessionLane(me), !autoAuthor))) {
+        // Only manual waits listen for a partner; auto mode delivers its rounds itself.
+        const unmark = process.env.PAIR_AUTO_ROLE ? () => {} : markWaiting(channel, me);
+        let delivered: boolean;
+        try {
+          delivered = await wait(channel, me, autoAuthor ? 0 : timeout, sessionLane(me), !autoAuthor);
+        } finally {
+          unmark();
+        }
+        if (!delivered) {
           if (autoAuthor) {
             console.log(`pair: no message for ${me} yet. In auto mode pair send returns the review itself; pair wait only retries a failed review.`);
             return 0;

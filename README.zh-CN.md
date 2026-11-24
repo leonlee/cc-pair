@@ -276,6 +276,8 @@ pair start claude --serve-worktrees --reviewers 2
 
 每个 worktree 有自己的通道，不同 worktree 里的 pair 互不干扰。作者和审查者必须在同一个 worktree 里运行。
 
+手动模式下，如果请求是从审查者没在等待、也没注册的 worktree 发出的，而审查者在这个仓库的另一个 worktree 里等着，`pair send` 会给出警告并指出那个 worktree：多半是作者在自己的 worktree 里干活，从那里发错了。`pair wait` 运行时会在通道里留标记，pair 靠它判断；`pair status` 也会显示谁在等。
+
 自动模式下，`--worktree NAME` 在 `../<repo>-NAME` 运行（斜杠变成短横线）：
 
 - 路径不存在时，pair 用 `git worktree add` 在分支 `NAME` 上创建它：已有本地分支就检出，只在远端有就跟踪远端，否则从 `HEAD` 新建。
@@ -326,6 +328,7 @@ instructions on disk (does not verify what running agents loaded):
   AGENTS.md (pair section): current
   .claude/skills/pair/SKILL.md: current
 codex notifications: no session registered
+waiting: nobody
 auto mode: claude author, codex reviewer · idle · owner 41820 · pair 0.10.0
   author session: 3f6c2a1e-5b7d-4c1f-9a2e-0d8b4e6f1a73 (resumed)
   reviewer for new threads: model gpt-6.1-sol · effort high

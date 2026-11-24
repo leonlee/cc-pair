@@ -777,6 +777,126 @@ test("a timeout and a delivery are told apart by the first output line, not by t
   assert.match(delivered.split("\n")[0], /^== pair: request from claude/, "a delivery always starts with the header");
 });
 
+test("a manual wait marks its channel while it runs, and status shows who waits", async () => {
+  const { root, env, ok } = sandbox();
+  ok(["wait", "--as", "claude", "--timeout", "1"]);
+  assert.equal(existsSync(join(env.PAIR_HOME)), false, "a wait never creates the channel");
+  ok(["init"]);
+  const channel = channelOf(ok);
+  assert.match(ok(["status"]), /^waiting: nobody$/m);
+  const marks = () => { try { return readdirSync(join(channel, "waiting")).sort(); } catch { return []; } };
+  const waiter = spawn("node", [CLI, "wait", "--as", "claude", "--timeout", "30"], { cwd: root, env, stdio: "ignore" });
+  const exited = new Promise((resolve) => waiter.once("exit", resolve));
+  await until(() => marks().length === 1, "the wait leaves a mark");
+  assert.deepEqual(marks(), [`claude.${waiter.pid}`]);
+  assert.match(ok(["status"]), new RegExp(`^waiting: claude since \\S+ \\(pid ${waiter.pid}\\)$`, "m"));
+  assert.deepEqual(JSON.parse(ok(["status", "--json"])).waiting.map(({ name, pid }) => [name, pid]), [["claude", waiter.pid]]);
+  // A mark nobody touched for long is a wait that was killed: it doesn't count.
+  const stale = join(channel, "waiting", "codex.4242");
+  writeFileSync(stale, "{}");
+  utimesSync(stale, new Date(Date.now() - 120_000), new Date(Date.now() - 120_000));
+  assert.doesNotMatch(ok(["status"]), /waiting: codex/);
+  ok(["send", "request", "--as", "codex", "-"], "for claude");
+  await exited;
+  assert.deepEqual(marks(), ["codex.4242"], "a wait removes its own mark when it returns");
+  assert.match(ok(["status"]), /^waiting: nobody$/m);
+  ok(["send", "review", "--as", "claude", "--verdict", "approve", "-"], "done");
+
+  // Whatever an agent planted at the mark's path is replaced, never opened: a FIFO doesn't block, a hard link keeps its file.
+  const victim = join(root, "victim");
+  writeFileSync(victim, "keep");
+  for (const plant of [`mkfifo "${join(channel, "waiting")}/claude.$$"`, `ln "${victim}" "${join(channel, "waiting")}/claude.$$"`]) {
+    const planted = spawnSync("/bin/sh", ["-c", `${plant} && exec node "${CLI}" wait --as claude --timeout 1`], { cwd: root, env, encoding: "utf8", timeout: 10_000 });
+    assert.equal(planted.status, 0, `${plant}: ${planted.stderr}`);
+    assert.match(planted.stdout, /^pair: no message for claude yet\./);
+  }
+  assert.equal(readFileSync(victim, "utf8"), "keep");
+
+  // A mark that can't be removed expires; it doesn't fail a delivered wait.
+  const stuck = spawn("node", [CLI, "wait", "--as", "claude", "--timeout", "30"], { cwd: root, env, stdio: "ignore" });
+  const stuckExit = new Promise((resolve) => stuck.once("exit", resolve));
+  await until(() => marks().includes(`claude.${stuck.pid}`), "the second wait leaves a mark");
+  chmodSync(join(channel, "waiting"), 0o555);
+  try {
+    ok(["send", "request", "--as", "codex", "-"], "again for claude");
+    assert.equal(await stuckExit, 0, "delivered, so the wait succeeds");
+  } finally {
+    chmodSync(join(channel, "waiting"), 0o755);
+  }
+});
+
+test("a request sent where its reviewer doesn't listen, but does in another worktree, warns", async () => {
+  const { root, env } = sandbox();
+  const main = join(root, "main");
+  const linked = join(root, "linked");
+  mkdirSync(main);
+  const git = (cwd, ...args) => {
+    const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git(main, "init", "-q");
+  git(main, "commit", "-q", "--allow-empty", "-m", "base");
+  git(main, "worktree", "add", "-q", linked);
+  const at = (cwd, args, input) => spawnSync("node", [CLI, ...args], { cwd, env, input, encoding: "utf8" });
+  assert.equal(at(main, ["init"]).status, 0);
+  const marked = () => { try { return readdirSync(join(at(main, ["status"]).stdout.split("\n")[0].replace("channel: ", ""), "waiting")).length > 0; } catch { return false; } };
+
+  let sent = at(linked, ["send", "request", "--as", "codex", "-"], "nobody listens anywhere");
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.doesNotMatch(sent.stderr, /warning/);
+  assert.equal(at(linked, ["reset", "--as", "codex"]).status, 0);
+
+  const waiter = spawn("node", [CLI, "wait", "--as", "claude", "--timeout", "30"], { cwd: main, env, stdio: "ignore" });
+  const exited = new Promise((resolve) => waiter.once("exit", resolve));
+  await until(marked, "claude waits in the main worktree");
+  sent = at(linked, ["send", "request", "--as", "codex", "-"], "sent from the wrong checkout");
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.ok(sent.stderr.includes(`pair: warning: claude doesn't wait or get notified on this worktree's channel, but does on the one for ${realpathSync(main)}.`), sent.stderr);
+  assert.match(sent.stderr, /send it from that worktree instead, naming this one in the request\.$/m);
+  assert.doesNotMatch(sent.stderr, /reset/, "no advice that would also clear unrelated lanes");
+
+  sent = at(main, ["send", "request", "--as", "codex", "-"], "sent where claude waits");
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.doesNotMatch(sent.stderr, /warning/);
+  await exited;
+  assert.equal(at(main, ["send", "review", "--as", "claude", "--verdict", "approve", "-"], "done").status, 0);
+  assert.equal(at(main, ["wait", "--as", "codex", "--timeout", "1"]).status, 0);
+  assert.equal(at(linked, ["reset", "--as", "codex"]).status, 0);
+
+  // Judged before sending: a waiter here that takes the request at once and leaves doesn't make it look misdirected.
+  const channelAt = (cwd) => at(cwd, ["status"]).stdout.split("\n")[0].replace("channel: ", "");
+  const hook = join(root, "slow-send.cjs");
+  writeFileSync(hook, `
+const fs = require("node:fs");
+const rename = fs.renameSync;
+fs.renameSync = (from, to) => {
+  rename(from, to);
+  if (String(to).endsWith("-request.md")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+};
+require("node:module").syncBuiltinESMExports();
+`);
+  const waiters = [main, linked].map((cwd) => spawn("node", [CLI, "wait", "--as", "claude", "--timeout", "30"], { cwd, env, stdio: "ignore" }));
+  const waitersExited = waiters.map((waiter) => new Promise((resolve) => waiter.once("exit", resolve)));
+  await until(() => [main, linked].every((cwd) => { try { return readdirSync(join(channelAt(cwd), "waiting")).length > 0; } catch { return false; } }), "claude waits in both worktrees");
+  sent = spawnSync("node", ["--require", hook, CLI, "send", "request", "--as", "codex", "-"], { cwd: linked, env, input: "taken at once", encoding: "utf8" });
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.doesNotMatch(sent.stderr, /warning/);
+  await waitersExited[1];
+  waiters[0].kill();
+  await waitersExited[0];
+
+  // A corrupt registration here isn't a listener: codex waiting in the main worktree still gets named.
+  writeFileSync(join(channelAt(linked), "codex.session"), "{ not json");
+  const codexWaits = spawn("node", [CLI, "wait", "--as", "codex", "--timeout", "30"], { cwd: main, env, stdio: "ignore" });
+  const codexExited = new Promise((resolve) => codexWaits.once("exit", resolve));
+  await until(() => { try { return readdirSync(join(channelAt(main), "waiting")).some((mark) => mark.startsWith("codex.")); } catch { return false; } }, "codex waits in the main worktree");
+  sent = at(linked, ["send", "request", "--as", "claude", "-"], "for codex");
+  assert.equal(sent.status, 0, sent.stderr);
+  assert.ok(sent.stderr.includes(`pair: warning: codex doesn't wait or get notified on this worktree's channel, but does on the one for ${realpathSync(main)}.`), sent.stderr);
+  codexWaits.kill();
+  await codexExited;
+});
+
 test("each git worktree gets its own channel, so parallel pairs stay isolated", () => {
   const { root, env } = sandbox();
   const main = join(root, "main");

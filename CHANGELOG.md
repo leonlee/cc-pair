@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- In manual mode, `pair send request` warns when the reviewer doesn't wait or get notified on this
+  worktree's channel but does on another worktree's of the same repository, naming it: an author
+  working in its own worktree sent from there by mistake, so the request never reached its
+  reviewer. `pair wait` now marks its channel while it runs (refreshed every 30 seconds; a mark
+  older than 90 seconds doesn't count), and `pair status` shows who is waiting (`waiting:`, and
+  `waiting` in `--json`).
+
 ## 0.11.0 (2026-11-20)
 
 - `pair prune` deletes the channel and auto state of each worktree that no longer exists, for
